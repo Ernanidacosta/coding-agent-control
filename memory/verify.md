@@ -2,25 +2,26 @@
 
 ## Required Checks
 
-- [x] `bats tests/` — 231/231 passed, including provider, trust, Risk, and prior regressions.
-- [x] The exact CI ShellCheck target set passed locally with the explicit conditional fix.
-- [x] Pre-commit verification passed with the modified-anchor condition visible as a non-final `verifying` warning.
+- [x] Focused UX tests cover standalone installs and capability timing.
+- [x] `bats tests/` passes with all prior trust and enforcement regressions.
+- [x] ShellCheck, JSON/TOML validation, alias sync, and `git diff --check` pass.
 
 ## Runtime Evidence
 
-- [x] GitHub Actions run `34279255376` was bound to child SHA `28ca69a` and exposed the SC2015 portability defect.
-- [x] The verifier rejected that failed run with exit 1 and emitted no passing attestation.
-- [ ] The later claim-only child commit receives `completed/success` CI for its exact SHA.
+- [x] Fresh install works without ICM, `gh`, CI, or attestation configuration.
+- [x] Doctor distinguishes configured, available, required now, blocking now,
+  effect, and recovery without executing providers.
+- [x] Claude/Codex and installer smoke tests remain green.
 
 ## Task-Specific Criteria
 
-- [x] Replaced the SC2015-prone boolean chain with an equivalent explicit conditional.
-- [x] Missing or `null` workflow references remain fail-closed.
-- [x] No workflow, provider contract, Risk, or trust policy was weakened.
-- [x] Committed the corrected verifier as checkpoint `240637b` before the later attestation attempt.
+- [x] Quickstart and curl fallback install this fork, not upstream.
+- [x] Basic workflow requires no advanced provider configuration.
+- [x] Semantic memory is generic; ICM remains an optional compatible reference.
+- [x] Blocking messages include concrete recovery while structured codes remain stable.
+- [x] Existing high/critical completion requirements remain fail-closed.
 
 ## Independent Evidence
 
-- [ ] A trusted verifier from the corrected HEAD baseline attests a later
-  claim-only child commit; the checkpoint that modifies the verifier cannot
-  attest itself.
+- Not required for this medium-risk UX phase; configured runtime/smoke evidence
+  and the required verification contract remain applicable.

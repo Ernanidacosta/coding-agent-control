@@ -19,7 +19,7 @@ cd "$ROOT" || exit 1
 TOML=$(toml_path)
 CONTRACT=$(verification_contract_json "$TOML")
 
-printf 'Verification Contract:\n'
+printf 'Verification:\n'
 if [ "$(printf '%s' "$CONTRACT" | jq -r '.valid')" != true ]; then
   verification_result_human "$(printf '%s' "$CONTRACT" | jq -c '.error')"
   exit 1
@@ -33,7 +33,21 @@ while IFS= read -r SPEC; do
     "$(printf '%s' "$SPEC" | jq -r '.requirement')" \
     "$(printf '%s' "$SPEC" | jq -r '.origin')" \
     "$(printf '%s' "$SPEC" | jq -r 'if .command == "" then "-" else .command end')"
-done < <(printf '%s' "$CONTRACT" | jq -c '.checks[]')
+done < <(printf '%s' "$CONTRACT" | jq -c \
+  '.checks[] | select(.name != "independent" and .name != "approval")')
+
+ADVANCED_CONFIGURED=$(printf '%s' "$CONTRACT" | jq \
+  '[.checks[] | select((.name == "independent" or .name == "approval") and .origin == "configured")] | length')
+if [ "$ADVANCED_CONFIGURED" -gt 0 ]; then
+  printf '\nAdvanced completion capabilities:\n'
+  while IFS= read -r SPEC; do
+    [ -n "$SPEC" ] || continue
+    printf '  %-12s configured as %s\n' \
+      "$(printf '%s' "$SPEC" | jq -r '.name')" \
+      "$(printf '%s' "$SPEC" | jq -r '.command')"
+  done < <(printf '%s' "$CONTRACT" | jq -c \
+    '.checks[] | select((.name == "independent" or .name == "approval") and .origin == "configured")')
+fi
 
 TIMEOUT=$(printf '%s' "$CONTRACT" | jq -r '.timeout_seconds // "not configured"')
 printf '  timeout: %s\n\n' "$TIMEOUT"
@@ -41,10 +55,10 @@ printf '  timeout: %s\n\n' "$TIMEOUT"
 VERIFY_SUMMARY=$(run_verification_contract "$TOML")
 RISK_SUMMARY=$(run_risk_contract "$VERIFY_SUMMARY" worktree completion)
 SUMMARY=$(combine_policy_summaries "$VERIFY_SUMMARY" "$RISK_SUMMARY")
-printf 'Risk Contract:\n'
-printf '  declared: %s\n' "$(printf '%s' "$SUMMARY" | jq -r '.risk // "not declared"')"
-printf '  status: %s\n' "$(printf '%s' "$SUMMARY" | jq -r '.current_status // "absent"')"
-printf '  signals: %s\n\n' "$(printf '%s' "$SUMMARY" | jq -r 'if (.observed_signals | length) == 0 then "none" else (.observed_signals | join(", ")) end')"
+printf 'Completion:\n'
+printf '  declared risk: %s\n' "$(printf '%s' "$SUMMARY" | jq -r '.risk // "not declared"')"
+printf '  current status: %s\n' "$(printf '%s' "$SUMMARY" | jq -r '.current_status // "absent"')"
+printf '  observed signals: %s\n\n' "$(printf '%s' "$SUMMARY" | jq -r 'if (.observed_signals | length) == 0 then "none" else (.observed_signals | join(", ")) end')"
 verification_summary_human "$SUMMARY" all
 
 PASSED=$(printf '%s' "$SUMMARY" | jq '[.results[] | select(.status == "pass")] | length')

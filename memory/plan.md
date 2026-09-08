@@ -2,38 +2,36 @@
 
 ## Current Phase
 
-Close the Root-of-Trust Bootstrap contract semantically and operationally while
-keeping the current high-risk task in `verifying` until external human review.
+Make the basic agent-md path understandable without weakening advanced
+verification, Risk, or attestation guarantees.
 
 ## Implementation Slices
 
-1. [x] Establish failing directive evidence for the complete `done claim` and
-   named out-of-band Root-of-Trust Bootstrap semantics.
-2. [x] Document bootstrap flow, future high-risk cycle, evidence invalidation,
-   and the absence of generic trust bypasses.
-3. [x] Re-run the complete acceptance contract and preserve `verifying` for the
-   external checkpoint handoff.
+1. [x] Fix the fork Quickstart and make install-to-work the first documented
+   path with no advanced capability requirement.
+2. [x] Generalize semantic-memory language while preserving
+   `[integrations.icm]` compatibility as the reference integration.
+3. [x] Make doctor and hook messages state current effect, blocking status, and
+   recovery before exposing trust details.
+4. [x] Run the focused UX regressions and complete verification contract.
 
 ## Decisions Still In Force
 
-- GitHub-specific repository/workflow selection lives beside the example,
-  never in the generic core schema.
-- `done` is only a claim until state, verification, Risk, attestation, and
-  approval requirements accept it.
-- Human/operational review outside the executor establishes the initial root;
-  no current-change autoattestation can substitute for that checkpoint.
-- A new target commit or a changed verifier, dependency, config, or workflow
-  invalidates earlier evidence; commit binding is primary over timestamps.
-- `gh` remains a provider capability, not a core dependency.
+- Baseline safety, operational state, and declared required checks remain
+  standalone and provider-independent.
+- Optional capabilities affect only the action or transition that requires
+  their guarantee; no silent fallback is introduced.
+- Semantic memory is a generic optional capability; ICM remains the compatible
+  reference integration under `[integrations.icm]`.
+- Advanced trust detail remains available in doctor and structured results,
+  while normal messages lead with effect and recovery.
 
 ## Deferred / Out of Scope
 
-- Policy profiles, autonomy modes, numeric scoring, or decision engines.
-- Reviewer/model orchestration, PKI, signatures, trust stores, or daemons.
-- GitHub-specific logic inside core, remote writes, branch-policy mutation, or
-  support for every fork/PR topology.
-- A shell dependency resolver or worktree-attestation fingerprint.
-- Runtime ICM dependency or a new historical-memory layer.
+- Policy profiles, autonomy modes, Risk semantic changes, or decision engines.
+- Plugin frameworks, provider orchestration, or new runtime dependencies.
+- Renaming `.agent-md`, `agent-md.toml`, or existing public configuration.
+- Weakening fail-closed safety, verification, or trust enforcement.
 
 ## Open Questions
 

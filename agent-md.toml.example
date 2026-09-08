@@ -1,8 +1,9 @@
 # agent-md.toml — explicit configuration for agent-md hooks.
 #
-# Copy to the repo root as `agent-md.toml` to configure verification,
-# operational-change detection, and optional integrations. Anything you
-# leave unset falls back to the heuristic default.
+# This file is optional. Copy it to the repo root as `agent-md.toml` only when
+# you want explicit verification, operational-change detection, or optional
+# integrations. Basic agent-md safety and operational state need no config.
+# Anything you leave unset falls back to the heuristic default.
 #
 # Verification values must be trusted project commands as simple strings
 # on a single line. Required checks and state globs are arrays of quoted
@@ -126,6 +127,8 @@
 # ]
 
 [integrations.icm]
-# Declares that ICM supplies optional semantic/historical recall. This
-# never makes hooks or the agent-md runtime call or depend on ICM.
+# Enables the ICM reference integration for optional semantic/historical
+# recall. ICM is one provider, not an architectural dependency. Leaving this
+# section undeclared creates no expectation; hooks, verification, Risk, trust,
+# and completion never depend on semantic-memory availability.
 # enabled = false

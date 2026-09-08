@@ -40,9 +40,21 @@ if [ -f AGENT.md ] && [ -f CLAUDE.md ]; then
   fi
 fi
 
-if [ -f AGENTS.md ]; then ok "AGENTS.md exists"; else warn "AGENTS.md missing"; fi
-if [ -f .claude/settings.json ]; then ok "Claude settings present"; else warn "Claude settings missing"; fi
-if [ -f .codex/hooks.json ]; then ok "Codex hooks present"; else warn "Codex hooks missing"; fi
+if [ -f AGENTS.md ]; then
+  ok "AGENTS.md exists"
+elif [ -d .codex ] || [ -d .cursor ] || [ -d .windsurf ]; then
+  warn "AGENTS.md missing for an installed Codex/Cursor/Windsurf integration"
+fi
+if [ -f .claude/settings.json ]; then
+  ok "Claude settings present"
+elif [ -f CLAUDE.md ]; then
+  warn "Claude settings missing for the installed Claude integration"
+fi
+if [ -f .codex/hooks.json ]; then
+  ok "Codex hooks present"
+elif [ -d .codex ]; then
+  warn "Codex hooks missing for the installed Codex integration"
+fi
 if [ -f .codex/hooks.json ]; then
   for SHARED_HOOK in _lib.sh block-destructive.sh truncation-check.sh \
     stop-verify.sh state-enforcement.sh sensory-reminder.sh; do
@@ -91,7 +103,8 @@ if [ -f "$SHARED_LIB" ]; then
           warn "[WARNING VERIFY_UNAVAILABLE] Optional check '$CHECK_NAME' is $AVAILABILITY."
         fi
       fi
-    done < <(printf '%s' "$CONTRACT" | jq -c '.checks[]')
+    done < <(printf '%s' "$CONTRACT" | jq -c \
+      '.checks[] | select(.name != "independent" and .name != "approval")')
     TIMEOUT=$(printf '%s' "$CONTRACT" | jq -r '.timeout_seconds // empty')
     if [ -n "$TIMEOUT" ]; then
       if have timeout || have gtimeout; then
@@ -99,6 +112,9 @@ if [ -f "$SHARED_LIB" ]; then
       else
         bad "[ERROR VERIFY_UNAVAILABLE] timeout is configured but timeout/gtimeout is unavailable"
       fi
+    elif [ "$(printf '%s' "$CONTRACT" | jq \
+      '[.checks[] | select(.name != "independent" and .name != "approval" and .origin != "not configured")] | length')" -eq 0 ]; then
+      ok "verification timeout is not applicable until a check is configured or inferred"
     else
       warn "verification timeout is not configured; host limits remain the only bound"
     fi
@@ -145,8 +161,10 @@ if [ -f "$SHARED_LIB" ] && [ -f memory/progress.md ]; then
       RUNTIME_COUNT=$(printf '%s' "$CONTRACT" | jq '[.checks[] | select((.name == "runtime" or .name == "smoke") and .origin != "not configured")] | length')
       if [ "$RUNTIME_COUNT" -gt 0 ]; then
         printf '  runtime/smoke: configured\n'
-      else
+      elif printf '%s\n' "$RISK_VALUE" | grep -Eq '^(medium|high|critical)$'; then
         printf '  runtime/smoke: not configured (applicability advisory)\n'
+      else
+        printf '  runtime/smoke: not required by current risk\n'
       fi
 
       for EVIDENCE_CHECK in independent approval; do
@@ -154,33 +172,96 @@ if [ -f "$SHARED_LIB" ] && [ -f memory/progress.md ]; then
         EVIDENCE_CAPABILITIES=$(printf '%s' "$CONTRACT" | jq -r --arg check "$EVIDENCE_CHECK" \
           '.checks[] | select(.name == $check) | .capabilities | if length == 0 then "not declared" else join(", ") end')
         if [ "$EVIDENCE_CHECK" = independent ]; then
-          EVIDENCE_LABEL=Independent
+          EVIDENCE_HEADING="Independent verification"
+          EVIDENCE_DETAIL_LABEL=Independent
+          EVIDENCE_MISSING_CODE=RISK_INDEPENDENT_VERIFICATION_REQUIRED
           case "$RISK_VALUE" in high|critical) EVIDENCE_REQUIRED=yes ;; *) EVIDENCE_REQUIRED=no ;; esac
         else
-          EVIDENCE_LABEL=Approval
+          EVIDENCE_HEADING="Human approval"
+          EVIDENCE_DETAIL_LABEL=Approval
+          EVIDENCE_MISSING_CODE=RISK_HUMAN_APPROVAL_REQUIRED
           if [ "$RISK_VALUE" = critical ]; then EVIDENCE_REQUIRED=yes; else EVIDENCE_REQUIRED=no; fi
         fi
-        printf '%s verifier:\n' "$EVIDENCE_LABEL"
-        printf '  required by current risk: %s\n' "$EVIDENCE_REQUIRED"
+        EVIDENCE_REQUIRED_NOW=no
+        if [ "$PROGRESS_STATUS" = "done" ] && [ "$EVIDENCE_REQUIRED" = yes ]; then
+          EVIDENCE_REQUIRED_NOW=yes
+        fi
+
+        printf '%s:\n' "$EVIDENCE_HEADING"
+        printf '  required for completion: %s\n' "$EVIDENCE_REQUIRED"
+        printf '  required now: %s\n' "$EVIDENCE_REQUIRED_NOW"
         printf '  configured: %s\n' "$(if [ "$EVIDENCE_ORIGIN" = configured ]; then printf yes; else printf no; fi)"
         if [ "$EVIDENCE_ORIGIN" != configured ]; then
-          printf '  path: not configured\n'
-          printf '  origin: not configured\n'
-          printf '  integrity: not applicable\n'
-          printf '  executable: no\n'
-          printf '  trust: not configured\n'
-          printf '  capabilities: %s\n' "$EVIDENCE_CAPABILITIES"
-          printf '  capability status: not applicable\n'
+          printf '  status: not configured\n'
+          printf '  blocking now: %s\n' "$EVIDENCE_REQUIRED_NOW"
+          if [ "$EVIDENCE_REQUIRED_NOW" = yes ]; then
+            printf '  Effect: completion is blocked; implementation work remains available.\n'
+            printf '  Recovery: configure a trusted verify.%s command and provide the required external evidence.\n' "$EVIDENCE_CHECK"
+            bad "[ERROR $EVIDENCE_MISSING_CODE] $EVIDENCE_HEADING is required before this ${RISK_VALUE}-risk task can be completed. Recovery: configure a trusted verify.$EVIDENCE_CHECK command and rerun agent-md verify."
+          elif [ "$EVIDENCE_REQUIRED" = yes ]; then
+            printf '  Effect: implementation work may continue; completion will require this capability.\n'
+            printf '  Recovery: configure verify.%s before claiming done.\n' "$EVIDENCE_CHECK"
+          else
+            printf '  Effect: the current task does not require this capability.\n'
+            printf '  Recovery: none; configure it only when project policy requires it.\n'
+          fi
           continue
         fi
+
         EVIDENCE_ANCHOR=$(attestation_trust_anchor_json "$(toml_path)" "$EVIDENCE_CHECK")
+        EVIDENCE_MISSING_CAPABILITIES=$(attestation_missing_capabilities "$CONTRACT" "$EVIDENCE_CHECK")
+        if [ -n "$EVIDENCE_MISSING_CAPABILITIES" ]; then
+          EVIDENCE_STATUS=unavailable
+        elif [ "$(printf '%s' "$EVIDENCE_ANCHOR" | jq -r '.eligible')" != true ]; then
+          EVIDENCE_STATUS=untrusted
+        else
+          EVIDENCE_STATUS=ready
+        fi
+        EVIDENCE_BLOCKING_NOW=no
+        if [ "$EVIDENCE_REQUIRED_NOW" = yes ] && [ "$EVIDENCE_STATUS" != ready ]; then
+          EVIDENCE_BLOCKING_NOW=yes
+        fi
+        printf '  status: %s\n' "$EVIDENCE_STATUS"
+        printf '  blocking now: %s\n' "$EVIDENCE_BLOCKING_NOW"
+        case "$EVIDENCE_STATUS:$EVIDENCE_REQUIRED_NOW:$EVIDENCE_REQUIRED" in
+          ready:*:yes)
+            printf '  Effect: no wiring blocker detected; verify/Stop still validate the external evidence.\n'
+            printf '  Recovery: none for wiring; run agent-md verify when claiming completion.\n'
+            ;;
+          ready:*:no)
+            printf '  Effect: the current task does not require this configured capability.\n'
+            printf '  Recovery: none.\n'
+            ;;
+          unavailable:yes:*)
+            printf '  Effect: completion is blocked; implementation work remains available.\n'
+            printf '  Recovery: install or expose the declared provider capability, then rerun agent-md verify.\n'
+            ;;
+          unavailable:no:yes)
+            printf '  Effect: implementation work may continue; completion will require this capability.\n'
+            printf '  Recovery: install or expose the declared provider capability before claiming done.\n'
+            ;;
+          untrusted:yes:*)
+            printf '  Effect: completion is blocked because the configured verifier is not trusted.\n'
+            printf '  Recovery: restore the reviewed verifier and declared files to HEAD, then rerun doctor.\n'
+            ;;
+          untrusted:no:yes)
+            printf '  Effect: implementation work may continue; completion will require a trusted verifier.\n'
+            printf '  Recovery: establish and review the verifier baseline before claiming done.\n'
+            ;;
+          *)
+            printf '  Effect: the current task does not require this capability.\n'
+            printf '  Recovery: optional; fix the provider only before a task requires it.\n'
+            ;;
+        esac
+
+        # Advanced trust details remain available after the simple status.
+        printf '%s verifier:\n' "$EVIDENCE_DETAIL_LABEL"
         printf '  path: %s\n' "$(printf '%s' "$EVIDENCE_ANCHOR" | jq -r '.path')"
         printf '  origin: %s\n' "$(printf '%s' "$EVIDENCE_ANCHOR" | jq -r '.location')"
         printf '  integrity: %s\n' "$(printf '%s' "$EVIDENCE_ANCHOR" | jq -r '.integrity')"
         printf '  executable: %s\n' "$(printf '%s' "$EVIDENCE_ANCHOR" | jq -r 'if .executable then "yes" else "no" end')"
         printf '  trust: %s\n' "$(printf '%s' "$EVIDENCE_ANCHOR" | jq -r '.trust')"
         printf '  capabilities: %s\n' "$EVIDENCE_CAPABILITIES"
-        EVIDENCE_MISSING_CAPABILITIES=$(attestation_missing_capabilities "$CONTRACT" "$EVIDENCE_CHECK")
         if [ "$EVIDENCE_CAPABILITIES" = "not declared" ]; then
           printf '  capability status: not declared\n'
         elif [ -n "$EVIDENCE_MISSING_CAPABILITIES" ]; then
@@ -191,45 +272,65 @@ if [ -f "$SHARED_LIB" ] && [ -f memory/progress.md ]; then
           done <<EOF
 $EVIDENCE_MISSING_CAPABILITIES
 EOF
-          warn "[WARNING VERIFY_UNAVAILABLE] $EVIDENCE_LABEL verifier dependencies are unavailable; final evidence cannot be produced."
+          if [ "$EVIDENCE_REQUIRED_NOW" = yes ]; then
+            bad "[ERROR VERIFY_UNAVAILABLE] $EVIDENCE_HEADING is required now, but a declared provider capability is unavailable. Recovery: install or expose the capability and rerun agent-md verify."
+          elif [ "$EVIDENCE_REQUIRED" = yes ]; then
+            warn "[WARNING VERIFY_UNAVAILABLE] $EVIDENCE_HEADING is unavailable, but it does not block the current status. Recovery: install or expose the capability before claiming done."
+          fi
         else
           printf '  capability status: available\n'
         fi
         if [ "$(printf '%s' "$EVIDENCE_ANCHOR" | jq -r '.eligible')" != true ]; then
-          if [ "$PROGRESS_STATUS" = "done" ] && [ "$EVIDENCE_REQUIRED" = yes ]; then
-            bad "[ERROR RISK_ATTESTATION_UNTRUSTED] $EVIDENCE_LABEL verifier is not eligible: $(printf '%s' "$EVIDENCE_ANCHOR" | jq -r '.reason')."
-          else
-            warn "[WARNING RISK_ATTESTATION_UNTRUSTED] $EVIDENCE_LABEL verifier is not yet eligible: $(printf '%s' "$EVIDENCE_ANCHOR" | jq -r '.reason')."
+          if [ "$EVIDENCE_REQUIRED_NOW" = yes ]; then
+            bad "[ERROR RISK_ATTESTATION_UNTRUSTED] $EVIDENCE_HEADING cannot be accepted because its verifier is not trusted: $(printf '%s' "$EVIDENCE_ANCHOR" | jq -r '.reason'). Recovery: restore the reviewed verifier baseline and rerun doctor."
+          elif [ "$EVIDENCE_REQUIRED" = yes ]; then
+            warn "[WARNING RISK_ATTESTATION_UNTRUSTED] $EVIDENCE_HEADING is not ready, but it does not block the current status: $(printf '%s' "$EVIDENCE_ANCHOR" | jq -r '.reason'). Recovery: review and commit the verifier baseline before claiming done."
           fi
-        elif [ "$(printf '%s' "$EVIDENCE_ANCHOR" | jq -r '.location')" = external ]; then
-          warn "$EVIDENCE_LABEL verifier trust is environment-managed; agent-md does not audit host ownership or parent directories."
+        elif [ "$EVIDENCE_REQUIRED" = yes ] && \
+          [ "$(printf '%s' "$EVIDENCE_ANCHOR" | jq -r '.location')" = external ]; then
+          warn "$EVIDENCE_HEADING uses an environment-managed verifier; agent-md does not audit broader host ownership or parent directories."
         fi
       done
     fi
   fi
 fi
 
-# ICM is an optional semantic/historical memory provider. Detection is
-# deliberately read-only: doctor never starts it or calls its daemon/API.
+# Semantic memory is optional. ICM is the current reference integration;
+# detection is read-only and doctor never starts it or calls a daemon/API.
 ICM_ENABLED=""
 if [ -f "$SHARED_LIB" ]; then
   ICM_ENABLED=$(read_toml "$(toml_path)" integrations.icm enabled)
 fi
 
+printf 'Semantic memory:\n'
 if [ "$ICM_ENABLED" = "true" ]; then
+  printf '  provider: ICM\n'
+  printf '  required now: no\n'
   if have icm; then
-    ok "ICM is enabled and the icm command is available"
+    printf '  status: available\n'
+    printf '  blocking now: no\n'
+    printf '  Effect: historical and semantic recall is available; operational correctness remains in Git and memory/.\n'
+    printf '  Recovery: none.\n'
+    ok "optional semantic memory provider is available"
   else
+    printf '  status: unavailable\n'
+    printf '  blocking now: no\n'
+    printf '  Effect: historical recall is unavailable; core workflow unaffected.\n'
+    printf '  Recovery: install ICM for recall, or disable [integrations.icm].\n'
     ICM_RESULT=$(policy_result_json \
       "warn" "warning" "INTEGRATION_ICM_UNAVAILABLE" \
-      "ICM is enabled but the icm command is unavailable; agent-md remains fully operational." \
-      "Install ICM for semantic recall, or disable the optional declaration.")
+      "The configured ICM semantic-memory integration is unavailable; core workflow unaffected." \
+      "Install ICM for recall, or disable the optional [integrations.icm] declaration.")
     warn "$(policy_human_message "$ICM_RESULT")"
   fi
-elif have icm; then
-  warn "ICM is available but not declared in agent-md.toml"
 else
-  ok "ICM is optional and not enabled"
+  printf '  provider: none\n'
+  printf '  required now: no\n'
+  printf '  status: not configured\n'
+  printf '  blocking now: no\n'
+  printf '  Effect: none; Git and memory/ provide the complete operational workflow.\n'
+  printf '  Recovery: none; configure a provider only if historical recall is useful.\n'
+  ok "semantic memory is optional and not configured"
 fi
 
 if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
@@ -237,7 +338,7 @@ if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
   if [ "$HOOKS_PATH" = ".githooks" ]; then
     ok "git hook fallback is active"
   elif [ -f .githooks/pre-commit ]; then
-    warn "git hook fallback installed but not active"
+    ok "optional git hook fallback is installed but not active"
   fi
 else
   warn "not inside a git worktree"

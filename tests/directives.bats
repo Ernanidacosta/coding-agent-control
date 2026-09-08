@@ -35,6 +35,17 @@
   [ "$status" -eq 0 ]
 }
 
+@test "directives keep optional capabilities outside operational correctness" {
+  run grep -q 'Missing optional capability must not break ordinary work' "$BATS_TEST_DIRNAME/../AGENT.md"
+  [ "$status" -eq 0 ]
+  run grep -q 'Missing mandatory capability must prevent only the transition' "$BATS_TEST_DIRNAME/../AGENT.md"
+  [ "$status" -eq 0 ]
+  run grep -q 'Semantic-memory provider (optional)' "$BATS_TEST_DIRNAME/../AGENT.md"
+  [ "$status" -eq 0 ]
+  run grep -q 'ICM is one supported reference provider' "$BATS_TEST_DIRNAME/../AGENT.md"
+  [ "$status" -eq 0 ]
+}
+
 @test "directives define done as a claim accepted only after every applicable guarantee" {
   run grep -q 'Status: done is a completion claim, not proof of completion' "$BATS_TEST_DIRNAME/../AGENT.md"
   [ "$status" -eq 0 ]

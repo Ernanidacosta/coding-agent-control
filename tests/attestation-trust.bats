@@ -482,7 +482,9 @@ anchor_json() {
 
   run bash .agent-md/bin/doctor.sh
   [ "$status" -eq 0 ]
-  echo "$output" | grep -Eq 'required by current risk:[[:space:]]+yes'
+  echo "$output" | grep -Eq 'required for completion:[[:space:]]+yes'
+  echo "$output" | grep -Eq 'required now:[[:space:]]+no'
+  echo "$output" | grep -Eq 'blocking now:[[:space:]]+no'
   echo "$output" | grep -Eq 'capabilities:[[:space:]]+agent-md-capability-definitely-missing'
   echo "$output" | grep -Eq 'capability status:[[:space:]]+unavailable'
   echo "$output" | grep -Eq 'WARNING VERIFY_UNAVAILABLE'

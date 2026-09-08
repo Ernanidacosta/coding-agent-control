@@ -17,12 +17,29 @@ Honest scope:
 
 ```bash
 # From inside your project directory
-curl -sL https://raw.githubusercontent.com/iamfakeguru/agent-md/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/Ernanidacosta/agent-md/main/install.sh | bash
 ```
 
 Installs support for Claude Code, Codex, Cursor, and Windsurf by default.
+No `agent-md.toml`, CI provider, `gh`, attestation verifier, approval system,
+or semantic-memory provider is required to start.
 
-## What You Get
+## Basic Workflow
+
+Start simple:
+
+1. Install agent-md in the project.
+2. Optionally run `./.agent-md/bin/doctor.sh` to inspect wiring.
+3. Work normally; the agent maintains the small current state in `memory/`.
+4. Add deterministic project checks when they are useful. Enable advanced
+   guarantees only when the task's Risk requires them.
+
+The baseline includes destructive-command and path/secret protections,
+configuration and state validation, evidence-first guidance, idempotent hook
+merge, and declared required verification. It works offline and without an
+external memory or CI provider when the current task does not require one.
+
+### What Gets Installed
 
 ```text
 your-project/
@@ -63,19 +80,88 @@ your-project/
   .githooks/pre-commit             # optional fallback for any agent
 ```
 
-## The Core Idea
+## Verification
+
+If the project already exposes test, lint, or type-check conventions,
+agent-md can infer a small fallback contract. For explicit guarantees, copy
+`agent-md.toml.example` to `agent-md.toml` and declare the real commands. A
+missing optional check is diagnostic; a missing or failing required check
+blocks only the completion boundary that requires it.
+
+Run the complete current contract with:
+
+```bash
+./.agent-md/bin/verify.sh
+```
+
+## Operational State
+
+`memory/` records current status, plan, verification criteria, and still-useful
+gotchas. It is a deterministic handoff, not historical memory. Git remains the
+factual source of truth. See [Operational State Enforcement](#operational-state-enforcement)
+for the stable `progress.md` format and classifier configuration.
+
+## Advanced Guarantees
+
+Ordinary projects are not incomplete because they lack CI, attestations, or an
+approval system. These capabilities activate only when the current policy
+requires their guarantee.
+
+### Risk
+
+`low` uses the normal required verification contract. `medium` can additionally
+require declared runtime/smoke evidence. `high` requires independent evidence
+at completion, and `critical` also requires external human approval. Missing
+final evidence does not block `active` or `verifying` work.
+
+### Independent Verification
+
+Independent verification is conditional. GitHub Actions plus `gh` is one
+reference provider, not a core dependency. Projects can use another CI,
+reviewer, or external harness through the same generic verifier contract.
+
+### Critical Approval
+
+Human approval is separate from independent verification and is required only
+for a `critical` completion claim. An agent cannot manufacture or validate its
+own approval.
+
+## Optional Semantic Memory
+
+A semantic-memory provider can improve historical and cross-agent recall, but
+never supplies operational truth or a completion guarantee. agent-md remains
+fully functional without one. ICM is the current reference integration and is
+enabled explicitly with `[integrations.icm]`; leaving it undeclared creates no
+expectation and no warning.
+
+```toml
+[integrations.icm]
+enabled = true
+```
+
+This compatibility key declares one specific optional provider. It does not
+make ICM—or any semantic-memory provider—a core dependency.
+
+## Architecture And Reference
 
 Project knowledge has three explicit authorities:
 
 | Authority | Responsibility |
 |---|---|
 | `agent-md` | Governance, safety, verification, active plan, current progress, relevant gotchas, and short handoff |
-| ICM (optional) | Semantic/historical memory, recall, older decisions, resolved errors, and cross-agent knowledge |
 | Git | Factual truth for code and code history |
+| Semantic-memory provider (optional) | Historical/semantic recall, older decisions, resolved errors, and cross-agent knowledge; ICM is one reference provider |
 
-agent-md does not call ICM from hooks or runtime code. It works on its
-own. Declaring ICM only tells agents where historical recall belongs and
-lets `doctor.sh` report whether the optional command is available.
+The core never calls a semantic-memory provider from hooks or runtime code.
+Declaring ICM only selects that optional integration for recall and lets
+`doctor.sh` report its availability. Safety, verification, Risk, trust, and
+completion never depend on semantic-memory availability.
+
+Capability policy is deliberately narrow:
+
+> Missing optional capability must not break ordinary work. Missing mandatory
+> capability must prevent only the transition or action that requires that
+> guarantee. There is no silent fallback.
 
 Agent guidance itself has two layers:
 
@@ -174,7 +260,10 @@ Stable codes currently emitted by controls are deliberately limited:
 Architectural non-goals constrain feature creep: agent-md is not
 semantic memory, a multi-agent orchestrator, a model router, a background
 daemon, a project-management platform, a replacement for Git or CI, or a
-general-purpose agent runtime.
+general-purpose agent runtime. Basic users do not need to understand the
+internal trust model, provider-specific infrastructure is not required for
+ordinary work, semantic memory never supplies operational correctness, and the
+core must not become a plugin or orchestration runtime.
 
 ## Runtime Lessons Applied
 
@@ -257,7 +346,8 @@ agent-md resolves one verification contract for Claude Stop, Codex Stop,
 pre-commit, doctor, and `agent-md-verify`. Explicit commands take precedence;
 heuristics remain a labeled fallback.
 
-Copy the example config and declare project checks:
+Configuration is optional. Copy the example only when the project wants to
+make its own checks explicit:
 
 ```bash
 cp agent-md.toml.example agent-md.toml
@@ -268,23 +358,15 @@ cp agent-md.toml.example agent-md.toml
 typecheck = "npx --no-install tsc --noEmit"
 lint      = "npx --no-install eslint ."
 test      = "pnpm test"
-integration = "pnpm test:integration"
-smoke       = "./scripts/smoke.sh"
-runtime     = "node dist/cli.js --version"
-lint_file = "npx --no-install eslint {file}"
 
 [verify.policy]
-required = ["lint", "test", "smoke"]
+required = ["lint", "test"]
 timeout_seconds = 300
-
-[visual]
-required          = true
-artifacts_dir     = ".agent/visual"
-freshness_seconds = 3600
-
-[integrations.icm]
-enabled = true
 ```
+
+Runtime, smoke, visual, independent-verification, approval, and semantic-memory
+configuration are advanced capabilities. Add them only when the project or
+current task requires their guarantee.
 
 Supported base completion checks are `typecheck`, `lint`, `test`,
 `integration`, `smoke`, and `runtime`. `independent` and `approval` are
@@ -340,17 +422,19 @@ Run the complete declared contract with:
 ./.agent-md/bin/verify.sh
 ```
 
-The helper first prints every check, requirement, origin, and command, then
-reports name, status, exit code, command, summarized evidence, and recovery.
-It exits non-zero only for invalid configuration or blocking required
-results. Optional failures remain visible warnings. Results are fresh; this
-phase adds no cache.
+The helper first prints the ordinary configured/inferred checks. Advanced
+independent/approval commands appear only when configured or when a blocking
+result needs to explain them. It then reports name, status, exit code, command,
+summarized evidence, and recovery. It exits non-zero only for invalid
+configuration or blocking required results. Optional failures remain visible
+warnings. Results are fresh; this phase adds no cache.
 
-`doctor.sh` validates contract configuration and wiring without executing
-the suite. It distinguishes `configured`, `inferred`, and `not configured`
-checks, reports required/optional policy and obvious command availability,
-and diagnoses timeout support. Complex shell commands may be labeled “not
-preflighted”; the real runner remains authoritative.
+`doctor.sh` validates contract configuration and wiring without executing the
+suite or provider verifiers. For conditional capabilities it leads with:
+configured, available, required for completion, required now, blocking now,
+effect, and recovery. Trust-anchor detail follows only for a configured
+verifier. Complex shell commands may be labeled “not preflighted”; the real
+runner remains authoritative.
 
 When no checks are configured or inferred, hooks allow completion but emit
 `VERIFY_NOT_CONFIGURED`: the work is explicitly unverified, never silently
@@ -584,8 +668,8 @@ destructive-command block. Stop and `verify.sh` enforce final Risk evidence;
 pre-commit validates Risk syntax and trust-anchor integrity but deliberately
 does not execute or require final independent/human attestations.
 
-Doctor reports the declaration, status, observed signals, consistency, and
-each verifier's path, location, integrity, executability, and eligibility. It
+Doctor reports the current effect and recovery first, then the declaration,
+status, observed signals, consistency, and configured verifier details. It
 does not execute attestations, approve work, or call a reviewer. `verify.sh`
 performs the full sequence:
 validate progress/Risk, run the base verification contract, apply final Risk
@@ -736,9 +820,6 @@ source_globs = [
   "*.sh",
 ]
 ignore_globs = ["docs/**", "generated/**", ".ai-memory.toml"]
-
-[integrations.icm]
-enabled = true
 ```
 
 Projects that consider all of `scripts/**` or `tools/**` non-operational
@@ -797,16 +878,17 @@ runtime, or smoke checks.
 
 Do not turn these files into a development journal. Prune superseded
 plans, old completions, and irrelevant gotchas. Git retains factual code
-history; ICM, when enabled, retains semantic and cross-agent history.
+history; an optional semantic-memory provider can retain semantic and
+cross-agent history. ICM is one supported reference provider.
 
 Each gotcha uses a `##` title and requires non-empty `**Rule:**` and
 `**Why:**` fields. `**Scope:**`, `**Evidence:**`, and `**Added:**` are
 recommended. Do not record every correction; remove obsolete entries.
 
 Operational handoff relies first on `progress.md`, `plan.md`,
-`verify.md`, `gotchas.md`, and Git. ICM can provide older context, but it
-is not needed to determine where work stands, what remains, blockers, or
-the next action.
+`verify.md`, `gotchas.md`, and Git. A configured semantic-memory provider can
+provide older context, but it is not needed to determine where work stands,
+what remains, blockers, or the next action.
 
 Installation templates live separately under
 `.agent-md/templates/memory/`, so this repository's own operational state

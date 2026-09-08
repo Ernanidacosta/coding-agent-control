@@ -14,7 +14,7 @@
 #   ./install.sh --codex-hooks=skip .               # preserve existing .codex/hooks.json unchanged
 #
 # Or via curl (from inside your project dir):
-#   curl -sL https://raw.githubusercontent.com/iamfakeguru/agent-md/main/install.sh | bash
+#   curl -fsSL https://raw.githubusercontent.com/Ernanidacosta/agent-md/main/install.sh | bash
 #
 # Agents supported: claude, codex, cursor, windsurf, all (default)
 #
@@ -88,7 +88,7 @@ if [ ! -f "$SCRIPT_DIR/AGENT.md" ]; then
   # Running via curl pipe — download the package
   echo "▸ Downloading agent-md..."
   TMP=$(mktemp -d)
-  curl -sL https://github.com/iamfakeguru/agent-md/archive/main.tar.gz | tar -xz -C "$TMP"
+  curl -fsSL https://github.com/Ernanidacosta/agent-md/archive/main.tar.gz | tar -xz -C "$TMP"
   if [ -d "$TMP/agent-md-main" ]; then
     SCRIPT_DIR="$TMP/agent-md-main"
   fi
@@ -461,10 +461,10 @@ else
 fi
 echo ""
 echo "Next steps:"
-echo "  1. Read $TARGET/AGENT.md (the master directives)"
-echo "  2. (Optional) cp agent-md.toml.example agent-md.toml and declare verification/state policy"
-echo "  3. Edit memory/plan.md with your project's design"
-echo "  4. Start your agent — it reads directives automatically"
+echo "  1. (Recommended) Run: $TARGET/.agent-md/bin/doctor.sh"
+echo "  2. Start your agent and work normally — no CI, gh, or memory provider is required"
+echo "  3. (Optional) Copy agent-md.toml.example to agent-md.toml when you want explicit project checks"
+echo "  4. (Optional) Review $TARGET/AGENT.md before adding project-specific directives"
 NEXT_STEP=5
 if [ "$IN_GIT" -eq 1 ] && [ "$GITHOOKS" = "no" ]; then
   echo "  ${NEXT_STEP}. (Optional) Enable universal hooks: git config core.hooksPath .githooks"

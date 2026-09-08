@@ -18,7 +18,9 @@ under `.agent-md/templates/memory/`. A target repository's root
 ## Bundled Helpers
 
 - `discover_helpers.sh` — lists/searches local helper scripts
-- `doctor.sh` — checks common install wiring problems
+- `doctor.sh` — checks common install wiring and explains whether each
+  capability is configured, available, required now, blocking now, and how to
+  recover without executing provider verifiers
 - `verify.sh` — executes base verification plus final Risk evidence requirements;
   high/critical attestations must be structured, trust-anchor eligible, and
   bound to the current clean operational HEAD
@@ -28,6 +30,10 @@ Provider-specific examples remain outside these core helpers. The GitHub
 Actions independent-attestation reference is in `examples/github-actions/`;
 it uses the generic attestation contract and does not make `gh` a core
 dependency.
+
+Semantic memory follows the same boundary: the core uses Git plus `memory/`
+for operational correctness. ICM is an optional reference integration for
+historical recall, not a helper dependency.
 
 ## Adding a Helper
 

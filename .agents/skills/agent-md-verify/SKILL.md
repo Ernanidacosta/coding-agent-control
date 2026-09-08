@@ -16,7 +16,7 @@ Use this skill before claiming work is complete in an agent-md repository.
 7. If no checks are configured or inferred, report the work as unverified and add a follow-up to define checks. Never convert “not verified” into “pass.”
 8. Report concrete evidence: check name, command, exit status, and concise result. Do not infer success from output wording or code inspection.
 9. Independent and approval evidence must come through pre-existing eligible trust anchors. Require one structured JSON attestation with the expected kind, allowed origin, and exact current HEAD target. Repo-local anchors and their declared files must match HEAD; a verifier cannot bootstrap trust in the same change that introduces or modifies it. External-anchor filesystem trust belongs to the host. Declared provider capabilities may warn while work is active/verifying but block a final guarantee when unavailable; never install or authenticate them automatically. This skill never writes an attestation or approval, treats prose as approval, invokes a reviewer/model automatically, or claims that another check run by the executor is independent.
-10. Keep historical detail out of `memory/`. Git is factual code history; when `[integrations.icm] enabled = true`, ICM is the optional semantic/historical store.
+10. Keep historical detail out of `memory/`. Git is factual code history; an optional semantic-memory provider may supply historical recall. `[integrations.icm] enabled = true` selects the compatible ICM reference integration, never a verification dependency.
 
 Useful helper:
 

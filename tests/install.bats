@@ -106,7 +106,8 @@ EOF
   run env PATH=/usr/bin:/bin bash -c "cd '$TARGET_DIR' && ./.agent-md/bin/doctor.sh"
   [ "$status" -eq 0 ]
   echo "$output" | grep -q 'WARNING INTEGRATION_ICM_UNAVAILABLE'
-  echo "$output" | grep -q 'ICM is enabled but the icm command is unavailable'
+  echo "$output" | grep -q 'configured ICM semantic-memory integration is unavailable'
+  echo "$output" | grep -q 'core workflow unaffected'
 }
 
 @test "invalid existing hook JSON is preserved and does not abort install" {

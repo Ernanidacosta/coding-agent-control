@@ -205,7 +205,7 @@ policy_result_json() {
 # policy_human_message <policy-result-json>
 # Keeps hook output readable while exposing stable severity/code tokens.
 policy_human_message() {
-  local result="$1" severity code message suggestion paths rendered
+  local result="$1" result_status severity code message suggestion paths rendered
   local risk current_status signals missing_requirement
   severity=$(printf '%s' "$result" | jq -r '.severity | ascii_upcase')
   code=$(printf '%s' "$result" | jq -r '.code')
@@ -216,12 +216,15 @@ policy_human_message() {
   current_status=$(printf '%s' "$result" | jq -r '.current_status // empty')
   signals=$(printf '%s' "$result" | jq -r '(.observed_signals // []) | join(", ")')
   missing_requirement=$(printf '%s' "$result" | jq -r '.missing_requirement // empty')
+  result_status=$(printf '%s' "$result" | jq -r '.status')
 
   rendered="[${severity} ${code}] ${message}"
   [ -z "$risk" ] || rendered="${rendered} Risk: ${risk}."
   [ -z "$current_status" ] || rendered="${rendered} Current status: ${current_status}."
   [ -z "$signals" ] || rendered="${rendered} Signals: ${signals}."
-  [ -z "$missing_requirement" ] || rendered="${rendered} Missing: ${missing_requirement}."
+  if [ "$result_status" != pass ] && [ -n "$missing_requirement" ]; then
+    rendered="${rendered} Missing: ${missing_requirement}."
+  fi
   [ -z "$paths" ] || rendered="${rendered} Paths: ${paths}."
   [ -z "$suggestion" ] || rendered="${rendered} Recovery: ${suggestion}"
   printf '%s\n' "$rendered"
@@ -1445,42 +1448,45 @@ attestation_missing_capabilities() {
 
 risk_attestation_capability_warning() {
   local contract="$1" check="$2" risk="$3" current_status="$4" signals="$5"
-  local spec origin missing message suggestion
+  local spec origin missing message suggestion label
   spec=$(printf '%s' "$contract" | jq -c --arg check "$check" '.checks[] | select(.name == $check)')
   origin=$(printf '%s' "$spec" | jq -r '.origin // "not configured"')
   [ "$origin" = configured ] || return 0
   missing=$(attestation_missing_capabilities "$contract" "$check")
   [ -n "$missing" ] || return 0
-  message="Configured verify.${check} is currently unavailable; required capability missing: $(printf '%s' "$missing" | awk 'BEGIN { first=1 } { if (!first) printf ", "; printf "%s", $0; first=0 } END { print "" }')."
-  suggestion="Install or expose the declared capability before requesting final '${check}' evidence; ordinary work may continue."
+  if [ "$check" = independent ]; then label="Independent verification"; else label="Human approval"; fi
+  message="${label} is configured but currently unavailable because a provider capability is missing: $(printf '%s' "$missing" | awk 'BEGIN { first=1 } { if (!first) printf ", "; printf "%s", $0; first=0 } END { print "" }'). Ordinary work may continue."
+  suggestion="Install or expose the declared capability before claiming completion; agent-md will not install provider tools automatically."
   risk_result_json warn warning VERIFY_UNAVAILABLE "$message" "$suggestion" \
     "$risk" "$current_status" "$signals" "" "${check}-capability"
 }
 
 risk_attestation_integrity_result() {
   local contract="$1" check="$2" risk="$3" current_status="$4" signals="$5" config="$6"
-  local spec origin anchor message suggestion
+  local spec origin anchor message suggestion label
   spec=$(printf '%s' "$contract" | jq -c --arg check "$check" '.checks[] | select(.name == $check)')
   origin=$(printf '%s' "$spec" | jq -r '.origin')
   [ "$origin" = configured ] || return 0
   anchor=$(attestation_trust_anchor_json "$config" "$check")
   [ "$(printf '%s' "$anchor" | jq -r '.eligible')" = true ] && return 0
-  message="Configured verify.${check} is not an eligible trust anchor: $(printf '%s' "$anchor" | jq -r '.reason')."
-  suggestion="Restore the verifier and declared files to reviewed HEAD content before committing."
+  if [ "$check" = independent ]; then label="Independent verification"; else label="Human approval"; fi
+  message="${label} cannot be accepted because its configured verifier or reviewed files are not in a trusted state: $(printf '%s' "$anchor" | jq -r '.reason')."
+  suggestion="Restore the verifier and declared files to reviewed HEAD content before committing. Use doctor for trust details."
   attestation_risk_result_json fail error RISK_ATTESTATION_UNTRUSTED "$message" "$suggestion" \
     "$risk" "$current_status" "$signals" "$check" "$anchor"
 }
 
 risk_attestation_integrity_warning() {
   local contract="$1" check="$2" risk="$3" current_status="$4" signals="$5" config="$6"
-  local spec origin anchor message suggestion
+  local spec origin anchor message suggestion label
   spec=$(printf '%s' "$contract" | jq -c --arg check "$check" '.checks[] | select(.name == $check)')
   origin=$(printf '%s' "$spec" | jq -r '.origin')
   [ "$origin" = configured ] || return 0
   anchor=$(attestation_trust_anchor_json "$config" "$check")
   [ "$(printf '%s' "$anchor" | jq -r '.eligible')" = true ] && return 0
-  message="Configured verify.${check} is not yet an eligible trust anchor: $(printf '%s' "$anchor" | jq -r '.reason')."
-  suggestion="Commit and review the trust anchor as a baseline; do not use it to attest the same change that introduces or modifies it."
+  if [ "$check" = independent ]; then label="Independent verification"; else label="Human approval"; fi
+  message="${label} is not ready yet because its configured verifier or reviewed files changed: $(printf '%s' "$anchor" | jq -r '.reason'). Ordinary work may continue."
+  suggestion="Commit and review the verifier as a baseline before using it for completion evidence."
   attestation_risk_result_json warn warning RISK_ATTESTATION_UNTRUSTED "$message" "$suggestion" \
     "$risk" "$current_status" "$signals" "$check" "$anchor"
 }
@@ -1488,12 +1494,13 @@ risk_attestation_integrity_warning() {
 risk_evidence_result() {
   local contract="$1" check="$2" code="$3" risk="$4" current_status="$5"
   local signals="$6" config="$7" scope="${8:-worktree}" spec origin timeout_seconds
-  local message suggestion anchor anchor_after target execution attestation value expected_commit missing
+  local message suggestion anchor anchor_after target execution attestation value expected_commit missing label
+  if [ "$check" = independent ]; then label="Independent verification"; else label="Human approval"; fi
   spec=$(printf '%s' "$contract" | jq -c --arg check "$check" '.checks[] | select(.name == $check)')
   origin=$(printf '%s' "$spec" | jq -r '.origin')
   if [ "$origin" != configured ]; then
-    message="Risk '${risk}' requires '${check}' evidence from a configured verifier."
-    suggestion="Configure a trusted verify.${check} command in a reviewed baseline, provide the external evidence, and rerun verification."
+    message="${label} is required before this ${risk}-risk task can be completed, but no verifier is configured."
+    suggestion="Configure a trusted verify.${check} command in a reviewed baseline, provide the external evidence, and rerun agent-md verify."
     risk_result_json fail error "$code" "$message" "$suggestion" \
       "$risk" "$current_status" "$signals" "" "$check"
     return 0
@@ -1501,8 +1508,8 @@ risk_evidence_result() {
 
   anchor=$(attestation_trust_anchor_json "$config" "$check")
   if [ "$(printf '%s' "$anchor" | jq -r '.eligible')" != true ]; then
-    message="Risk '${risk}' cannot trust verify.${check}: trust anchor $(printf '%s' "$anchor" | jq -r '.reason')."
-    suggestion="Restore the reviewed verifier and declared files to their HEAD content, or establish a trusted external verifier."
+    message="${label} cannot be accepted because its configured verifier is not trusted: $(printf '%s' "$anchor" | jq -r '.reason')."
+    suggestion="Restore the reviewed verifier and declared files to their HEAD content, or configure a trusted external verifier. Use doctor for details."
     attestation_risk_result_json fail error RISK_ATTESTATION_UNTRUSTED "$message" "$suggestion" \
       "$risk" "$current_status" "$signals" "$check" "$anchor"
     return 0
@@ -1510,8 +1517,8 @@ risk_evidence_result() {
 
   missing=$(attestation_missing_capabilities "$contract" "$check")
   if [ -n "$missing" ]; then
-    message="Risk '${risk}' requires '${check}' evidence, but its verifier capability is unavailable: $(printf '%s' "$missing" | awk 'BEGIN { first=1 } { if (!first) printf ", "; printf "%s", $0; first=0 } END { print "" }')."
-    suggestion="Install or expose the declared capability and rerun verification; agent-md will not install provider dependencies automatically."
+    message="${label} is required before completion, but a provider capability is unavailable: $(printf '%s' "$missing" | awk 'BEGIN { first=1 } { if (!first) printf ", "; printf "%s", $0; first=0 } END { print "" }')."
+    suggestion="Install or expose the declared capability and rerun agent-md verify; agent-md will not install provider tools automatically."
     attestation_risk_result_json fail error VERIFY_UNAVAILABLE "$message" "$suggestion" \
       "$risk" "$current_status" "$signals" "$check" "$anchor"
     return 0
@@ -1519,7 +1526,7 @@ risk_evidence_result() {
 
   target=$(attestation_current_target_json "$scope")
   if [ "$(printf '%s' "$target" | jq -r '.eligible')" != true ]; then
-    message="Risk '${risk}' cannot bind '${check}' evidence while operationally relevant worktree changes are uncommitted."
+    message="${label} cannot cover the current work while operationally relevant changes are uncommitted."
     suggestion="Commit the reviewed operational change, obtain an attestation for that exact commit, and rerun verification."
     attestation_risk_result_json fail error RISK_ATTESTATION_UNBOUND "$message" "$suggestion" \
       "$risk" "$current_status" "$signals" "$check" "$anchor" "$target"
@@ -1543,8 +1550,8 @@ risk_evidence_result() {
     return 0
   fi
   if [ "$(printf '%s' "$execution" | jq -r '.exit_code')" -ne 0 ]; then
-    message="The trusted '${check}' verifier exited nonzero; output text cannot override its exit status."
-    suggestion="Recover the external evidence and rerun the verifier for the current target."
+    message="${label} did not pass because the configured verifier exited nonzero."
+    suggestion="Recover the external evidence for the current commit and rerun agent-md verify. Output text cannot override the exit status."
     attestation_risk_result_json fail error RISK_ATTESTATION_INVALID "$message" "$suggestion" \
       "$risk" "$current_status" "$signals" "$check" "$anchor" "$target" null "$execution"
     return 0
@@ -1553,7 +1560,7 @@ risk_evidence_result() {
   attestation=$(printf '%s' "$execution" | jq -r '.stdout' \
     | jq -c -s 'if length == 1 and (.[0] | type) == "object" then .[0] else empty end' 2>/dev/null)
   if [ -z "$attestation" ] || [ "$(printf '%s' "$attestation" | jq -r '.status // empty')" != pass ]; then
-    message="The trusted '${check}' verifier did not emit one structured passing attestation."
+    message="${label} did not produce valid structured evidence for the current commit."
     suggestion="Emit exactly one JSON object with status, kind, origin, and target for the current commit."
     attestation_risk_result_json fail error RISK_ATTESTATION_INVALID "$message" "$suggestion" \
       "$risk" "$current_status" "$signals" "$check" "$anchor" "$target" null "$execution"
@@ -1598,7 +1605,7 @@ risk_evidence_result() {
     return 0
   fi
 
-  message="Trusted '${check}' attestation passed for commit ${expected_commit}."
+  message="${label} passed for commit ${expected_commit}."
   attestation_risk_result_json pass info VERIFY_PASSED "$message" "" \
     "$risk" "$current_status" "$signals" "$check" "$anchor" "$target" "$attestation" "$execution"
 }

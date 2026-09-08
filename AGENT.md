@@ -34,6 +34,12 @@ visibly. Prefer structured evidence over interpretation of natural
 language. Git remains the factual source of truth. agent-md must remain
 standalone and dependency-light.
 
+Keep the ordinary path simple.
+Missing optional capability must not break ordinary work.
+Missing mandatory capability must prevent only the transition
+or action that requires its guarantee, never unrelated implementation work.
+Do not invent a silent fallback.
+
 ---
 
 ## 2. Operational State And Memory Boundaries
@@ -43,8 +49,9 @@ Three systems have distinct responsibilities:
 - **agent-md `memory/`** — current operational state and deterministic
   handoff: the active plan, task status, relevant gotchas, and definition
   of done.
-- **ICM (optional)** — semantic and historical recall across agents:
-  older decisions, resolved failures, and long-term project knowledge.
+- **Semantic-memory provider (optional)** — historical and semantic recall
+  across agents: older decisions, resolved failures, and long-term project
+  knowledge. ICM is one supported reference provider.
 - **Git** — factual source of truth for code and its history.
 
 Chat history is not durable state. On session start, read these files
@@ -188,23 +195,27 @@ bypass a fatal destructive-command or path-protection result. Stop and
 `verify.sh` enforce final evidence; pre-commit validates Risk integrity and
 signals without requiring final independent/human approval.
 
-When `agent-md.toml` declares `[integrations.icm] enabled = true`, use
-the available ICM integration for historical or cross-agent recall when
-needed. Do not copy recalled history wholesale into `memory/`; keep only
-the operational consequence that affects current work. Never require ICM
-for agent-md hooks, verification, safety, or task completion.
+When `agent-md.toml` declares `[integrations.icm] enabled = true`, use that
+specific optional ICM reference integration for historical or cross-agent
+recall when needed. Do not copy recalled history wholesale into `memory/`;
+keep only the operational consequence that affects current work. If no
+semantic-memory provider is declared, create no expectation or warning. Never
+require ICM or another provider for hooks, verification, safety, or completion.
 
 Operational handoff depends first on `progress.md`, `plan.md`,
-`verify.md`, `gotchas.md`, and Git. ICM may enrich historical context but
-must not be necessary to determine current status, remaining work,
-blockers, or the next step.
+`verify.md`, `gotchas.md`, and Git. A configured semantic-memory provider may
+enrich historical context but must not be necessary to determine current
+status, remaining work, blockers, or the next step.
 
 ### Architectural Non-Goals
 
 agent-md is not semantic memory, a multi-agent orchestrator, a model
 router, a background daemon, a project-management platform, a
 replacement for Git or CI, or a general-purpose agent runtime. Keep
-those boundaries explicit when evaluating new features.
+those boundaries explicit when evaluating new features. Users must not need to
+understand the internal trust model for the basic workflow, provider-specific
+infrastructure must not be required for ordinary use, and the core must remain
+usable without external semantic memory.
 
 ---
 
@@ -433,9 +444,9 @@ prose conventions.
 - Run independent tool calls in parallel when safe, then reconcile the
   results. Do not parallelize dependent steps.
 - Use selective context loading. Read only relevant files or history,
-  keep current operational consequences in `memory/`, use ICM for
-  semantic history when enabled, and avoid pasting raw dumps into every
-  turn.
+  keep current operational consequences in `memory/`, use the configured
+  semantic-memory provider for historical recall when enabled, and avoid
+  pasting raw dumps into every turn.
 - When a host exposes model or reasoning controls, use the cheapest
   capable mode for routine execution and reserve expensive reasoning for
   architecture, high-risk decisions, or failure analysis.
@@ -470,9 +481,9 @@ Existing controls are classified as follows:
 - **Quality** — evidence-first/TDD nudges, optional verification failures,
   Risk absence/possible underrating, and optional visual-evidence nudges;
   normally `warning`.
-- **Diagnostic** — doctor, optional ICM presence, output truncation, and
-  environment/wiring information; `info` or `warning`. Doctor may still
-  fail when a missing core dependency makes installed enforcement
+- **Diagnostic** — doctor, optional semantic-memory provider presence, output
+  truncation, and environment/wiring information; `info` or `warning`. Doctor
+  may still fail when a missing core dependency makes installed enforcement
   unusable.
 
 Safety violations, failed required verification, invalid enforcement
@@ -488,8 +499,8 @@ retry-count escape or automatic release for a real blocking result.
 - If memory is degrading, write the current state to `memory/progress.md`
   before compacting or handing work off.
 - Keep at most five recently completed outcomes in `progress.md`. Remove
-  superseded plan details and gotchas that no longer apply; Git and ICM,
-  when enabled, retain the history.
+  superseded plan details and gotchas that no longer apply; Git retains factual
+  history and a configured semantic-memory provider may retain semantic history.
 - Keep `plan.md` to the current direction, active phase, and decisions
   still in force; `verify.md` to current checks and definition of done;
   and `agents.md` to current agents, stack, MCPs, and tools.
