@@ -38,55 +38,68 @@ These names are retained compatibility interfaces in the current architecture.
 No removal is planned as part of this transition. They do not make the upstream
 project a dependency.
 
-## Operational State Direction
+## Working State And Control State
 
-The current `memory/` contract is preserved for compatibility in this phase,
-but it is not the final state architecture.
+The state boundary is hybrid and intentionally small:
 
-Future design work should separate:
+- **working state** lives in `memory/` for current-task context and handoff. A
+  fresh Git install adds these paths only to the repository-local
+  `.git/info/exclude`; they are not staged or published automatically. Working
+  state may be absent and is never a trust root;
+- **control state** lives in the agent-neutral `.project-control.toml`. Version
+  1 contains exactly `schema = 1` and one `risk` value;
+- **project policy** remains in the versioned `agent-md.toml`, because its
+  classifier, required checks, visual requirement, and attestation declarations
+  can change the guarantees applied to completion.
 
-- **working state** — volatile current-task and handoff context that may remain
-  local and unversioned by default; using a coding agent must not require a
-  developer to publish evidence of that use in Git;
-- **control state** — Risk, safety, verification, trust, approval, and
-  completion inputs whose integrity and binding must be protected, but which
-  need not necessarily be committed.
+`Status`, `Task`, `Next`, `Blockers`, `Recently Completed`, and `Scope` remain
+local working state. `Status: done` is only a completion claim: acceptance is
+calculated from current evidence and is never persisted as a pass. Scope is an
+advisory focus mechanism, not a safety boundary. `gotchas.md` is likewise
+working guidance; mandatory invariants belong in versioned policy or
+directives.
 
-That separation needs an explicit integrity and binding design. This phase does
-not rename `memory/`, add persistence, or weaken the existing Git/mtime-based
-compatibility behavior.
+Existing tracked `memory/` files remain compatible. A tracked legacy
+`memory/progress.md` Risk can supply the compatibility baseline only when no
+`.project-control.toml` exists. An untracked or ignored progress file may
+propose a stricter Risk but cannot become a more permissive trust root. No
+legacy state is migrated automatically.
 
-### Priority gap: private control-state integrity
+### Effective control requirements
 
-Current Risk is executor-editable in `memory/progress.md`, and the current
-implementation does not compare Risk transitions against the previous trusted
-state. Therefore, a Risk downgrade may be silent when deterministic risk
-signals do not detect possible underrating. Risk is a declared control input;
-signals can warn, and human/project direction remains authoritative, but the
-current implementation does not provide a complete integrity mechanism for
-private, non-versioned Risk state.
+Stop and `verify.sh` resolve the committed `HEAD` baseline against the current
+worktree. Pre-commit resolves the same baseline against the index. The resolver
+is conservative at the guarantee boundary:
 
-The first candidates for local, unversioned working state are:
+- effective Risk is the stricter of baseline and proposal;
+- required verification from either policy snapshot remains required;
+- a path remains relevant when either classifier covers it;
+- `visual.required = true` remains effective when either snapshot requires it;
+- invalid or absent control inputs never silently become `low` or produce a
+  more permissive policy.
 
-- `memory/plan.md`;
-- `memory/verify.md`;
-- `memory/agents.md`;
-- Task, Next, Blockers, and Recently Completed.
+A local completion claim can therefore activate requirements but cannot lower
+Risk, verification, trust, approval, path coverage, or visual requirements.
+Working state can be removed without erasing the Git-bound control baseline.
 
-The following require an explicit control-state design before being untracked:
+### Downgrade authority
 
-- Status;
-- Risk;
-- progress structure used by enforcement;
-- gotchas structure, if deterministic validation remains required.
+A lower proposal remains pending under the previous requirements. The portable
+basic mechanism is an explicitly reviewed checkpoint that establishes a new
+Git baseline out of band. Git supplies content binding and review visibility;
+it does not prove who authored or approved the commit. Protection against Git
+hook bypass, rewritten history, or an executor advancing an unreviewed baseline
+belongs to host and repository policy.
 
-Scope remains an advisory focus mechanism and must not become a security
-boundary. Volatile operational state should not require publication. Any state
-that changes safety, verification, Risk, trust, approval, or completion
-requirements needs an integrity and binding mechanism appropriate to the
-guarantee it controls. Integrity-bound does not necessarily mean committed, but
-private control state cannot be described as trustworthy until an actual trust
-root exists.
+When a project configures the existing approval verifier, a downgrade commit is
+accepted at its completion boundary only with structured, authority-separated
+approval bound to that exact `HEAD`. Executor-written prose, booleans, local
+hashes, or sidecars are not approval. No local cryptography, database, daemon,
+or private trust store is introduced.
+
+This is deliberately not a general private control-state system. Projects that
+require deterministic authorship or durable approval provenance must supply an
+external authority and repository protections appropriate to that guarantee.
 
 ## Optional Capabilities
 

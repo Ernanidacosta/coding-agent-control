@@ -16,8 +16,7 @@ fi
 . "$LIB"
 cd "$ROOT" || exit 1
 
-TOML=$(toml_path)
-CONTRACT=$(verification_contract_json "$TOML")
+CONTRACT=$(effective_verification_contract_json worktree)
 
 printf 'Verification:\n'
 if [ "$(printf '%s' "$CONTRACT" | jq -r '.valid')" != true ]; then
@@ -52,7 +51,7 @@ fi
 TIMEOUT=$(printf '%s' "$CONTRACT" | jq -r '.timeout_seconds // "not configured"')
 printf '  timeout: %s\n\n' "$TIMEOUT"
 
-VERIFY_SUMMARY=$(run_verification_contract "$TOML")
+VERIFY_SUMMARY=$(run_resolved_verification_contract "$CONTRACT")
 RISK_SUMMARY=$(run_risk_contract "$VERIFY_SUMMARY" worktree completion)
 SUMMARY=$(combine_policy_summaries "$VERIFY_SUMMARY" "$RISK_SUMMARY")
 printf 'Completion:\n'

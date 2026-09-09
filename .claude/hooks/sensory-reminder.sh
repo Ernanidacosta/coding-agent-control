@@ -18,7 +18,8 @@
 #                                            — the prose is the claim.
 #
 # No stop_hook_active bypass. A retry does not manufacture evidence.
-# The only way out is to produce the artifact — or flip required=false.
+# The only way out is to produce the artifact or establish a reviewed policy
+# baseline that no longer requires it. A same-change flip cannot weaken it.
 
 # shellcheck source=.claude/hooks/_lib.sh
 . "$(dirname "$0")/_lib.sh"
@@ -42,12 +43,18 @@ if [ "$UI_CHANGED" -eq 0 ]; then
   exit 0
 fi
 
-TOML=$(toml_path)
-REQUIRED=$(read_toml "$TOML" visual required)
-ART_DIR=$(read_toml "$TOML" visual artifacts_dir)
-FRESH=$(read_toml "$TOML" visual freshness_seconds)
-ART_DIR="${ART_DIR:-.agent/visual}"
-FRESH="${FRESH:-3600}"
+VISUAL_CONTRACT=$(effective_visual_contract_json worktree)
+if [ "$(printf '%s' "$VISUAL_CONTRACT" | jq -r '.valid')" != true ]; then
+  RESULT=$(policy_result_json fail error CONFIG_INVALID \
+    "$(printf '%s' "$VISUAL_CONTRACT" | jq -r '.error')" \
+    "Fix the visual policy before claiming completion.")
+  REASON=$(policy_human_message "$RESULT")
+  jq -n --arg r "$REASON" '{decision: "block", reason: $r}'
+  exit 0
+fi
+REQUIRED=$(printf '%s' "$VISUAL_CONTRACT" | jq -r '.required')
+ART_DIR=$(printf '%s' "$VISUAL_CONTRACT" | jq -r '.artifacts_dir')
+FRESH=$(printf '%s' "$VISUAL_CONTRACT" | jq -r '.freshness_seconds')
 
 if [ "$REQUIRED" = "true" ]; then
   if visual_evidence_ok "$ART_DIR" "$FRESH"; then

@@ -99,8 +99,11 @@ Fluxo básico:
 1. Instale coding-agent-control no projeto.
 2. Opcionalmente, execute `./.agent-md/bin/doctor.sh` para inspecionar a
    instalação.
-3. Trabalhe normalmente; o agente mantém o estado atual pequeno em `memory/`.
-4. Declare checks determinísticos quando forem úteis e habilite garantias
+3. Trabalhe normalmente; o estado local em `memory/` permanece não versionado
+   por padrão e pode estar ausente.
+4. Antes de reivindicar conclusão, crie e revise explicitamente o pequeno
+   registro de Risk em `.project-control.toml`.
+5. Declare checks determinísticos quando forem úteis e habilite garantias
    avançadas somente quando o Risk exigir.
 
 ## Como funciona
@@ -115,11 +118,12 @@ repositório
 ├── AGENT.md                 regras canônicas
 ├── AGENTS.md                adapter Codex/Cursor/Windsurf
 ├── CLAUDE.md                adapter Claude Code
+├── .project-control.toml     controle criado explicitamente
 ├── agent-md.toml.example    configuração determinística opcional
 ├── .claude/hooks/           enforcement Claude Code
 ├── .codex/hooks/            enforcement Codex
 ├── .agent-md/bin/           doctor, verify e helpers
-└── memory/                  estado operacional compatível atual
+└── memory/                  working state local, excluído localmente
 ```
 
 Os nomes `agent-md.toml`, `.agent-md/`, `memory/`, `$agent-md-verify` e os
@@ -158,22 +162,39 @@ apresentado como executado.
 
 ## Estado operacional
 
-`memory/` contém apenas a verdade operacional atual: status, tarefa, scope,
-próximos passos, bloqueios, plano vigente, critérios de verificação e gotchas
-ainda aplicáveis. Não é um changelog nem memória histórica. Git guarda o
-histórico factual.
+`memory/` contém working state local e volátil: status/claim atual, tarefa,
+scope, próximos passos, bloqueios, plano vigente, critérios de verificação e
+gotchas ainda aplicáveis. Não é changelog, memória histórica nem trust root.
+Em instalações Git novas, o installer registra esses arquivos apenas em
+`.git/info/exclude`; não os adiciona ao index nem exige sua publicação.
+Instalações legadas com `memory/` já rastreado continuam suportadas.
 
-O formato atual é preservado por compatibilidade. A direção arquitetural futura
-é separar estado de trabalho volátil, que pode permanecer local e não
-versionado, de estado de controle cuja integridade e binding afetam Risk,
-safety, verificação, trust, aprovação ou conclusão. Essa separação ainda não foi
-implementada; veja [`docs/architecture.md`](docs/architecture.md).
+O control state mínimo e agent-neutral vive em `.project-control.toml`, criado
+explicitamente e nunca inferido pelo installer:
+
+```toml
+schema = 1
+risk = "medium"
+```
+
+`agent-md.toml` continua sendo a policy versionada do projeto. Git liga essas
+declarações ao histórico e dá visibilidade para revisão, mas não prova autoria
+humana. Consulte [`docs/architecture.md`](docs/architecture.md).
 
 ## Risk e conclusão
 
 Risk responde “quanta evidência, revisão e aprovação são necessárias?”, não “a
-implementação é segura?”. O agente pode propor o Risk; o projeto e o
-desenvolvedor mantêm a autoridade final.
+implementação é segura?”. O Risk estabelecido vive em `.project-control.toml`.
+Um `Risk:` local/legado em `progress.md` pode propor um valor mais estrito, mas
+nunca reduzir o requisito efetivo. Risk ausente ou inválido nunca vira `low`
+silenciosamente.
+
+Stop/verify combinam `HEAD + worktree`; pre-commit combina `HEAD + index`. O
+Risk mais estrito vale imediatamente. Um downgrade permanece sob os requisitos
+anteriores até que uma baseline revisada seja estabelecida. Com approval
+verifier configurado, o downgrade exige aprovação com autoridade separada e
+ligada ao `HEAD` exato. Sem provider forte, o checkpoint humano é uma autoridade
+out-of-band: Git fornece binding e visibilidade, não prova quem aprovou.
 
 | Risk | Requisito adicional de conclusão |
 |---|---|

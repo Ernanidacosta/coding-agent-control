@@ -142,6 +142,7 @@ teardown() { teardown_repo; }
 [state]
 source_globs = ["domain/**"]
 EOF
+  git add agent-md.toml && git commit -q -m "custom classifier baseline"
   echo "export const ignored = true" > src.ts
   mkdir -p domain
   echo "schema" > domain/model.custom
@@ -160,6 +161,7 @@ source_globs = [
 ]
 ignore_globs = ["generated/**"]
 EOF
+  git add agent-md.toml && git commit -q -m "custom classifier baseline"
   mkdir -p generated
   echo "x = 1" > generated/client.py
   out=$(run_hook state-enforcement.sh '{"stop_hook_active":false}')
@@ -171,6 +173,7 @@ EOF
 [state]
 source_globs = []
 EOF
+  git add agent-md.toml && git commit -q -m "empty classifier baseline"
   echo "export const x = 1" > src.ts
   out=$(run_hook state-enforcement.sh '{"stop_hook_active":false}')
   [ -z "$out" ]
@@ -193,6 +196,17 @@ EOF
   [ "$status" -eq 1 ]
   echo "$output" | grep -q 'operationally relevant file(s) changed'
   echo "$output" | grep -q 'ERROR STATE_PROGRESS_STALE'
+}
+
+@test "pre-commit accepts locally updated legacy progress without staging it" {
+  echo "export const x = 1" > src.ts
+  git add src.ts
+  write_progress active "Reflect the staged source update"
+
+  run bash .githooks/pre-commit
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -q 'operational state up to date'
+  ! git diff --cached --name-only | grep -q '^memory/'
 }
 
 @test "pre-commit uses the shared classifier for staged documentation" {

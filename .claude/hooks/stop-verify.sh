@@ -31,8 +31,7 @@
 # Read and discard stdin — Claude sends JSON but we don't branch on it.
 cat > /dev/null
 
-TOML=$(toml_path)
-VERIFY_SUMMARY=$(run_verification_contract "$TOML")
+VERIFY_SUMMARY=$(run_effective_verification_contract worktree)
 RISK_SUMMARY=$(run_risk_contract "$VERIFY_SUMMARY" worktree completion)
 SUMMARY=$(combine_policy_summaries "$VERIFY_SUMMARY" "$RISK_SUMMARY")
 STATUS=$(printf '%s' "$SUMMARY" | jq -r '.status')

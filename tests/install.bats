@@ -81,20 +81,21 @@ EOF
   grep -q '^## Current' "$TARGET_DIR/memory/progress.md"
   grep -q '^Status: planned$' "$TARGET_DIR/memory/progress.md"
   ! grep -q '^Risk:' "$TARGET_DIR/memory/progress.md"
-  grep -q 'declare exactly one Risk' "$TARGET_DIR/memory/progress.md"
   ! grep -q '\*\*Rule\*\*:' "$TARGET_DIR/memory/gotchas.md"
+  git -C "$TARGET_DIR" check-ignore -q memory/progress.md
+  [ -z "$(git -C "$TARGET_DIR" status --short -- memory)" ]
   run bash -c "cd '$TARGET_DIR' && . .claude/hooks/_lib.sh && validate_progress_content \"\$(cat memory/progress.md)\" && validate_gotchas_content \"\$(cat memory/gotchas.md)\""
   [ "$status" -eq 0 ]
 }
 
-@test "Cursor-only install gives pre-commit the shared state classifier" {
+@test "Cursor-only fresh install permits private working state without weakening the shared classifier" {
   install_agent_md --agent=cursor
   [ -f "$TARGET_DIR/.claude/hooks/_lib.sh" ]
   echo 'export const x = 1' > "$TARGET_DIR/src.ts"
   git -C "$TARGET_DIR" add src.ts
   run bash -c "cd '$TARGET_DIR' && .githooks/pre-commit"
-  [ "$status" -eq 1 ]
-  echo "$output" | grep -q 'operationally relevant file(s) changed'
+  [ "$status" -eq 0 ]
+  [ -z "$(git -C "$TARGET_DIR" status --short -- memory)" ]
 }
 
 @test "ICM enabled but unavailable is a non-fatal doctor warning" {

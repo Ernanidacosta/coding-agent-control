@@ -153,7 +153,7 @@ EOF
   run bash .agent-md/bin/doctor.sh
   [ "$status" -eq 0 ]
   echo "$output" | grep -Eq 'lint[[:space:]]+required[[:space:]]+configured'
-  echo "$output" | grep -Eq 'typecheck[[:space:]]+optional[[:space:]]+inferred'
+  echo "$output" | grep -Eq 'typecheck[[:space:]]+required[[:space:]]+inferred'
   echo "$output" | grep -Eq 'runtime[[:space:]]+optional[[:space:]]+not configured'
   [ ! -e doctor-must-not-run ]
 }
@@ -181,11 +181,13 @@ EOF
 
 @test "pre-commit blocks required checks and allows optional failures" {
   write_contract "false" '"test"'
+  git add agent-md.toml
   run bash .githooks/pre-commit
   [ "$status" -eq 1 ]
   echo "$output" | grep -q 'VERIFY_REQUIRED_FAILED'
 
   write_contract "false" ''
+  git add agent-md.toml
   run bash .githooks/pre-commit
   [ "$status" -eq 0 ]
   echo "$output" | grep -q 'VERIFY_OPTIONAL_FAILED'

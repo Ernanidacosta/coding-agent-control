@@ -40,6 +40,17 @@ None
 EOF
 }
 
+establish_control() {
+  local risk_value="$1"
+  cat > "$TARGET_DIR/.project-control.toml" <<EOF
+schema = 1
+risk = "$risk_value"
+EOF
+  git -C "$TARGET_DIR" add .project-control.toml
+  git -C "$TARGET_DIR" -c user.email=test@example.com -c user.name=test \
+    commit -q -m "control baseline"
+}
+
 make_provider_free_path() {
   local tool tool_path
   PROVIDER_FREE_BIN="$TARGET_DIR/provider-free-bin"
@@ -87,6 +98,7 @@ run_doctor_without_providers() {
 @test "low-risk completion works without external providers" {
   install_basic >/dev/null
   write_progress_state "done" low
+  establish_control low
   make_provider_free_path
 
   run env PATH="$PROVIDER_FREE_BIN" /bin/bash -c \
@@ -120,6 +132,9 @@ independent = "/bin/true"
 [verify.attestation]
 independent_capabilities = ["gh"]
 EOF
+  git -C "$TARGET_DIR" add agent-md.toml
+  git -C "$TARGET_DIR" -c user.email=test@example.com -c user.name=test \
+    commit -q -m "independent capability baseline"
   make_provider_free_path
 
   run_doctor_without_providers
@@ -132,6 +147,7 @@ EOF
 @test "declared ICM absence warns but does not affect ordinary completion" {
   install_basic >/dev/null
   write_progress_state "done" low
+  establish_control low
   cat > "$TARGET_DIR/agent-md.toml" <<'EOF'
 [integrations.icm]
 enabled = true
@@ -163,6 +179,7 @@ EOF
 @test "high-risk done reports missing independent verifier as blocking with recovery" {
   install_basic >/dev/null
   write_progress_state "done" high
+  establish_control high
   make_provider_free_path
 
   run_doctor_without_providers
@@ -181,6 +198,7 @@ EOF
 @test "critical done reports human approval as a separate blocking capability" {
   install_basic >/dev/null
   write_progress_state "done" critical
+  establish_control critical
   make_provider_free_path
 
   run_doctor_without_providers
@@ -215,19 +233,18 @@ EOF
     "$BATS_TEST_DIRNAME/../examples/github-actions/github-actions-independent.conf"
 }
 
-@test "legacy interfaces and future state boundary are documented without migration" {
+@test "legacy interfaces and hybrid state boundary are documented without migration" {
   grep -Fq '`agent-md.toml`, `.agent-md/`, `memory/`, `$agent-md-verify`' \
     "$BATS_TEST_DIRNAME/../README.md"
   grep -Fq '**working state**' "$BATS_TEST_DIRNAME/../docs/architecture.md"
   grep -Fq '**control state**' "$BATS_TEST_DIRNAME/../docs/architecture.md"
-  grep -Fq 'must not require a' "$BATS_TEST_DIRNAME/../docs/architecture.md"
-  grep -Fq 'developer to publish evidence of that use in Git' \
+  grep -Fq 'they are not staged or published automatically' \
     "$BATS_TEST_DIRNAME/../docs/architecture.md"
-  grep -Fq 'Current Risk is executor-editable' \
+  grep -Fq 'state may be absent and is never a trust root' \
     "$BATS_TEST_DIRNAME/../docs/architecture.md"
-  grep -Fq 'a Risk downgrade may be silent' \
+  grep -Fq 'legacy state is migrated automatically' \
     "$BATS_TEST_DIRNAME/../docs/architecture.md"
-  grep -Fq 'private control state cannot be described as trustworthy' \
+  grep -Fq 'it does not prove who authored or approved the commit' \
     "$BATS_TEST_DIRNAME/../docs/architecture.md"
 }
 

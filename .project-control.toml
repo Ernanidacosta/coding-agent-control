@@ -1,0 +1,4 @@
+# Agent-neutral, Git-bound control requirements for this repository.
+# Git provides content binding and review visibility, not proof of human authorship.
+schema = 1
+risk = "high"

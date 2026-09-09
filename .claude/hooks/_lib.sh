@@ -167,6 +167,119 @@ toml_path() {
   echo "${AGENT_MD_TOML:-agent-md.toml}"
 }
 
+project_control_path() {
+  printf '%s\n' '.project-control.toml'
+}
+
+# file_exists_in_snapshot <path> <worktree|staged|head|parent>
+file_exists_in_snapshot() {
+  local path="$1" scope="${2:-worktree}"
+  case "$scope" in
+    worktree) [ -f "$path" ] ;;
+    staged) git cat-file -e ":${path}" 2>/dev/null ;;
+    head) git cat-file -e "HEAD:${path}" 2>/dev/null ;;
+    parent) git cat-file -e "HEAD^:${path}" 2>/dev/null ;;
+    *) return 1 ;;
+  esac
+}
+
+# file_snapshot <path> <worktree|staged|head|parent>
+file_snapshot() {
+  local path="$1" scope="${2:-worktree}"
+  case "$scope" in
+    worktree) [ -f "$path" ] && cat "$path" ;;
+    staged) git show ":${path}" 2>/dev/null ;;
+    head) git show "HEAD:${path}" 2>/dev/null ;;
+    parent) git show "HEAD^:${path}" 2>/dev/null ;;
+  esac
+}
+
+# snapshot_to_temp <path> <scope> <destination>
+# Materializes a snapshot for the deliberately small parsers. An absent file
+# becomes an empty config, preserving the existing no-config heuristic mode.
+snapshot_to_temp() {
+  local path="$1" scope="$2" destination="$3"
+  : > "$destination"
+  file_exists_in_snapshot "$path" "$scope" || return 0
+  file_snapshot "$path" "$scope" > "$destination"
+}
+
+risk_rank() {
+  case "$1" in
+    low) printf '1\n' ;;
+    medium) printf '2\n' ;;
+    high) printf '3\n' ;;
+    critical) printf '4\n' ;;
+    *) printf '0\n' ;;
+  esac
+}
+
+stricter_risk() {
+  local first="${1:-}" second="${2:-}"
+  if [ "$(risk_rank "$first")" -ge "$(risk_rank "$second")" ]; then
+    printf '%s\n' "$first"
+  else
+    printf '%s\n' "$second"
+  fi
+}
+
+# project_control_json_from_content <toml>
+# Parses only the root-level schema and risk fields intentionally exposed by
+# .project-control.toml. This is not a general TOML parser.
+project_control_json_from_content() {
+  local content="$1" parsed valid schema risk error
+  parsed=$(printf '%s\n' "$content" | awk '
+    function trim(value) {
+      gsub(/^[[:space:]]+|[[:space:]]+$/, "", value)
+      return value
+    }
+    function fail(message) {
+      if (error == "") error = message
+    }
+    /^[[:space:]]*($|#)/ { next }
+    {
+      line = $0
+      sub(/[[:space:]]*#.*$/, "", line)
+      if (line ~ /^[[:space:]]*schema[[:space:]]*=/) {
+        schema_count++
+        value = line
+        sub(/^[[:space:]]*schema[[:space:]]*=[[:space:]]*/, "", value)
+        schema = trim(value)
+      } else if (line ~ /^[[:space:]]*risk[[:space:]]*=/) {
+        risk_count++
+        value = line
+        sub(/^[[:space:]]*risk[[:space:]]*=[[:space:]]*/, "", value)
+        value = trim(value)
+        if (value ~ /^"[^"]*"$/ || value ~ /^\047[^\047]*\047$/) {
+          risk = substr(value, 2, length(value) - 2)
+        } else {
+          fail("risk must be a quoted string")
+        }
+      } else {
+        fail("only schema and risk are allowed")
+      }
+    }
+    END {
+      if (schema_count != 1 || schema != "1") fail("schema must occur exactly once with value 1")
+      if (risk_count != 1) fail("risk must occur exactly once")
+      if (risk !~ /^(low|medium|high|critical)$/) fail("risk must be low, medium, high, or critical")
+      if (error == "") print "ok\t" schema "\t" risk
+      else print "error\t\t\t" error
+    }
+  ')
+  valid=${parsed%%$'\t'*}
+  if [ "$valid" = ok ]; then
+    schema=$(printf '%s' "$parsed" | cut -f2)
+    risk=$(printf '%s' "$parsed" | cut -f3)
+    jq -cn --arg risk "$risk" --argjson schema "$schema" \
+      '{valid:true, schema:$schema, risk:$risk}'
+  else
+    error=$(printf '%s' "$parsed" | cut -f4-)
+    jq -cn --arg error "$error" \
+      '{valid:false, schema:null, risk:null, error:$error}'
+  fi
+}
+
 # stat_mtime <path> — portable mtime in epoch seconds (Linux + macOS).
 stat_mtime() {
   stat -c %Y "$1" 2>/dev/null || stat -f %m "$1" 2>/dev/null
@@ -497,6 +610,88 @@ EOF
     '
 }
 
+# merge_verification_contracts <baseline-json> <proposal-json>
+# Required commands from either side remain required. Distinct required
+# commands for the same check both run; this avoids guessing whether a command
+# replacement weakens or strengthens the guarantee. Conditional attestation
+# declarations remain singular and continue through their existing HEAD trust
+# validation.
+merge_verification_contracts() {
+  local baseline="$1" proposal="$2"
+  if [ "$(printf '%s' "$baseline" | jq -r '.valid')" != true ]; then
+    printf '%s\n' "$baseline"
+    return 0
+  fi
+  if [ "$(printf '%s' "$proposal" | jq -r '.valid')" != true ]; then
+    printf '%s\n' "$proposal"
+    return 0
+  fi
+
+  jq -cn --argjson baseline "$baseline" --argjson proposal "$proposal" '
+    def ordinary:
+      [($baseline.checks + $proposal.checks)[] |
+        select(.name != "independent" and .name != "approval")]
+      | group_by([.name, .command])
+      | map(
+          . as $group
+          | $group[0]
+          | .requirement = (if any($group[]; .requirement == "required") then "required" else "optional" end)
+          | .origin = (if any($group[]; .origin == "configured") then "configured"
+                       elif any($group[]; .origin == "inferred") then "inferred"
+                       else "not configured" end)
+        );
+    def spec($contract; $name):
+      [$contract.checks[] | select(.name == $name)][0];
+    def attestation($name):
+      (spec($baseline; $name)) as $old
+      | (spec($proposal; $name)) as $new
+      | if $old.origin == "configured" and $new.origin != "configured" then $old
+        else $new
+        end;
+    ([ $baseline.timeout_seconds, $proposal.timeout_seconds ] | map(select(. != null))) as $timeouts
+    | {
+        valid: true,
+        policy: "effective",
+        timeout_seconds: (if ($timeouts | length) == 0 then null else ($timeouts | min) end),
+        checks: (ordinary + [attestation("independent"), attestation("approval")]),
+        baseline_contract: $baseline,
+        proposal_contract: $proposal
+      }
+  '
+}
+
+# effective_verification_contract_json [worktree|staged]
+effective_verification_contract_json() {
+  local scope="${1:-worktree}" config baseline_file proposal_file
+  local baseline proposal merged
+  config=$(toml_path)
+
+  # A config outside the repository cannot be a Git-bound baseline. It remains
+  # supported as a proposal for compatibility, but never erases the empty
+  # baseline contract.
+  case "$config" in
+    /*|*'..'*)
+      baseline=$(verification_contract_json /dev/null)
+      proposal=$(verification_contract_json "$config")
+      merge_verification_contracts "$baseline" "$proposal"
+      return 0
+      ;;
+  esac
+
+  baseline_file=$(mktemp "${TMPDIR:-/tmp}/agent-md-baseline-config.XXXXXX") || return 1
+  proposal_file=$(mktemp "${TMPDIR:-/tmp}/agent-md-proposal-config.XXXXXX") || {
+    rm -f "$baseline_file"
+    return 1
+  }
+  snapshot_to_temp "$config" head "$baseline_file"
+  snapshot_to_temp "$config" "$scope" "$proposal_file"
+  baseline=$(verification_contract_json "$baseline_file")
+  proposal=$(verification_contract_json "$proposal_file")
+  rm -f "$baseline_file" "$proposal_file"
+  merged=$(merge_verification_contracts "$baseline" "$proposal")
+  printf '%s\n' "$merged"
+}
+
 # verification_command_preflight <command>
 # Returns 0 for an obviously available direct command, 1 for an obviously
 # unavailable one, 2 when safe static inspection cannot decide, and 3 for
@@ -639,14 +834,13 @@ run_verification_check() {
     "$name" "$requirement" "$origin" "$command" "$exit_code" "$evidence" "$truncated"
 }
 
-# run_verification_contract [config]
+# run_resolved_verification_contract <contract-json>
 # Returns one JSON summary. Exit status is intentionally always zero so hook
 # wrappers can translate results without `set -e` surprises; `.status` is the
 # authoritative control signal.
-run_verification_contract() {
-  local config="${1:-$(toml_path)}" contract error_result results_file
+run_resolved_verification_contract() {
+  local contract="$1" error_result results_file
   local spec result timeout_seconds resolved_count=0 results status
-  contract=$(verification_contract_json "$config")
   if [ "$(printf '%s' "$contract" | jq -r '.valid')" != true ]; then
     error_result=$(printf '%s' "$contract" | jq -c '.error')
     jq -cn --argjson contract "$contract" --argjson result "$error_result" \
@@ -695,6 +889,23 @@ run_verification_contract() {
   ')
   jq -cn --arg status "$status" --argjson contract "$contract" --argjson results "$results" \
     '{status:$status, contract:$contract, results:$results}'
+}
+
+# run_verification_contract [config]
+# Backward-compatible single-config entry point used by downstream installs.
+run_verification_contract() {
+  local config="${1:-$(toml_path)}" contract
+  contract=$(verification_contract_json "$config")
+  run_resolved_verification_contract "$contract"
+}
+
+# run_effective_verification_contract [worktree|staged]
+# Shared entry point for Stop, pre-commit, verify, and doctor. It executes the
+# conservative union of the Git baseline and the current proposal.
+run_effective_verification_contract() {
+  local scope="${1:-worktree}" contract
+  contract=$(effective_verification_contract_json "$scope")
+  run_resolved_verification_contract "$contract"
 }
 
 verification_result_human() {
@@ -772,38 +983,93 @@ default_ignore_globs() {
     '.github/**' '.windsurf/**' \
     '*.md' 'LICENSE' 'LICENSE.*' \
     '.gitignore' '.gitattributes' '.editorconfig' '.ai-memory.toml' \
+    '.project-control.toml' \
     'agent-md.toml' 'agent-md.toml.example'
 }
 
-# load_state_globs — populates the two newline-delimited globals below.
-# A configured key replaces its default independently. Empty arrays are
-# therefore meaningful and must not be confused with absent keys.
-load_state_globs() {
-  local config parsed status
-  config=$(toml_path)
-  AGENT_MD_STATE_ERROR=""
-
+state_globs_json() {
+  local config="$1" sources ignores parsed status source_json ignore_json
   parsed=$(read_toml_array "$config" state source_globs)
   status=$?
   case "$status" in
-    0) AGENT_MD_SOURCE_GLOBS="$parsed" ;;
-    1) AGENT_MD_SOURCE_GLOBS=$(default_source_globs) ;;
+    0) sources="$parsed" ;;
+    1) sources=$(default_source_globs) ;;
     *)
-      AGENT_MD_STATE_ERROR="Invalid ${config}: state.source_globs must be an array of quoted strings."
-      return 2
+      jq -cn --arg error "Invalid ${config}: state.source_globs must be an array of quoted strings." \
+        '{valid:false,error:$error,source_globs:[],ignore_globs:[]}'
+      return 0
       ;;
   esac
 
   parsed=$(read_toml_array "$config" state ignore_globs)
   status=$?
   case "$status" in
-    0) AGENT_MD_IGNORE_GLOBS="$parsed" ;;
-    1) AGENT_MD_IGNORE_GLOBS=$(default_ignore_globs) ;;
+    0) ignores="$parsed" ;;
+    1) ignores=$(default_ignore_globs) ;;
     *)
-      AGENT_MD_STATE_ERROR="Invalid ${config}: state.ignore_globs must be an array of quoted strings."
-      return 2
+      jq -cn --arg error "Invalid ${config}: state.ignore_globs must be an array of quoted strings." \
+        '{valid:false,error:$error,source_globs:[],ignore_globs:[]}'
+      return 0
       ;;
   esac
+
+  source_json=$(printf '%s' "$sources" | jq -Rsc 'split("\n") | map(select(length > 0))')
+  ignore_json=$(printf '%s' "$ignores" | jq -Rsc 'split("\n") | map(select(length > 0))')
+  jq -cn --argjson sources "$source_json" --argjson ignores "$ignore_json" \
+    '{valid:true,source_globs:$sources,ignore_globs:$ignores}'
+}
+
+# load_state_globs — populates the two newline-delimited globals below.
+# A configured key replaces its default independently. Empty arrays are
+# therefore meaningful and must not be confused with absent keys.
+load_state_globs() {
+  local config resolved
+  config=$(toml_path)
+  AGENT_MD_STATE_ERROR=""
+  resolved=$(state_globs_json "$config")
+  if [ "$(printf '%s' "$resolved" | jq -r '.valid')" != true ]; then
+    AGENT_MD_STATE_ERROR=$(printf '%s' "$resolved" | jq -r '.error')
+    return 2
+  fi
+  AGENT_MD_SOURCE_GLOBS=$(printf '%s' "$resolved" | jq -r '.source_globs[]')
+  AGENT_MD_IGNORE_GLOBS=$(printf '%s' "$resolved" | jq -r '.ignore_globs[]')
+}
+
+# load_effective_state_globs [worktree|staged]
+# Keeps separate classifiers and treats a path as relevant when either the
+# established baseline or the current proposal considers it relevant.
+load_effective_state_globs() {
+  local scope="${1:-worktree}" config baseline_file proposal_file baseline proposal
+  config=$(toml_path)
+  AGENT_MD_STATE_ERROR=""
+  baseline_file=$(mktemp "${TMPDIR:-/tmp}/agent-md-baseline-state.XXXXXX") || return 2
+  proposal_file=$(mktemp "${TMPDIR:-/tmp}/agent-md-proposal-state.XXXXXX") || {
+    rm -f "$baseline_file"
+    return 2
+  }
+  case "$config" in
+    /*|*'..'*) : > "$baseline_file"; cp "$config" "$proposal_file" 2>/dev/null || : > "$proposal_file" ;;
+    *) snapshot_to_temp "$config" head "$baseline_file"; snapshot_to_temp "$config" "$scope" "$proposal_file" ;;
+  esac
+  baseline=$(state_globs_json "$baseline_file")
+  proposal=$(state_globs_json "$proposal_file")
+  if [ "$(printf '%s' "$baseline" | jq -r '.valid')" != true ]; then
+    AGENT_MD_STATE_ERROR=$(printf '%s' "$baseline" | jq -r '.error')
+    AGENT_MD_STATE_ERROR=${AGENT_MD_STATE_ERROR//$baseline_file/$config}
+    rm -f "$baseline_file" "$proposal_file"
+    return 2
+  fi
+  if [ "$(printf '%s' "$proposal" | jq -r '.valid')" != true ]; then
+    AGENT_MD_STATE_ERROR=$(printf '%s' "$proposal" | jq -r '.error')
+    AGENT_MD_STATE_ERROR=${AGENT_MD_STATE_ERROR//$proposal_file/$config}
+    rm -f "$baseline_file" "$proposal_file"
+    return 2
+  fi
+  rm -f "$baseline_file" "$proposal_file"
+  AGENT_MD_BASELINE_SOURCE_GLOBS=$(printf '%s' "$baseline" | jq -r '.source_globs[]')
+  AGENT_MD_BASELINE_IGNORE_GLOBS=$(printf '%s' "$baseline" | jq -r '.ignore_globs[]')
+  AGENT_MD_PROPOSAL_SOURCE_GLOBS=$(printf '%s' "$proposal" | jq -r '.source_globs[]')
+  AGENT_MD_PROPOSAL_IGNORE_GLOBS=$(printf '%s' "$proposal" | jq -r '.ignore_globs[]')
 }
 
 path_matches_globs() {
@@ -826,6 +1092,19 @@ path_is_operationally_relevant() {
   path_matches_globs "$path" "$AGENT_MD_SOURCE_GLOBS"
 }
 
+path_is_effectively_relevant() {
+  local path="$1"
+  if ! path_matches_globs "$path" "$AGENT_MD_BASELINE_IGNORE_GLOBS" \
+    && path_matches_globs "$path" "$AGENT_MD_BASELINE_SOURCE_GLOBS"; then
+    return 0
+  fi
+  if ! path_matches_globs "$path" "$AGENT_MD_PROPOSAL_IGNORE_GLOBS" \
+    && path_matches_globs "$path" "$AGENT_MD_PROPOSAL_SOURCE_GLOBS"; then
+    return 0
+  fi
+  return 1
+}
+
 changed_files() {
   local scope="${1:-worktree}"
   if [ "$scope" = "staged" ]; then
@@ -844,6 +1123,16 @@ filter_operationally_relevant_files() {
   while IFS= read -r file; do
     [ -n "$file" ] || continue
     if path_is_operationally_relevant "$file"; then
+      printf '%s\n' "$file"
+    fi
+  done
+}
+
+filter_effectively_relevant_files() {
+  local file
+  while IFS= read -r file; do
+    [ -n "$file" ] || continue
+    if path_is_effectively_relevant "$file"; then
       printf '%s\n' "$file"
     fi
   done
@@ -1013,6 +1302,198 @@ progress_risk_from_content() {
   '
 }
 
+progress_risk_candidate_json() {
+  local content="$1" count risk
+  if [ -z "$content" ]; then
+    jq -cn '{present:false,valid:true,risk:null}'
+    return 0
+  fi
+  count=$(progress_risk_count_from_content "$content")
+  risk=$(progress_risk_from_content "$content")
+  if [ "$count" -eq 0 ]; then
+    jq -cn '{present:false,valid:true,risk:null}'
+  elif [ "$count" -eq 1 ] && printf '%s\n' "$risk" | grep -Eq '^(low|medium|high|critical)$'; then
+    jq -cn --arg risk "$risk" '{present:true,valid:true,risk:$risk}'
+  else
+    jq -cn --arg risk "$risk" \
+      '{present:true,valid:false,risk:(if $risk == "" then null else $risk end),error:"Risk must occur once and be low, medium, high, or critical."}'
+  fi
+}
+
+snapshot_relation_to_head() {
+  local path="$1" scope="${2:-worktree}" baseline_file proposal_file relation
+  baseline_file=$(mktemp "${TMPDIR:-/tmp}/agent-md-baseline-file.XXXXXX") || return 1
+  proposal_file=$(mktemp "${TMPDIR:-/tmp}/agent-md-proposal-file.XXXXXX") || {
+    rm -f "$baseline_file"
+    return 1
+  }
+  if file_exists_in_snapshot "$path" head; then
+    file_snapshot "$path" head > "$baseline_file"
+    if ! file_exists_in_snapshot "$path" "$scope"; then
+      relation=deleted
+    else
+      file_snapshot "$path" "$scope" > "$proposal_file"
+      if cmp -s "$baseline_file" "$proposal_file"; then relation=established; else relation=proposed; fi
+    fi
+  elif file_exists_in_snapshot "$path" "$scope"; then
+    relation=proposed
+  else
+    relation=absent
+  fi
+  rm -f "$baseline_file" "$proposal_file"
+  printf '%s\n' "$relation"
+}
+
+# effective_control_requirements_json [worktree|staged]
+# Resolves Git-bound baseline plus current proposal without executing checks or
+# external verifiers. Git proves content/binding, not human authorship.
+effective_control_requirements_json() {
+  local scope="${1:-worktree}" control_path progress_path config
+  local baseline_source=none baseline_risk="" baseline_valid=true legacy=false
+  local head_declared_risk="" parent_risk="" baseline_authority="git-bound"
+  local proposal_control_risk="" proposal_progress_risk="" proposal_risk=""
+  local proposal_valid=true control_content progress_content parsed candidate
+  local effective_risk="" downgrade=none downgrade_authority=none results='[]' result contract policy_status
+  control_path=$(project_control_path)
+  progress_path=memory/progress.md
+  config=$(toml_path)
+
+  if file_exists_in_snapshot "$control_path" head; then
+    control_content=$(file_snapshot "$control_path" head)
+    parsed=$(project_control_json_from_content "$control_content")
+    baseline_source=project-control
+    if [ "$(printf '%s' "$parsed" | jq -r '.valid')" = true ]; then
+      baseline_risk=$(printf '%s' "$parsed" | jq -r '.risk')
+      head_declared_risk="$baseline_risk"
+    else
+      baseline_valid=false
+      result=$(policy_result_json fail error CONTROL_INVALID \
+        "The Git-bound .project-control.toml baseline is invalid: $(printf '%s' "$parsed" | jq -r '.error')." \
+        "Restore a reviewed schema = 1 control record with one valid risk value." "$control_path")
+      results=$(printf '%s' "$results" | jq -c --argjson result "$result" '. + [$result]')
+    fi
+  elif file_exists_in_snapshot "$progress_path" head; then
+    progress_content=$(file_snapshot "$progress_path" head)
+    candidate=$(progress_risk_candidate_json "$progress_content")
+    if [ "$(printf '%s' "$candidate" | jq -r '.valid')" = true ] \
+      && [ "$(printf '%s' "$candidate" | jq -r '.present')" = true ]; then
+      baseline_source="legacy-progress"
+      baseline_risk=$(printf '%s' "$candidate" | jq -r '.risk')
+      legacy=true
+    elif [ "$(printf '%s' "$candidate" | jq -r '.valid')" != true ]; then
+      baseline_valid=false
+      result=$(policy_result_json fail error CONTROL_INVALID \
+        "The legacy tracked progress Risk baseline is invalid." \
+        "Correct the tracked legacy Risk or explicitly establish .project-control.toml." "$progress_path")
+      results=$(printf '%s' "$results" | jq -c --argjson result "$result" '. + [$result]')
+    fi
+  fi
+
+  if file_exists_in_snapshot "$control_path" "$scope"; then
+    control_content=$(file_snapshot "$control_path" "$scope")
+    parsed=$(project_control_json_from_content "$control_content")
+    if [ "$(printf '%s' "$parsed" | jq -r '.valid')" = true ]; then
+      proposal_control_risk=$(printf '%s' "$parsed" | jq -r '.risk')
+    else
+      proposal_valid=false
+      result=$(policy_result_json fail error CONTROL_INVALID \
+        "The proposed .project-control.toml is invalid: $(printf '%s' "$parsed" | jq -r '.error')." \
+        "Use only schema = 1 and one quoted risk value: low, medium, high, or critical." "$control_path")
+      results=$(printf '%s' "$results" | jq -c --argjson result "$result" '. + [$result]')
+    fi
+  elif [ "$baseline_source" = project-control ]; then
+    result=$(policy_result_json warn warning CONTROL_BASELINE_REQUIRED \
+      "The Git-bound project control record is absent from the current proposal; its guarantees remain effective." \
+      "Restore .project-control.toml or establish a reviewed replacement baseline." "$control_path")
+    results=$(printf '%s' "$results" | jq -c --argjson result "$result" '. + [$result]')
+  fi
+
+  if file_exists_in_snapshot "$progress_path" "$scope"; then
+    progress_content=$(file_snapshot "$progress_path" "$scope")
+    candidate=$(progress_risk_candidate_json "$progress_content")
+    if [ "$(printf '%s' "$candidate" | jq -r '.valid')" != true ]; then
+      proposal_valid=false
+      result=$(policy_result_json fail error RISK_INVALID \
+        "The local completion claim contains an invalid Risk proposal." \
+        "Correct or remove the local Risk field; it cannot override the Git-bound baseline." "$progress_path")
+      results=$(printf '%s' "$results" | jq -c --argjson result "$result" '. + [$result]')
+    elif [ "$(printf '%s' "$candidate" | jq -r '.present')" = true ]; then
+      proposal_progress_risk=$(printf '%s' "$candidate" | jq -r '.risk')
+    fi
+  fi
+
+  proposal_risk=$(stricter_risk "$proposal_control_risk" "$proposal_progress_risk")
+  effective_risk=$(stricter_risk "$baseline_risk" "$proposal_risk")
+  if [ -n "$baseline_risk" ] && [ -n "$proposal_risk" ] \
+    && [ "$(risk_rank "$proposal_risk")" -lt "$(risk_rank "$baseline_risk")" ]; then
+    downgrade=pending
+    result=$(policy_result_json warn warning CONTROL_RISK_DOWNGRADE_PENDING \
+      "The proposed Risk downgrade does not reduce the effective requirements." \
+      "Establish the lower Risk through a reviewed Git baseline or an authority-separated approval verifier." "$control_path")
+    results=$(printf '%s' "$results" | jq -c --argjson result "$result" '. + [$result]')
+  fi
+
+  contract=$(effective_verification_contract_json "$scope")
+  policy_status=$(snapshot_relation_to_head "$config" "$scope")
+  if [ "$(printf '%s' "$contract" | jq -r '.valid')" != true ]; then
+    result=$(printf '%s' "$contract" | jq -c '.error')
+    results=$(printf '%s' "$results" | jq -c --argjson result "$result" '. + [$result]')
+  fi
+
+  # When a strong approval verifier is configured, a downgrade committed in
+  # HEAD relative to its parent remains pending until that verifier approves
+  # the exact HEAD target. Without such a provider, HEAD is an explicitly
+  # human-established/out-of-band baseline; Git binds content but cannot prove
+  # who authored it.
+  if [ -n "$head_declared_risk" ] && git rev-parse --verify HEAD^ >/dev/null 2>&1; then
+    if file_exists_in_snapshot "$control_path" parent; then
+      parsed=$(project_control_json_from_content "$(file_snapshot "$control_path" parent)")
+      if [ "$(printf '%s' "$parsed" | jq -r '.valid')" = true ]; then
+        parent_risk=$(printf '%s' "$parsed" | jq -r '.risk')
+      fi
+    elif file_exists_in_snapshot "$progress_path" parent; then
+      candidate=$(progress_risk_candidate_json "$(file_snapshot "$progress_path" parent)")
+      if [ "$(printf '%s' "$candidate" | jq -r '.valid and .present')" = true ]; then
+        parent_risk=$(printf '%s' "$candidate" | jq -r '.risk')
+      fi
+    fi
+    if [ -n "$parent_risk" ] \
+      && [ "$(risk_rank "$head_declared_risk")" -lt "$(risk_rank "$parent_risk")" ]; then
+      if [ "$(printf '%s' "$contract" | jq -r '[.checks[] | select(.name == "approval")][0].origin // "not configured"')" = configured ]; then
+        baseline_risk="$parent_risk"
+        proposal_risk=$(stricter_risk "$head_declared_risk" "$proposal_progress_risk")
+        effective_risk=$(stricter_risk "$baseline_risk" "$proposal_risk")
+        downgrade=pending
+        downgrade_authority=approval
+        baseline_authority="approval-required"
+      else
+        baseline_authority="human-established-out-of-band"
+      fi
+    fi
+  fi
+
+  jq -cn \
+    --arg source "$baseline_source" --arg baseline_risk "$baseline_risk" \
+    --arg proposal_risk "$proposal_risk" --arg effective_risk "$effective_risk" \
+    --arg downgrade "$downgrade" --arg downgrade_authority "$downgrade_authority" \
+    --arg baseline_authority "$baseline_authority" --arg policy_status "$policy_status" \
+    --argjson baseline_valid "$baseline_valid" --argjson proposal_valid "$proposal_valid" \
+    --argjson legacy "$legacy" --argjson contract "$contract" --argjson results "$results" '
+      {
+        valid: ($baseline_valid and $proposal_valid and $contract.valid),
+        source: $source,
+        legacy: $legacy,
+        baseline: {risk:(if $baseline_risk == "" then null else $baseline_risk end), authority:$baseline_authority},
+        proposal: {risk:(if $proposal_risk == "" then null else $proposal_risk end)},
+        effective: {risk:(if $effective_risk == "" then null else $effective_risk end)},
+        risk_downgrade: $downgrade,
+        downgrade_authority: $downgrade_authority,
+        policy: {status:$policy_status, contract:$contract},
+        results: $results
+      }
+    '
+}
+
 risk_result_json() {
   local result_status="$1" severity="$2" code="$3" message="$4"
   local suggestion="$5" risk="$6" current_status="$7" signals="${8:-}"
@@ -1032,9 +1513,9 @@ risk_result_json() {
 
 risk_changed_files() {
   local scope="${1:-worktree}" modified_files
-  load_state_globs || return 2
+  load_effective_state_globs "$scope" || return 2
   modified_files=$(changed_files "$scope")
-  printf '%s\n' "$modified_files" | filter_operationally_relevant_files
+  printf '%s\n' "$modified_files" | filter_effectively_relevant_files
 }
 
 risk_file_has_destructive_sql() {
@@ -1630,25 +2111,37 @@ risk_summary_json() {
 # safe. Final requirements apply only to Status: done at a completion boundary.
 run_risk_contract() {
   local verification_summary="$1" scope="${2:-worktree}" boundary="${3:-completion}"
-  local progress_content progress_error current_status risk_count risk="" relevant_files relevant_status
+  local progress_content progress_error current_status=absent risk="" relevant_files relevant_status
   local signals="" underrated="" results='[]' result contract config runtime_configured runtime_passed
+  local control control_source control_valid downgrade downgrade_authority control_result
 
   progress_content=$(state_file_snapshot memory/progress.md "$scope")
-  if [ -z "$progress_content" ]; then
-    risk_summary_json "$results" "" "absent" ""
-    return 0
+  if [ -n "$progress_content" ]; then
+    if ! progress_error=$(validate_progress_content "$progress_content"); then
+      result=$(policy_result_json fail error STATE_PROGRESS_INVALID "$progress_error" \
+        "Restore the documented progress.md structure before claiming completion." memory/progress.md)
+      results=$(printf '%s' "$results" | jq -c --argjson result "$result" '. + [$result]')
+      risk_summary_json "$results" "" "invalid" ""
+      return 0
+    fi
+    current_status=$(progress_status_from_content "$progress_content")
   fi
 
-  if ! progress_error=$(validate_progress_content "$progress_content"); then
-    result=$(policy_result_json fail error STATE_PROGRESS_INVALID "$progress_error" \
-      "Restore the documented progress.md structure before claiming completion." memory/progress.md)
-    results=$(printf '%s' "$results" | jq -c --argjson result "$result" '. + [$result]')
-    risk_summary_json "$results" "" "invalid" ""
-    return 0
-  fi
+  control=$(effective_control_requirements_json "$scope")
+  control_source=$(printf '%s' "$control" | jq -r '.source')
+  control_valid=$(printf '%s' "$control" | jq -r '.valid')
+  risk=$(printf '%s' "$control" | jq -r '.effective.risk // empty')
+  downgrade=$(printf '%s' "$control" | jq -r '.risk_downgrade')
+  downgrade_authority=$(printf '%s' "$control" | jq -r '.downgrade_authority')
+  while IFS= read -r control_result; do
+    [ -n "$control_result" ] || continue
+    # Verification-contract errors are already present in the verification
+    # summary; keep the control-specific diagnostics here.
+    if [ "$(printf '%s' "$control_result" | jq -r '.code')" != CONFIG_INVALID ]; then
+      results=$(printf '%s' "$results" | jq -c --argjson result "$control_result" '. + [$result]')
+    fi
+  done < <(printf '%s' "$control" | jq -c '.results[]')
 
-  current_status=$(progress_status_from_content "$progress_content")
-  risk_count=$(progress_risk_count_from_content "$progress_content")
   relevant_files=$(risk_changed_files "$scope")
   relevant_status=$?
   if [ "$relevant_status" -ne 0 ]; then
@@ -1662,11 +2155,17 @@ run_risk_contract() {
   fi
   signals=$(risk_signals_for_files "$relevant_files" "$scope")
 
-  if [ "$risk_count" -eq 0 ]; then
-    if [ -n "$relevant_files" ]; then
+  if [ -z "$risk" ]; then
+    if [ "$current_status" = "done" ]; then
+      result=$(risk_result_json fail error CONTROL_BASELINE_REQUIRED \
+        "Completion cannot be accepted without a Git-bound Risk baseline." \
+        "Create and review .project-control.toml with schema = 1 and an explicit risk, then establish it in Git." \
+        "" "$current_status" "$signals" "$(project_control_path)" risk)
+      results=$(printf '%s' "$results" | jq -c --argjson result "$result" '. + [$result]')
+    elif [ -n "$relevant_files" ]; then
       result=$(risk_result_json warn warning RISK_NOT_DECLARED \
-        "Operationally relevant work has no declared Risk; agent-md will not silently assume low." \
-        "Add exactly one Risk: low, medium, high, or critical under ## Current." \
+        "Operationally relevant work has no effective Risk; coding-agent-control will not silently assume low." \
+        "Create .project-control.toml explicitly before claiming completion." \
         "" "$current_status" "$signals" "$relevant_files" risk)
       results=$(printf '%s' "$results" | jq -c --argjson result "$result" '. + [$result]')
     fi
@@ -1674,15 +2173,57 @@ run_risk_contract() {
     return 0
   fi
 
-  risk=$(progress_risk_from_content "$progress_content")
-  if [ "$risk_count" -ne 1 ] || ! printf '%s\n' "$risk" | grep -Eq '^(low|medium|high|critical)$'; then
-    result=$(risk_result_json fail error RISK_INVALID \
-      "Progress must contain exactly one Risk with value low, medium, high, or critical." \
-      "Correct the Risk field without auto-selecting or rewriting its value." \
-      "$risk" "$current_status" "$signals" memory/progress.md risk)
+  if [ "$current_status" = "done" ] && [ "$control_source" = "none" ]; then
+    if [ "$boundary" = completion ]; then
+      result=$(risk_result_json fail error CONTROL_BASELINE_REQUIRED \
+        "The Risk proposal is local working state and is not an established control baseline." \
+        "Review and commit .project-control.toml before asking for completion acceptance." \
+        "$risk" "$current_status" "$signals" "$(project_control_path)" risk-baseline)
+    else
+      result=$(risk_result_json warn warning CONTROL_BASELINE_REQUIRED \
+        "The staged Risk is not yet an established Git-bound control baseline." \
+        "Review and commit .project-control.toml before asking for completion acceptance." \
+        "$risk" "$current_status" "$signals" "$(project_control_path)" risk-baseline)
+    fi
     results=$(printf '%s' "$results" | jq -c --argjson result "$result" '. + [$result]')
+  fi
+
+  if [ "$control_valid" != true ]; then
     risk_summary_json "$results" "$risk" "$current_status" "$signals"
     return 0
+  fi
+
+  if [ "$downgrade" = "pending" ] && [ "$current_status" = "done" ]; then
+    if [ "$downgrade_authority" = approval ]; then
+      contract=$(printf '%s' "$verification_summary" | jq -c '.contract')
+      config=$(toml_path)
+      result=$(risk_evidence_result "$contract" approval \
+        CONTROL_RISK_DOWNGRADE_PENDING "$risk" "$current_status" "$signals" "$config" "$scope")
+      results=$(printf '%s' "$results" | jq -c --argjson result "$result" '. + [$result]')
+      if [ "$(printf '%s' "$result" | jq -r '.status')" = pass ]; then
+        risk=$(printf '%s' "$control" | jq -r '.proposal.risk')
+        downgrade=authorized
+      else
+        risk_summary_json "$results" "$risk" "$current_status" "$signals"
+        return 0
+      fi
+    else
+      result=$(risk_result_json fail error CONTROL_RISK_DOWNGRADE_PENDING \
+        "The completion claim proposes a lower Risk, but the previous Git-bound requirements remain effective." \
+        "Establish the downgrade through human out-of-band review or an authority-separated approval bound to the resulting commit." \
+        "$risk" "$current_status" "$signals" "$(project_control_path)" risk-downgrade-authority)
+      results=$(printf '%s' "$results" | jq -c --argjson result "$result" '. + [$result]')
+    fi
+  fi
+
+  if [ "$control_source" = legacy-progress ] && [ "$(printf '%s' "$control" | jq -r '.legacy')" = true ]; then
+    if [ -n "$relevant_files" ]; then
+      result=$(risk_result_json warn warning CONTROL_LEGACY_STATE \
+        "Risk is still sourced from tracked legacy memory/progress.md." \
+        "Migrate explicitly to .project-control.toml; no automatic migration is performed." \
+        "$risk" "$current_status" "$signals" memory/progress.md control-baseline)
+      results=$(printf '%s' "$results" | jq -c --argjson result "$result" '. + [$result]')
+    fi
   fi
 
   underrated=$(risk_underrating_signals "$risk" "$signals")
@@ -1816,11 +2357,10 @@ progress_transition_allowed() {
 
 state_file_snapshot() {
   local path="$1" scope="${2:-worktree}"
-  if [ "$scope" = "staged" ] \
-     && git ls-files --cached --error-unmatch "$path" &>/dev/null; then
-    git show ":${path}" 2>/dev/null
-  elif [ -f "$path" ]; then
-    cat "$path"
+  if [ "$scope" = staged ]; then
+    file_snapshot "$path" staged
+  else
+    file_snapshot "$path" worktree
   fi
 }
 
@@ -1899,26 +2439,28 @@ state_enforcement_result() {
   local scope="${1:-worktree}"
   git rev-parse --is-inside-work-tree &>/dev/null || return 0
 
-  local modified_files relevant_files relevant_count progress_changed gotchas_changed
+  local modified_files working_state_files relevant_files relevant_count progress_changed gotchas_changed
   local progress_content progress_error previous_content previous_status current_status
   local gotchas_content gotchas_error gotchas_code gotchas_message
 
-  if [ -f "memory/progress.md" ]; then
-    if ! load_state_globs; then
-      policy_result_json \
-        "fail" "error" "CONFIG_INVALID" \
-        "$AGENT_MD_STATE_ERROR" \
-        "Fix the enforcement configuration before finishing."
-      return 0
-    fi
+  if ! load_effective_state_globs "$scope"; then
+    policy_result_json \
+      "fail" "error" "CONFIG_INVALID" \
+      "$AGENT_MD_STATE_ERROR" \
+      "Fix the enforcement configuration before finishing."
+    return 0
   fi
 
   modified_files=$(changed_files "$scope")
+  # Control and policy resolution use the requested Git snapshot, but progress
+  # and gotchas are working state. Pre-commit must therefore inspect their local
+  # worktree versions without requiring users to publish them in the index.
+  working_state_files=$(changed_files worktree)
 
-  gotchas_changed=$(printf '%s\n' "$modified_files" | grep -c '^memory/gotchas\.md$' || true)
+  gotchas_changed=$(printf '%s\n' "$working_state_files" | grep -c '^memory/gotchas\.md$' || true)
   gotchas_changed=${gotchas_changed:-0}
   if [ "$gotchas_changed" -gt 0 ]; then
-    gotchas_content=$(state_file_snapshot memory/gotchas.md "$scope")
+    gotchas_content=$(state_file_snapshot memory/gotchas.md worktree)
     if [ -n "$gotchas_content" ] && ! gotchas_error=$(validate_gotchas_content "$gotchas_content"); then
       gotchas_code=${gotchas_error%%|*}
       gotchas_message=${gotchas_error#*|}
@@ -1933,14 +2475,14 @@ state_enforcement_result() {
 
   [ -f "memory/progress.md" ] || return 0
 
-  relevant_files=$(printf '%s\n' "$modified_files" | filter_operationally_relevant_files)
+  relevant_files=$(printf '%s\n' "$modified_files" | filter_effectively_relevant_files)
   relevant_count=$(printf '%s\n' "$relevant_files" | grep -c . || true)
   relevant_count=${relevant_count:-0}
-  progress_changed=$(printf '%s\n' "$modified_files" | grep -c '^memory/progress\.md$' || true)
+  progress_changed=$(printf '%s\n' "$working_state_files" | grep -c '^memory/progress\.md$' || true)
   progress_changed=${progress_changed:-0}
 
   if [ "$relevant_count" -gt 0 ] || [ "$progress_changed" -gt 0 ]; then
-    progress_content=$(state_file_snapshot memory/progress.md "$scope")
+    progress_content=$(state_file_snapshot memory/progress.md worktree)
     if ! progress_error=$(validate_progress_content "$progress_content"); then
       policy_result_json \
         "fail" "error" "STATE_PROGRESS_INVALID" \
@@ -2055,6 +2597,57 @@ state_enforcement_reason() {
 # integrations copied from earlier agent-md releases.
 progress_stale_reason() {
   state_enforcement_reason worktree
+}
+
+visual_contract_from_config() {
+  local config="$1" required artifacts freshness
+  required=$(read_toml "$config" visual required)
+  artifacts=$(read_toml "$config" visual artifacts_dir)
+  freshness=$(read_toml "$config" visual freshness_seconds)
+  required=${required:-false}
+  artifacts=${artifacts:-.agent/visual}
+  freshness=${freshness:-3600}
+  if [ "$required" != true ] && [ "$required" != false ]; then
+    jq -cn --arg error "Invalid ${config}: visual.required must be true or false." \
+      '{valid:false,error:$error}'
+    return 0
+  fi
+  case "$freshness" in
+    ''|*[!0-9]*|0)
+      jq -cn --arg error "Invalid ${config}: visual.freshness_seconds must be a positive integer." \
+        '{valid:false,error:$error}'
+      return 0
+      ;;
+  esac
+  jq -cn --argjson required "$required" --arg artifacts "$artifacts" \
+    --argjson freshness "$freshness" \
+    '{valid:true,required:$required,artifacts_dir:$artifacts,freshness_seconds:$freshness}'
+}
+
+effective_visual_contract_json() {
+  local scope="${1:-worktree}" config baseline_file proposal_file baseline proposal
+  config=$(toml_path)
+  baseline_file=$(mktemp "${TMPDIR:-/tmp}/agent-md-baseline-visual.XXXXXX") || return 1
+  proposal_file=$(mktemp "${TMPDIR:-/tmp}/agent-md-proposal-visual.XXXXXX") || {
+    rm -f "$baseline_file"
+    return 1
+  }
+  case "$config" in
+    /*|*'..'*) : > "$baseline_file"; cp "$config" "$proposal_file" 2>/dev/null || : > "$proposal_file" ;;
+    *) snapshot_to_temp "$config" head "$baseline_file"; snapshot_to_temp "$config" "$scope" "$proposal_file" ;;
+  esac
+  baseline=$(visual_contract_from_config "$baseline_file")
+  proposal=$(visual_contract_from_config "$proposal_file")
+  rm -f "$baseline_file" "$proposal_file"
+  if [ "$(printf '%s' "$baseline" | jq -r '.valid')" != true ]; then printf '%s\n' "$baseline"; return 0; fi
+  if [ "$(printf '%s' "$proposal" | jq -r '.valid')" != true ]; then printf '%s\n' "$proposal"; return 0; fi
+  jq -cn --argjson baseline "$baseline" --argjson proposal "$proposal" '
+    if $baseline.required then
+      $baseline + {source:"baseline",baseline:$baseline,proposal:$proposal}
+    else
+      $proposal + {source:(if $proposal.required then "proposal" else "default/proposal" end),baseline:$baseline,proposal:$proposal}
+    end
+  '
 }
 
 # visual_evidence_ok <artifacts_dir> <freshness_seconds>

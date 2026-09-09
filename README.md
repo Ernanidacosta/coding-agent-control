@@ -90,8 +90,11 @@ Start simple:
 
 1. Install coding-agent-control in the project.
 2. Optionally run `./.agent-md/bin/doctor.sh` to inspect wiring.
-3. Work normally; the agent maintains the small current state in `memory/`.
-4. Add deterministic project checks when they are useful. Enable advanced
+3. Work normally; local working state in `memory/` remains unversioned by
+   default and may be absent.
+4. Before claiming completion, explicitly create and review the small
+   `.project-control.toml` Risk record.
+5. Add deterministic project checks when they are useful. Enable advanced
    guarantees only when the task's Risk requires them.
 
 The baseline includes destructive-command and path/secret protections,
@@ -106,6 +109,7 @@ your-project/
   AGENT.md                         # source of truth
   AGENTS.md                        # Codex / Cursor / Windsurf
   CLAUDE.md                        # Claude Code
+  .project-control.toml            # create explicitly; not auto-installed
   agent-md.toml.example            # deterministic verification/state config
 
   .claude/
@@ -130,7 +134,7 @@ your-project/
       playwright-capture.sh
       verify.sh
 
-  memory/
+  memory/                          # local working state (locally excluded)
     agents.md
     plan.md
     progress.md
@@ -164,10 +168,23 @@ Run the complete current contract with:
 
 ## Operational State
 
-`memory/` records current status, plan, verification criteria, and still-useful
-gotchas. It is a deterministic handoff, not historical memory. Git remains the
-factual source of truth. See [Operational State Enforcement](#operational-state-enforcement)
-for the stable `progress.md` format and classifier configuration.
+`memory/` records local status, plan, verification criteria, and still-useful
+gotchas. It is a volatile handoff, not historical memory or a trust root. Fresh
+installs list these files only in the repository-local `.git/info/exclude`, so
+using coding agents does not require publishing them. Existing tracked memory
+remains supported and is never silently rewritten.
+
+`.project-control.toml` is the minimal agent-neutral control record. It is
+created explicitly rather than inferred or installed automatically:
+
+```toml
+schema = 1
+risk = "medium"
+```
+
+Git binds this declaration to project history and makes review visible; it does
+not prove human authorship. `agent-md.toml` remains the versioned project policy.
+See [Operational State Enforcement](#operational-state-enforcement).
 
 ## Advanced Guarantees
 
@@ -299,6 +316,10 @@ Stable codes currently emitted by controls are deliberately limited:
 | `SAFETY_DESTRUCTIVE_COMMAND` | Safety | `fatal` |
 | `SAFETY_PATH_VIOLATION` | Safety | `fatal` |
 | `CONFIG_INVALID` | Integrity | `error` |
+| `CONTROL_INVALID` | Integrity | `error` |
+| `CONTROL_BASELINE_REQUIRED` | Integrity or migration | `error` at completion; otherwise `warning` |
+| `CONTROL_RISK_DOWNGRADE_PENDING` | Integrity | `error` at completion; otherwise `warning` |
+| `CONTROL_LEGACY_STATE` | Migration diagnostic | `warning` |
 | `STATE_PROGRESS_INVALID` | Integrity | `error` |
 | `STATE_PROGRESS_STALE` | Integrity | `error` |
 | `STATE_TRANSITION_INVALID` | Quality | `warning` |
@@ -516,21 +537,36 @@ treated as verified.
 
 Risk controls the amount of evidence, review, and approval required for a
 task. It does not decide whether code is safe and does not assign a numeric
-score. The explicit task declaration is primary:
+score. The Git-bound declaration is deliberately small and agent-neutral:
+
+```toml
+# .project-control.toml
+schema = 1
+risk = "high"
+```
+
+The completion claim remains local working state:
 
 ```markdown
 ## Current
 
 Status: verifying
 Task: Harden auth token rotation
-Risk: high
 ```
 
-Exactly one `Risk:` is expected for new operational tasks. Allowed values are
-`low`, `medium`, `high`, and `critical`. Existing progress files without Risk
-remain readable; when relevant work changes they emit `RISK_NOT_DECLARED`
-instead of silently becoming low. Invalid or duplicate declarations emit
-`RISK_INVALID` and fail closed. Upgrades never overwrite existing progress.
+Allowed values are `low`, `medium`, `high`, and `critical`. A legacy/local
+`Risk:` in progress remains readable as a proposal, but it is never a trust
+root and cannot lower the effective Risk. Existing tracked progress can supply
+a compatibility baseline until the project explicitly migrates; untracked or
+ignored progress cannot. Risk is never silently defaulted to low.
+
+The effective-control resolver compares the Git baseline with the worktree at
+Stop/verify and with the index at pre-commit. Higher Risk applies immediately;
+a lower proposal retains the previous requirements until a reviewed baseline
+is established. When an approval verifier is configured, a downgrade requires
+authority-separated approval bound to the exact resulting HEAD. A portable
+human checkpoint is explicitly out-of-band: Git records content and review
+visibility, not cryptographic proof of authorship.
 
 | Risk | Additional completion requirement |
 |---|---|
@@ -694,7 +730,7 @@ committed anchor and dependencies clean in HEAD. There is no `--force-trust`,
 After that checkpoint, a future task uses the normal contract:
 
 ```text
-Status: active, Risk: high
+Git-bound Risk: high; local Status: active
         -> implementation
         -> Status: verifying
         -> required local verification
@@ -744,16 +780,18 @@ Doctor reports the current effect and recovery first, then the declaration,
 status, observed signals, consistency, and configured verifier details. It
 does not execute attestations, approve work, or call a reviewer. `verify.sh`
 performs the full sequence:
-validate progress/Risk, run the base verification contract, apply final Risk
+validate working progress and effective control, run the base verification contract, apply final Risk
 requirements, execute applicable trusted evidence verifiers, and return
 non-zero for a blocking result.
 
 ## Operational State Enforcement
 
-The Stop and pre-commit hooks share one deterministic path classifier.
-They require `memory/progress.md` to change only when an operationally
-relevant file changed. The classifier sees tracked, staged, and untracked
-files at Stop; pre-commit evaluates staged files only.
+Stop and pre-commit share one effective-control resolver and deterministic
+path classifier. Stop combines the committed baseline with the worktree;
+pre-commit combines it with the index. A path remains relevant when either
+baseline or proposal classifies it as relevant, so a same-change ignore cannot
+reduce coverage. Working progress remains useful for handoff and freshness but
+is not the control root.
 
 `progress.md` has a deliberately small line-oriented format:
 
@@ -764,7 +802,6 @@ files at Stop; pre-commit evaluates staged files only.
 
 Status: verifying
 Task: Preserve third-party Codex hooks
-Risk: medium
 
 ## Scope
 
@@ -790,12 +827,13 @@ None
 The required sections are `Current`, `Next`, `Blockers`, and
 `Recently Completed`, in that order; `Scope` is optional between Current
 and Next. There must be exactly one status, at most one task, at most one
-legacy-compatible Risk declaration, explicit Next/Blockers content, and no
+legacy-compatible local Risk proposal, explicit Next/Blockers content, and no
 more than five recent completions. A task is required for `active`, `blocked`,
-and `verifying`. New work declares one valid Risk; legacy absence warns when
-relevant files change. Malformed progress
+and `verifying`. Effective Risk comes from `.project-control.toml` plus any
+stricter proposal. Malformed progress
 blocks when it is itself changed or when relevant source changes depend
-on it; an absent progress file preserves the existing opt-out behavior.
+on it; absent working progress does not block ordinary work or reduce the
+separate control requirements.
 
 `verifying` means implementation is ready while applicable checks are still
 pending or being evaluated. Status: done is a completion claim, not proof of completion.
@@ -804,7 +842,9 @@ Stop/pre-commit/`verify.sh` execute the current required contract freshly.
 coding-agent-control does not persist agent-authored `pass` lines in `progress.md`, which
 would duplicate CI and could not prove that a command actually ran.
 
-The installer still never overwrites an existing `memory/progress.md`.
+The installer still never overwrites an existing `memory/progress.md`. On a
+fresh Git install it adds the five working files to `.git/info/exclude`, never
+to a committed ignore file and never to the index.
 A legacy file without this structure remains untouched, but the next
 operational change reports `STATE_PROGRESS_INVALID` with migration
 guidance. Migration is deliberate and manual; hooks do not silently
@@ -847,9 +887,14 @@ directories are ignored. `scripts/**` and `tools/**` are deliberately
 not ignored: executable code in them is relevant when it matches a
 source glob.
 
-Both keys are optional. Declaring a key replaces that key's defaults;
-`ignore_globs` always wins. An empty array is valid. Values use
-case-sensitive shell-style path globs relative to the Git root.
+Within one established policy snapshot, both keys are optional, a declared key
+replaces its defaults, and `ignore_globs` wins. Across a policy change, baseline
+and proposal coverage are combined conservatively: new source patterns apply
+immediately while new ignores cannot erase baseline coverage in the same
+change. Required checks from either policy remain required, and
+`visual.required = true` remains required if either side sets it. Invalid or
+unordered policy changes cannot create a more permissive completion contract.
+An empty array remains valid. Values use case-sensitive shell-style globs.
 
 ### Python
 
@@ -935,9 +980,11 @@ fields. `visual.required = true` remains fail-closed. Optional evidence only
 warns, and visual evidence never substitutes for required static, automated,
 runtime, or smoke checks.
 
-## Operational Memory
+## Local Working State
 
-`memory/` is a small handoff surface for the current work:
+`memory/` is a small, local handoff surface for the current work. Fresh Git
+installs exclude these paths through `.git/info/exclude`; the installer never
+stages them, and their absence does not erase control requirements:
 
 - `agents.md` — active agents, MCPs, tech stack, tooling
 - `plan.md` — current direction, current phase, and decisions still in
@@ -961,6 +1008,11 @@ Operational handoff relies first on `progress.md`, `plan.md`,
 `verify.md`, `gotchas.md`, and Git. A configured semantic-memory provider can
 provide older context, but it is not needed to determine where work stands,
 what remains, blockers, or the next action.
+
+The agent-neutral control boundary is separate: `.project-control.toml`
+declares established Risk, while `agent-md.toml` declares versioned project
+policy. A local `Status: done` is only a claim evaluated against those effective
+requirements and fresh evidence.
 
 Installation templates live separately under
 `.agent-md/templates/memory/`, so this repository's own operational state
@@ -1004,6 +1056,10 @@ Use Codex skills with `$agent-md-verify` or `$visual-evidence`.
 - When `memory/progress.md` is gitignored, state enforcement falls back
   to file mtimes. That is a lower-reliability approximation than Git
   state and can be affected by clocks or file-copy tooling.
+- Git-bound control supplies content binding and review visibility, not proof
+  of human authorship. The portable downgrade checkpoint is out-of-band;
+  deterministic authorship/approval guarantees require an authority-separated
+  verifier plus suitable host/repository protections.
 - Transition validation can compare only states captured by Git or its
   index. Uncaptured intermediate edits are not factual history and cannot
   be reconstructed without adding persistence, which this phase avoids.

@@ -358,9 +358,29 @@ if [ "$DRY_RUN" -eq 0 ]; then
       cp "$MEMORY_TEMPLATE_DIR/$F" "$TARGET/memory/$F"
     fi
   done
-  echo "  ✓ memory/          (5-file state system; existing files preserved)"
+  echo "  ✓ memory/          (local working state; existing files preserved)"
 else
   echo "  → would populate  memory/ (only missing files)"
+fi
+
+# Fresh-install working state is private by default. Use the repository-local
+# exclude file rather than a committed .gitignore entry: this avoids publishing
+# evidence of agent usage and does not affect legacy files already tracked.
+if [ "$DRY_RUN" -eq 0 ] && git -C "$TARGET" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+  GIT_DIR=$(git -C "$TARGET" rev-parse --absolute-git-dir 2>/dev/null || true)
+  if [ -n "$GIT_DIR" ]; then
+    LOCAL_EXCLUDE="$GIT_DIR/info/exclude"
+    mkdir -p "$(dirname "$LOCAL_EXCLUDE")"
+    LOCAL_MARKER='# local working state added by coding-agent-control'
+    if ! grep -qF "$LOCAL_MARKER" "$LOCAL_EXCLUDE" 2>/dev/null; then
+      printf '\n%s\n' "$LOCAL_MARKER" >> "$LOCAL_EXCLUDE"
+    fi
+    for LOCAL_STATE_PATH in /memory/agents.md /memory/plan.md /memory/progress.md /memory/verify.md /memory/gotchas.md; do
+      grep -qxF "$LOCAL_STATE_PATH" "$LOCAL_EXCLUDE" 2>/dev/null \
+        || printf '%s\n' "$LOCAL_STATE_PATH" >> "$LOCAL_EXCLUDE"
+    done
+    echo "  ✓ local Git exclude (working memory stays unversioned by default)"
+  fi
 fi
 
 # --- compatibility helper scripts (.agent-md) ---
@@ -390,6 +410,14 @@ if [ -f "$SCRIPT_DIR/agent-md.toml.example" ]; then
   else
     echo "  · agent-md.toml already present — not touched"
   fi
+fi
+
+if [ "$DRY_RUN" -eq 1 ]; then
+  echo "  → project control  create .project-control.toml explicitly before completion"
+elif [ -f "$TARGET/.project-control.toml" ]; then
+  echo "  · .project-control.toml already present — not touched"
+else
+  echo "  · project control not created automatically — declare Risk explicitly before completion"
 fi
 
 # --- .gitignore seeding for hook scratch state ---

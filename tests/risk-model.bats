@@ -27,6 +27,16 @@ write_risk_config() {
   } > agent-md.toml
 }
 
+establish_control() {
+  local risk="$1"
+  cat > .project-control.toml <<EOF
+schema = 1
+risk = "$risk"
+EOF
+  git add .project-control.toml agent-md.toml
+  git commit -q -m "control baseline"
+}
+
 commit_risk_baseline() {
   git add agent-md.toml memory/progress.md
   [ ! -d scripts ] || git add scripts
@@ -48,6 +58,7 @@ write_risk_verifier() {
 @test "low risk with required checks passing allows done" {
   write_risk_config
   write_progress done "Small internal fix" "" low
+  establish_control low
   out=$(run_hook stop-verify.sh '{"stop_hook_active":false}')
   if [ -n "$out" ]; then
     echo "$out" | jq -e 'has("decision") | not' >/dev/null
@@ -57,6 +68,7 @@ write_risk_verifier() {
 @test "medium risk with passing runtime evidence allows done" {
   write_risk_config true
   write_progress done "Change executable workflow" "" medium
+  establish_control medium
   out=$(run_hook stop-verify.sh '{"stop_hook_active":false}')
   [ -z "$out" ]
 }
@@ -64,6 +76,7 @@ write_risk_verifier() {
 @test "medium risk without declared runtime applicability warns but does not block" {
   write_risk_config
   write_progress done "Change internal workflow" "" medium
+  establish_control medium
   out=$(run_hook stop-verify.sh '{"stop_hook_active":false}')
   echo "$out" | jq -e 'has("decision") | not' >/dev/null
   echo "$out" | jq -e '.hookSpecificOutput.additionalContext | test("WARNING RISK_RUNTIME_EVIDENCE_REQUIRED")' >/dev/null

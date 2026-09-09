@@ -67,7 +67,7 @@ if [ -d .agent-md/bin ]; then ok "agent-md helpers present"; else warn ".agent-m
 if [ -d memory ]; then ok "memory directory present"; else warn "memory directory missing"; fi
 
 if [ -f "$SHARED_LIB" ]; then
-  CONTRACT=$(verification_contract_json "$(toml_path)")
+  CONTRACT=$(effective_verification_contract_json worktree)
   printf 'Verification:\n'
   if [ "$(printf '%s' "$CONTRACT" | jq -r '.valid')" != true ]; then
     bad "$(policy_human_message "$(printf '%s' "$CONTRACT" | jq -c '.error')")"
@@ -121,6 +121,62 @@ if [ -f "$SHARED_LIB" ]; then
   fi
 fi
 
+if [ -f "$SHARED_LIB" ]; then
+  CONTROL=$(effective_control_requirements_json worktree)
+  CONTROL_SOURCE=$(printf '%s' "$CONTROL" | jq -r '.source')
+  CONTROL_BASELINE_RISK=$(printf '%s' "$CONTROL" | jq -r '.baseline.risk // "not established"')
+  CONTROL_PROPOSED_RISK=$(printf '%s' "$CONTROL" | jq -r '.proposal.risk // "not declared"')
+  CONTROL_EFFECTIVE_RISK=$(printf '%s' "$CONTROL" | jq -r '.effective.risk // "not established"')
+  CONTROL_DOWNGRADE=$(printf '%s' "$CONTROL" | jq -r '.risk_downgrade')
+  CONTROL_POLICY_STATUS=$(printf '%s' "$CONTROL" | jq -r '.policy.status')
+  printf 'Control:\n'
+  printf '  source: %s\n' "$CONTROL_SOURCE"
+  printf '  baseline risk: %s\n' "$CONTROL_BASELINE_RISK"
+  printf '  proposed risk: %s\n' "$CONTROL_PROPOSED_RISK"
+  printf '  effective risk: %s\n' "$CONTROL_EFFECTIVE_RISK"
+  printf '  downgrade status: %s\n' "$CONTROL_DOWNGRADE"
+  printf '  policy baseline/proposal: %s\n' "$CONTROL_POLICY_STATUS"
+  if [ "$CONTROL_SOURCE" = legacy-progress ]; then
+    printf '  legacy state: detected; migration recommended\n'
+    printf '  Recovery: explicitly create and review .project-control.toml; no automatic migration is performed.\n'
+  elif [ "$CONTROL_SOURCE" = none ]; then
+    printf '  Recovery: create .project-control.toml before claiming completion; ordinary work may continue.\n'
+  elif [ "$CONTROL_DOWNGRADE" = pending ]; then
+    printf '  Recovery: establish the downgrade through out-of-band human review or authority-separated approval.\n'
+  else
+    printf '  Recovery: none.\n'
+  fi
+
+  printf 'Working state:\n'
+  if [ -f memory/progress.md ]; then
+    if git ls-files --error-unmatch memory/progress.md >/dev/null 2>&1; then
+      printf '  progress: present, tracked, legacy-compatible\n'
+    else
+      printf '  progress: present, local/untracked\n'
+    fi
+    DOCTOR_PROGRESS_STATUS=$(progress_status_from_content "$(cat memory/progress.md)")
+    DOCTOR_PROGRESS_STATUS=${DOCTOR_PROGRESS_STATUS:-invalid}
+  else
+    printf '  progress: absent; ordinary work remains available\n'
+    DOCTOR_PROGRESS_STATUS=absent
+  fi
+
+  printf 'Completion:\n'
+  printf '  claim state: %s\n' "$DOCTOR_PROGRESS_STATUS"
+  printf '  currently required guarantees: Risk %s plus the effective verification policy\n' "$CONTROL_EFFECTIVE_RISK"
+  if [ "$DOCTOR_PROGRESS_STATUS" = "done" ] && \
+    { [ "$CONTROL_EFFECTIVE_RISK" = "not established" ] || [ "$(printf '%s' "$CONTROL" | jq -r '.valid')" != true ]; }; then
+    printf '  blockers: control baseline is missing or invalid\n'
+    printf '  Recovery: establish valid Git-bound control before asking for completion acceptance.\n'
+  elif [ "$CONTROL_DOWNGRADE" = pending ]; then
+    printf '  blockers: proposed downgrade does not reduce current requirements\n'
+    printf '  Recovery: keep the baseline requirements or establish authorized downgrade authority.\n'
+  else
+    printf '  blockers: none detected by configuration-only diagnosis\n'
+    printf '  Recovery: run agent-md verify to evaluate fresh evidence before accepting done.\n'
+  fi
+fi
+
 if [ -f "$SHARED_LIB" ] && [ -f memory/progress.md ]; then
   PROGRESS_CONTENT=$(cat memory/progress.md)
   printf 'Risk:\n'
@@ -128,8 +184,8 @@ if [ -f "$SHARED_LIB" ] && [ -f memory/progress.md ]; then
     bad "[ERROR STATE_PROGRESS_INVALID] $PROGRESS_ERROR"
   else
     PROGRESS_STATUS=$(progress_status_from_content "$PROGRESS_CONTENT")
-    RISK_COUNT=$(progress_risk_count_from_content "$PROGRESS_CONTENT")
-    RISK_VALUE=$(progress_risk_from_content "$PROGRESS_CONTENT")
+    RISK_VALUE=$(printf '%s' "$CONTROL" | jq -r '.effective.risk // empty')
+    if [ -n "$RISK_VALUE" ]; then RISK_COUNT=1; else RISK_COUNT=0; fi
     RISK_FILES=$(risk_changed_files worktree || true)
     RISK_SIGNALS=$(risk_signals_for_files "$RISK_FILES" worktree)
     printf '  declared: %s\n' "${RISK_VALUE:-not declared}"
