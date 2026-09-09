@@ -1,4 +1,5 @@
-# Verification and state policy for the agent-md repository itself.
+# Verification and state policy for the coding-agent-control repository.
+# The filename remains a compatibility interface.
 
 [verify]
 lint = "shellcheck .claude/hooks/*.sh .codex/hooks/*.sh .agent-md/bin/*.sh examples/github-actions/*.sh .githooks/pre-commit install.sh"

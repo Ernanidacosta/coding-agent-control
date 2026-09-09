@@ -1,8 +1,11 @@
-# agent-md.toml — explicit configuration for agent-md hooks.
+# agent-md.toml — explicit configuration for coding-agent-control hooks.
+#
+# The filename is retained as a compatibility interface from the project's
+# historical agent-md lineage.
 #
 # This file is optional. Copy it to the repo root as `agent-md.toml` only when
 # you want explicit verification, operational-change detection, or optional
-# integrations. Basic agent-md safety and operational state need no config.
+# integrations. Basic coding-agent-control safety and operational state need no config.
 # Anything you leave unset falls back to the heuristic default.
 #
 # Verification values must be trusted project commands as simple strings
@@ -60,7 +63,7 @@
 # required when that verifier is repo-local; use [] to assert that it has no
 # repo-local dependencies beyond its implicitly checked executable. List every
 # additional repo-local file that participates in producing or validating the
-# attestation. Arrays and files must already exist unchanged in HEAD. agent-md
+# attestation. Arrays and files must already exist unchanged in HEAD. coding-agent-control
 # deliberately does not infer shell imports.
 # independent_files = []
 # approval_files = ["scripts/attestation-lib.sh"]
@@ -106,7 +109,7 @@
 # freshness_seconds = 3600
 
 [state]
-# Operationally relevant paths. If omitted, agent-md uses broad defaults
+# Operationally relevant paths. If omitted, coding-agent-control uses broad defaults
 # for common source/test directories and executable code extensions.
 # Declaring this key replaces the default source list.
 # source_globs = [

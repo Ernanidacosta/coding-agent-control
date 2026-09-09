@@ -1,6 +1,6 @@
 ---
 name: visual-evidence
-description: Use for UI changes in an agent-md repository; captures a screenshot and writes the structured markdown evidence required by the visual hook.
+description: Use for UI changes in a coding-agent-control repository; captures a screenshot and writes the structured markdown evidence required by the visual hook.
 ---
 
 # Visual Evidence

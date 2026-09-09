@@ -1,9 +1,10 @@
-# agent-md Helpers
+# coding-agent-control Helpers
 
-These are plain shell helpers installed by agent-md. They are not Codex
-skills. Native Codex skills live under `.agents/skills/<name>/SKILL.md`.
+These are plain shell helpers installed by coding-agent-control. They are not
+Codex skills. The `.agent-md/` path is retained for compatibility; native Codex
+skills live under `.agents/skills/<name>/SKILL.md`.
 
-In the agent-md distribution source, clean installation templates live
+In the coding-agent-control distribution source, clean installation templates live
 under `.agent-md/templates/memory/`. A target repository's root
 `memory/` belongs to that repository and is never used as seed data.
 

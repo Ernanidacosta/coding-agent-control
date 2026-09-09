@@ -1,8 +1,9 @@
-# agent-md Directives
+# coding-agent-control Directives
 
-Cross-agent directives and verification contracts for autonomous coding
-agents. Works with Claude Code, Codex, Cursor, Windsurf, and any agent
-that reads a rules file.
+Repository-local developer control and verification contracts for coding
+agents. Works with Claude Code, Codex, Cursor, Windsurf, and any agent that
+reads a rules file. Legacy paths such as `.agent-md/`, `agent-md.toml`, and
+`memory/` remain compatibility interfaces.
 
 Some behavior is enforceable by hooks. Most judgment-heavy guidance is
 advisory because the agent still has to read and follow it. Treat hooks,
@@ -31,7 +32,7 @@ Security and reliability invariants always override autonomy, speed,
 convenience, and token efficiency. Optional integrations must never
 weaken enforcement. A failed safety or integrity mechanism must fail
 visibly. Prefer structured evidence over interpretation of natural
-language. Git remains the factual source of truth. agent-md must remain
+language. Git remains the factual source of truth. coding-agent-control must remain
 standalone and dependency-light.
 
 Keep the ordinary path simple.
@@ -46,7 +47,7 @@ Do not invent a silent fallback.
 
 Three systems have distinct responsibilities:
 
-- **agent-md `memory/`** — current operational state and deterministic
+- **coding-agent-control `memory/`** — current operational state and deterministic
   handoff: the active plan, task status, relevant gotchas, and definition
   of done.
 - **Semantic-memory provider (optional)** — historical and semantic recall
@@ -90,7 +91,7 @@ state existed; do not add hidden persistence to guess.
 `Status: verifying` means implementation is ready and applicable checks
 are pending or being evaluated. Status: done is a completion claim, not proof of completion.
 A done claim is accepted only after all applicable state integrity, required verification, Risk, attestation, and approval requirements pass.
-agent-md deliberately does not persist agent-authored `pass` claims in
+coding-agent-control deliberately does not persist agent-authored `pass` claims in
 `progress.md`; fresh command exit status is stronger evidence and avoids
 duplicating CI or building a verification log.
 
@@ -134,7 +135,7 @@ binding are all sufficient. The verifier emits exactly one JSON object with
 `status: pass`, the expected `kind` (`independent` or `approval`), an allowed
 structured `origin`, and `target.commit` equal to the full current HEAD. The
 worktree must have no uncommitted operationally relevant changes; ignored
-metadata does not invalidate binding. agent-md deliberately requires a clean
+metadata does not invalidate binding. coding-agent-control deliberately requires a clean
 commit rather than claiming a worktree fingerprint it cannot prove reliably.
 The origin string is metadata, not authority by itself: the pre-established
 verifier must actually validate the CI, reviewer, human, or harness source.
@@ -146,7 +147,7 @@ verifier relies on must be listed in the reviewed
 required for a repo-local verifier; an explicit empty array asserts that the
 executable has no other repo-local dependencies. This explicit
 trust set avoids a fragile shell-import resolver. External verifiers are host
-trust anchors: agent-md checks that they are direct executable files, rejects
+trust anchors: coding-agent-control checks that they are direct executable files, rejects
 symlinks and detectable executor/world-writable paths, and leaves broader host
 ownership and mount integrity to the environment. If reliable independent or
 approval verification is unavailable, high/critical completion remains
@@ -209,7 +210,7 @@ status, remaining work, blockers, or the next step.
 
 ### Architectural Non-Goals
 
-agent-md is not semantic memory, a multi-agent orchestrator, a model
+coding-agent-control is not semantic memory, a multi-agent orchestrator, a model
 router, a background daemon, a project-management platform, a
 replacement for Git or CI, or a general-purpose agent runtime. Keep
 those boundaries explicit when evaluating new features. Users must not need to
@@ -341,7 +342,7 @@ distinct classes; one does not automatically replace another:
   A screenshot does not prove backend correctness.
 - **Independent** — evidence from CI, a separate harness, reviewer, agent,
   or human. This can be recorded and reported, but is not required by
-  default and agent-md never invokes another model automatically.
+  default and coding-agent-control never invokes another model automatically.
 
 `agent-md.toml` may configure `typecheck`, `lint`, `test`, `integration`,
 `smoke`, and `runtime`, plus conditional `independent` and `approval`

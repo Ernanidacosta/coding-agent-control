@@ -1,17 +1,74 @@
-# agent-md
+# coding-agent-control
 
-Portable contracts for coding agents.
+**Developer control for coding agents.**
 
-`agent-md` installs one source-of-truth rules file, repo-local hooks,
-bounded operational task state, and a few helper scripts so agents can
-stop guessing and start proving their work.
+A repository-local control, verification, and trust layer for coding agents.
 
-Honest scope:
+[Português (Brasil)](README.pt-BR.md)
 
-- Markdown rules are advisory. The agent has to read and follow them.
-- Hooks and git hooks are enforceable where the host agent supports them.
-- Tests, type-checks, screenshots, and evidence notes are stronger than
-  model self-assessment.
+Claude Code, Codex, and other coding agents can execute the work while the
+developer and project retain authority over what is allowed, what is required,
+and what can be accepted as complete. The repository carries its rules,
+operational state, verification contract, Risk requirements, and evidence
+boundaries across supported agents and model vendors.
+
+`Status: done` is a completion claim, not proof. The claim is accepted only
+after the applicable state, verification, Risk, independent-evidence, and
+approval requirements pass.
+
+## The Problem
+
+Coding-agent behavior otherwise depends heavily on whichever host, model, or
+session is active. Project rules can be forgotten, handoffs lose current state,
+and a confident completion message may have no reproducible evidence behind it.
+`coding-agent-control` keeps the project contract repo-local and makes observable
+guarantees deterministic where the host exposes a blocking integration.
+
+## What It Does
+
+- installs shared project directives and idempotently merged host hooks;
+- blocks supported destructive-command, unsafe-path, and secret-boundary cases;
+- maintains bounded current operational state for deterministic handoff;
+- runs declared verification and treats command exit status as authoritative;
+- raises completion requirements according to the task's declared Risk;
+- validates authority-separated, exact-SHA evidence for high/critical work;
+- remains standalone when optional CI or semantic-memory capabilities are absent.
+
+## What It Does Not Do
+
+It does not control an LLM's internal reasoning, provide a complete sandbox,
+replace host permissions, run agents, orchestrate models, replace Git or CI, or
+act as a semantic-memory system. Markdown guidance alone is advisory. A control
+is described as enforced only when a supported host invokes a deterministic
+mechanism that can block the relevant action or transition and that integration
+is covered by tests.
+
+## Main Guarantees
+
+- Git remains the factual source of truth.
+- Safety and integrity controls fail closed on supported host surfaces.
+- Required verification cannot be converted to pass by output wording.
+- Risk increases evidence and approval requirements; it does not certify safety.
+- Independent evidence and critical approval are accepted only when
+  authority-separated from the executor.
+- Missing optional capabilities do not break ordinary work.
+
+## Supported Hosts
+
+Claude Code and Codex receive rules plus native repository hooks. Cursor and
+Windsurf receive rules and can use the optional pre-commit fallback. Other tools
+can read the rules and run the repository helpers, but that alone is advisory.
+See the detailed [enforcement matrix](#enforcement-matrix) before relying on a
+specific blocking guarantee.
+
+Public coverage terms are precise:
+
+- **Enforced** — a tested deterministic integration can block the action or
+  transition on that host.
+- **Advisory** — a directive, warning, or review aid cannot prove a block.
+- **Unsupported** — no corresponding deterministic host integration exists.
+- **Experimental** — an integration exists, but does not yet support a stable
+  public enforcement claim.
 
 ## Quickstart
 
@@ -20,7 +77,11 @@ Honest scope:
 curl -fsSL https://raw.githubusercontent.com/Ernanidacosta/agent-md/main/install.sh | bash
 ```
 
-Installs support for Claude Code, Codex, Cursor, and Windsurf by default.
+This is the current source location of this project; the URL will move only as
+part of a separately authorized GitHub repository transition. It is not the
+upstream installation URL.
+
+The installer adds support for Claude Code, Codex, Cursor, and Windsurf by default.
 No `agent-md.toml`, CI provider, `gh`, attestation verifier, approval system,
 or semantic-memory provider is required to start.
 
@@ -28,7 +89,7 @@ or semantic-memory provider is required to start.
 
 Start simple:
 
-1. Install agent-md in the project.
+1. Install coding-agent-control in the project.
 2. Optionally run `./.agent-md/bin/doctor.sh` to inspect wiring.
 3. Work normally; the agent maintains the small current state in `memory/`.
 4. Add deterministic project checks when they are useful. Enable advanced
@@ -80,10 +141,18 @@ your-project/
   .githooks/pre-commit             # optional fallback for any agent
 ```
 
+### Compatibility Names
+
+The public project is `coding-agent-control`. Existing interfaces such as
+`agent-md.toml`, `.agent-md/`, `memory/`, `$agent-md-verify`, and the installed
+Cursor/Windsurf rule filenames retain their legacy names for compatibility.
+They are retained compatibility interfaces in the current architecture. No
+removal is planned as part of this transition.
+
 ## Verification
 
 If the project already exposes test, lint, or type-check conventions,
-agent-md can infer a small fallback contract. For explicit guarantees, copy
+coding-agent-control can infer a small fallback contract. For explicit guarantees, copy
 `agent-md.toml.example` to `agent-md.toml` and declare the real commands. A
 missing optional check is diagnostic; a missing or failing required check
 blocks only the completion boundary that requires it.
@@ -129,7 +198,7 @@ own approval.
 ## Optional Semantic Memory
 
 A semantic-memory provider can improve historical and cross-agent recall, but
-never supplies operational truth or a completion guarantee. agent-md remains
+never supplies operational truth or a completion guarantee. coding-agent-control remains
 fully functional without one. ICM is the current reference integration and is
 enabled explicitly with `[integrations.icm]`; leaving it undeclared creates no
 expectation and no warning.
@@ -148,7 +217,7 @@ Project knowledge has three explicit authorities:
 
 | Authority | Responsibility |
 |---|---|
-| `agent-md` | Governance, safety, verification, active plan, current progress, relevant gotchas, and short handoff |
+| coding-agent-control | Governance, safety, verification, active plan, current progress, relevant gotchas, and short handoff |
 | Git | Factual truth for code and code history |
 | Semantic-memory provider (optional) | Historical/semantic recall, older decisions, resolved errors, and cross-agent knowledge; ICM is one reference provider |
 
@@ -173,9 +242,12 @@ Agent guidance itself has two layers:
 If something can be forgotten or rationalized away, move it out of prose
 and into a checked artifact.
 
+The current architecture and compatibility boundaries are summarized in
+[`docs/architecture.md`](docs/architecture.md).
+
 ## Policy Foundation
 
-agent-md applies this normative order:
+coding-agent-control applies this normative order:
 
 1. Safety
 2. Correctness
@@ -187,7 +259,7 @@ agent-md applies this normative order:
 Security and reliability invariants override autonomy, speed,
 convenience, and token efficiency. Optional integrations cannot weaken
 enforcement; failure of a safety or integrity mechanism must be visible.
-Git remains factual truth, and agent-md remains standalone and
+Git remains factual truth, and coding-agent-control remains standalone and
 dependency-light. The design rule is: **enforce facts; advise judgment**.
 
 The shared internal hook result is intentionally small:
@@ -257,7 +329,7 @@ Stable codes currently emitted by controls are deliberately limited:
 | `DIAGNOSTIC_OUTPUT_TRUNCATED` | Diagnostic | `warning` |
 | `INTEGRATION_ICM_UNAVAILABLE` | Diagnostic | `warning` |
 
-Architectural non-goals constrain feature creep: agent-md is not
+Architectural non-goals constrain feature creep: coding-agent-control is not
 semantic memory, a multi-agent orchestrator, a model router, a background
 daemon, a project-management platform, a replacement for Git or CI, or a
 general-purpose agent runtime. Basic users do not need to understand the
@@ -283,7 +355,7 @@ not as copied API boilerplate:
 
 API-specific features such as prompt caching, streaming display,
 provider retries, idempotency keys, temperature tuning, and batch
-processing belong in the application or host runtime. `agent-md` tells
+processing belong in the application or host runtime. `coding-agent-control` tells
 the coding agent to document and verify those choices when the project
 uses them; it does not pretend to enforce provider behavior from a rules
 file.
@@ -292,16 +364,16 @@ file.
 
 | Check | Class / severity | Claude Code | Codex | Cursor / Windsurf / Other |
 |---|---|---|---|---|
-| Bash safety | Safety / `fatal` | Hard block via `.claude/hooks/block-destructive.sh` | Hard block via `.codex/hooks/pre-tool-use.sh` | Not covered |
-| Required verification at finish | Integrity / `error` | Hard block via `stop-verify.sh` | Continuation via `.codex/hooks/stop.sh` | Optional `.githooks/pre-commit` |
-| Optional verification failure | Quality / `warning` | Advisory via `stop-verify.sh` | Advisory through Codex Stop wrapper | Warning via optional pre-commit |
-| Risk declaration/signals | Integrity or Quality | Block invalid; warn missing/underrated | Same through Codex Stop wrapper | Invalid blocks; signals warn |
-| High/critical final evidence | Integrity / `error` | Blocks `done` via `stop-verify.sh` | Same through Codex Stop wrapper | Advisory at pre-commit |
-| Operational state valid and updated | Integrity / `error` | Hard block via `state-enforcement.sh` | Continuation via `.codex/hooks/stop.sh` | Optional `.githooks/pre-commit` |
-| Operational change outside task Scope | Quality / `warning` | Advisory via `state-enforcement.sh` | Advisory through Codex Stop wrapper | Warning via optional pre-commit |
-| UI visual evidence | Quality / `warning`, or Integrity / `error` when required | Advisory or configured hard block | Same through Codex Stop wrapper | Advisory through rules |
-| New export without nearby test | Quality / `warning` | Advisory | Advisory through rules/skills | Advisory through rules |
-| Truncated Bash output | Diagnostic / `warning` | Advisory | Advisory through Codex PostToolUse | Not covered |
+| Bash safety | Safety / `fatal` | Enforced via `.claude/hooks/block-destructive.sh` | Enforced via `.codex/hooks/pre-tool-use.sh` | Unsupported |
+| Required verification at finish | Integrity / `error` | Enforced via `stop-verify.sh` | Enforced via `.codex/hooks/stop.sh` | Experimental via optional `.githooks/pre-commit` |
+| Optional verification failure | Quality / `warning` | Advisory | Advisory | Advisory via optional pre-commit |
+| Risk declaration/signals | Integrity or Quality | Enforced when invalid; signals advisory | Enforced when invalid; signals advisory | Experimental via optional pre-commit |
+| High/critical final evidence | Integrity / `error` | Enforced for `done` | Enforced for `done` | Advisory at pre-commit |
+| Operational state valid and updated | Integrity / `error` | Enforced via `state-enforcement.sh` | Enforced via `.codex/hooks/stop.sh` | Experimental via optional pre-commit |
+| Operational change outside task Scope | Quality / `warning` | Advisory | Advisory | Advisory via optional pre-commit |
+| UI visual evidence | Quality / `warning`, or Integrity / `error` when required | Advisory or enforced when configured required | Advisory or enforced when configured required | Advisory |
+| New export without nearby test | Quality / `warning` | Advisory | Advisory | Advisory |
+| Truncated Bash output | Diagnostic / `warning` | Advisory | Advisory | Unsupported |
 | Planning, context, edit safety | Judgment / advisory | Advisory | Advisory | Advisory |
 
 Codex hooks are repo-local. Use `codex features list` to confirm hook
@@ -336,13 +408,13 @@ The installer backs up existing top-level rule files before replacing
 them. Existing `memory/*.md` files are never overwritten. Existing
 Claude and Codex hook configs are merged by default. Merge preserves
 third-party events and handlers, refreshes only commands owned by
-agent-md, and is idempotent across reinstalls. `skip` and `replace`
+coding-agent-control, and is idempotent across reinstalls. `skip` and `replace`
 remain explicit options.
 
 ## Deterministic Verification
 
 The completion question is: **what evidence proves this task is complete?**
-agent-md resolves one verification contract for Claude Stop, Codex Stop,
+coding-agent-control resolves one verification contract for Claude Stop, Codex Stop,
 pre-commit, doctor, and `agent-md-verify`. Explicit commands take precedence;
 heuristics remain a labeled fallback.
 
@@ -399,7 +471,8 @@ output.
 
 `timeout_seconds` is a simple per-check bound and requires `timeout` or
 `gtimeout`. If the utility is unavailable, a required bounded check fails
-closed and an optional one warns. If no timeout is declared, agent-md reports
+closed and an optional one warns. If no timeout is declared,
+coding-agent-control reports
 that host limits are the only bound; it does not invent a scheduler.
 
 Verification evidence has distinct classes:
@@ -468,7 +541,7 @@ instead of silently becoming low. Invalid or duplicate declarations emit
 | `critical` | High requirements plus trusted explicit human approval |
 
 When neither runtime nor smoke is configured for medium/high/critical,
-agent-md cannot determine semantic applicability. It emits an advisory
+coding-agent-control cannot determine semantic applicability. It emits an advisory
 `RISK_RUNTIME_EVIDENCE_REQUIRED` warning and does not invent a command. When
 either check is configured, at least one must pass before `done` is accepted.
 
@@ -533,14 +606,14 @@ and `timestamp` fields may aid diagnosis but timestamp is not binding.
 For a repo-local verifier, the executable must be an ordinary executable blob
 present and unchanged in HEAD. Symlinks, path traversal, worktree-only files,
 mode changes, and staged or unstaged content changes are rejected. Because
-agent-md does not attempt unsafe shell-import analysis, every repo-local file
+coding-agent-control does not attempt unsafe shell-import analysis, every repo-local file
 on which a verifier depends must be explicitly listed in the reviewed
 `[verify.attestation]` array for that slot. The key is mandatory for a
 repo-local verifier; `independent_files = []` explicitly asserts that only the
 verifier executable is involved. Those arrays and files must also match HEAD.
 
 An absolute verifier outside the repository is classified as `external`.
-agent-md verifies that it exists, is executable, is not a symlink, and is not
+coding-agent-control verifies that it exists, is executable, is not a symlink, and is not
 detectably world- or executor-writable (including its immediate directory).
 Broader ownership, mount, package, and parent-directory security belong to the
 host. `doctor.sh` reports this as `environment-managed`; it does not claim to
@@ -550,7 +623,7 @@ Binding is deliberately conservative. If the shared classifier sees any
 uncommitted operationally relevant path, strong high/critical attestation is
 `RISK_ATTESTATION_UNBOUND`; commit the reviewed change and obtain evidence for
 that exact HEAD. Ignored metadata such as Markdown does not invalidate the
-binding. agent-md does not implement a worktree fingerprint in this phase,
+binding. coding-agent-control does not implement a worktree fingerprint in this phase,
 because a weak fingerprint would create false confidence. An attestation for
 a different commit is `RISK_ATTESTATION_STALE`.
 
@@ -573,7 +646,7 @@ Provider dependencies may be declared as literal command names through
 not a provider schema and not a command for the core to execute. Doctor reports
 availability without running the verifier. A missing capability is a warning
 while work is `active`, `blocked`, or `verifying`; it blocks `done` only when
-the current Risk requires that attestation. agent-md never installs or
+the current Risk requires that attestation. coding-agent-control never installs or
 authenticates provider tooling automatically. Capability declarations are part
 of the reviewed trust configuration and must match HEAD.
 
@@ -630,7 +703,7 @@ Status: active, Risk: high
         -> GitHub Actions verifies exact ABC123
         -> eligible trusted verifier queries CI
         -> kind=independent, target.commit=ABC123
-        -> agent-md verify
+        -> coding-agent-control verification
         -> done claim accepted
 ```
 
@@ -729,7 +802,7 @@ on it; an absent progress file preserves the existing opt-out behavior.
 pending or being evaluated. Status: done is a completion claim, not proof of completion.
 A done claim is accepted only after all applicable state integrity, required verification, Risk, attestation, and approval requirements pass.
 Stop/pre-commit/`verify.sh` execute the current required contract freshly.
-agent-md does not persist agent-authored `pass` lines in `progress.md`, which
+coding-agent-control does not persist agent-authored `pass` lines in `progress.md`, which
 would duplicate CI and could not prove that a command actually ran.
 
 The installer still never overwrites an existing `memory/progress.md`.
@@ -896,7 +969,7 @@ is never copied into a new project.
 
 ## Helper Scripts vs Codex Skills
 
-`agent-md` intentionally separates plain helper scripts from Codex-native
+coding-agent-control intentionally separates plain helper scripts from Codex-native
 skills.
 
 - `.agent-md/bin/*` are shell helpers any agent can run.
@@ -924,7 +997,8 @@ Use Codex skills with `$agent-md-verify` or `$visual-evidence`.
   completion without a matching file change remains an advisory agent
   responsibility.
 - The TOML reader implements only the scalar and quoted string-array
-  subset used by agent-md. It is intentionally not a general TOML parser.
+  subset used by coding-agent-control. It is intentionally not a general TOML
+  parser.
 - State globs use the shell's case-sensitive matching rather than a
   custom glob engine. Tests cover spaces, dotfiles, and nested package
   paths, but classification remains path-based.
@@ -966,6 +1040,15 @@ shellcheck .claude/hooks/*.sh .codex/hooks/*.sh .agent-md/bin/*.sh examples/gith
 CI runs Bats, ShellCheck, JSON validation, alias-sync checks, and
 installer smoke tests.
 
+## Origin And Attribution
+
+Originally derived from
+[`iamfakeguru/agent-md`](https://github.com/iamfakeguru/agent-md) under the MIT
+License and substantially evolved into a distinct project direction. The original
+copyright notice remains in [`LICENSE`](LICENSE), and the Git history is
+preserved. The upstream project is acknowledged as the historical origin; it
+is not a runtime or installation dependency.
+
 ## License
 
-MIT.
+MIT. See [`LICENSE`](LICENSE).

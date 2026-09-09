@@ -1,7 +1,8 @@
 # GitHub Actions independent verifier
 
-This is a provider-specific reference implementation of agent-md's generic
-attestation contract. GitHub and `gh` remain outside agent-md core.
+This is a provider-specific reference implementation of
+coding-agent-control's generic attestation contract. GitHub and `gh` remain
+outside the core.
 
 The verifier asks the official GitHub Actions workflow-runs API, through
 `gh api`, for runs of one configured workflow and exact full `HEAD` SHA. It
@@ -21,6 +22,11 @@ Official interfaces:
 Edit `github-actions-independent.conf` with a literal expected repository,
 workflow filename, and workflow path. It contains no credentials and is parsed
 as data rather than sourced as shell.
+
+This repository's checked-in config still names its current GitHub location,
+`Ernanidacosta/agent-md`. Move it only together with an authorized repository
+transition. Changing the verifier config or trusted workflow establishes a new
+trust-anchor baseline; the change cannot attest itself.
 
 Copy the verifier and config to a reviewed repo-local location, then merge the
 provided [`agent-md.toml.example`](agent-md.toml.example) snippet into the
@@ -60,7 +66,7 @@ untrusted verifier change
         -> future commit
         -> external CI
         -> exact-SHA attestation
-        -> agent-md verification
+        -> coding-agent-control verification
 ```
 
 For this repository:
@@ -72,7 +78,8 @@ For this repository:
 4. Let GitHub Actions run for the bootstrap SHA as ordinary CI evidence, without
    treating it as the independent attestation that approves its own verifier.
 5. On a later high-risk commit that does not alter the verifier, config, or
-   target workflow, run the verifier and feed its JSON to agent-md normally.
+   target workflow, run the verifier and feed its JSON to
+   coding-agent-control normally.
 
 This root is established out-of-band. There is no force-trust, skip-attestation,
 automatic-baseline, or self-approval mechanism. A bootstrap CI success is
@@ -96,7 +103,7 @@ Status: active, Risk: high
         -> GitHub Actions completes successfully for exact ABC123
         -> this eligible verifier emits kind=independent
            with target.commit=ABC123
-        -> agent-md verify accepts the done claim
+        -> coding-agent-control verify accepts the done claim
 ```
 
 Commit is not completion, CI green is not automatically trusted, and a passing
@@ -121,4 +128,4 @@ The reference implementation targets one repository and one workflow. It does
 not model every fork, pull-request, merge-queue, reusable-workflow, or GitHub
 Enterprise topology. Other providers—GitLab CI, Jenkins, Buildkite, a human
 review system, or an external harness—can emit the same generic JSON without
-changing agent-md core.
+changing the coding-agent-control core.

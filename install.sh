@@ -1,5 +1,5 @@
 #!/bin/bash
-# install.sh — agent-md installer
+# install.sh — coding-agent-control installer
 #
 # Usage:
 #   ./install.sh                                    # current dir, auto-detect agents
@@ -23,7 +23,7 @@
 #   --no-overwrite OFF — we WILL replace AGENT.md etc., but always back
 #     up the old copy to *.bak first.
 #   Claude and Codex hook configs are merged by default. Third-party
-#     handlers stay in place; agent-md handlers are refreshed without
+#     handlers stay in place; coding-agent-control handlers are refreshed without
 #     duplication. Explicit skip and replace modes remain available.
 #   memory/ files are never overwritten (user state).
 #   .githooks/pre-commit is installed but NOT activated on curl|bash.
@@ -86,8 +86,10 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd 2>/dev/null)"
 
 if [ ! -f "$SCRIPT_DIR/AGENT.md" ]; then
   # Running via curl pipe — download the package
-  echo "▸ Downloading agent-md..."
+  echo "▸ Downloading coding-agent-control..."
   TMP=$(mktemp -d)
+  # Compatibility source URL: update only with the separately authorized
+  # GitHub repository transition, together with the extracted directory name.
   curl -fsSL https://github.com/Ernanidacosta/agent-md/archive/main.tar.gz | tar -xz -C "$TMP"
   if [ -d "$TMP/agent-md-main" ]; then
     SCRIPT_DIR="$TMP/agent-md-main"
@@ -114,7 +116,7 @@ else
   AGENT_LIST=$(echo "$AGENT" | tr ',' ' ')
 fi
 
-echo "▸ Installing agent-md directives → $TARGET"
+echo "▸ Installing coding-agent-control directives → $TARGET"
 echo "▸ Target agents: $AGENT_LIST"
 [ "$DRY_RUN" -eq 1 ] && echo "▸ DRY RUN — no files will be changed"
 echo ""
@@ -173,7 +175,7 @@ copy_with_agent_body() {
 
 merge_hook_config() {
   # src, dst, label, mode. In merge mode, command strings identify the
-  # handlers owned by agent-md. Existing copies of those handlers are
+  # handlers owned by coding-agent-control. Existing copies of those handlers are
   # refreshed; every other top-level key, event, group, and handler is
   # preserved byte-for-byte at the JSON-value level.
   local src="$1" dst="$2" label="$3" mode="$4"
@@ -323,7 +325,7 @@ if echo " $AGENT_LIST " | grep -q " claude "; then
   [ "$DRY_RUN" -eq 0 ] && mkdir -p "$TARGET/.claude/hooks"
 
   # settings.json handling is explicit and non-destructive. Merge is the
-  # default so agent-md works on first install without replacing manually
+  # default so coding-agent-control works on first install without replacing manually
   # wired third-party hooks.
   SETTINGS_SRC="$SCRIPT_DIR/.claude/settings.json"
   SETTINGS_DST="$TARGET/.claude/settings.json"
@@ -363,7 +365,7 @@ else
   echo "  → would populate  memory/ (only missing files)"
 fi
 
-# --- agent-md helper scripts ---
+# --- compatibility helper scripts (.agent-md) ---
 if [ "$DRY_RUN" -eq 0 ]; then
   mkdir -p "$TARGET/.agent-md/bin"
   if [ -f "$SCRIPT_DIR/.agent-md/README.md" ]; then

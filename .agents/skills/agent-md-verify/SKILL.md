@@ -1,11 +1,12 @@
 ---
 name: agent-md-verify
-description: Use when finishing work in a repository that has agent-md installed; executes its required/optional verification contract, updates operational progress, and reports concrete evidence instead of self-grading.
+description: Use when finishing work in a repository that has coding-agent-control installed; executes its required/optional verification contract, updates operational progress, and reports concrete evidence instead of self-grading.
 ---
 
-# agent-md Verification
+# coding-agent-control Verification
 
-Use this skill before claiming work is complete in an agent-md repository.
+Use this compatibility-named skill before claiming work is complete in a
+coding-agent-control repository.
 
 1. Read `memory/verify.md` for task-specific evidence and definition of done.
 2. Read the single `Risk:` declaration in `memory/progress.md`. Do not infer low or rewrite the value from heuristics; observed signals are review warnings, not classifications.
