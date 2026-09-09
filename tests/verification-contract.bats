@@ -213,3 +213,81 @@ EOF
   echo "$out" | jq -e '.decision == "block"' >/dev/null
   echo "$out" | jq -e '.reason | test("VERIFY_REQUIRED_FAILED")' >/dev/null
 }
+
+@test "explicit policy bootstrap replaces inferred fallback for the same check" {
+  touch pyproject.toml
+  git add pyproject.toml
+  git commit -qm "baseline without explicit verification policy"
+
+  cat > agent-md.toml <<'TOML'
+[verify]
+test = "poetry run pytest"
+TOML
+
+  worktree_contract=$(bash -c '. .claude/hooks/_lib.sh; effective_verification_contract_json worktree')
+
+  [ "$(echo "$worktree_contract" | jq '[.checks[] | select(.name == "test")] | length')" -eq 1 ]
+
+  echo "$worktree_contract" | jq -e '
+    .checks[] |
+    select(.name == "test") |
+    .origin == "configured" and
+    .requirement == "required" and
+    .command == "poetry run pytest"
+  ' >/dev/null
+
+  git add agent-md.toml
+
+  staged_contract=$(bash -c '. .claude/hooks/_lib.sh; effective_verification_contract_json staged')
+
+  [ "$(echo "$staged_contract" | jq '[.checks[] | select(.name == "test")] | length')" -eq 1 ]
+
+  echo "$staged_contract" | jq -e '
+    .checks[] |
+    select(.name == "test") |
+    .origin == "configured" and
+    .requirement == "required" and
+    .command == "poetry run pytest"
+  ' >/dev/null
+}
+
+@test "established configured command remains required when proposal replaces it" {
+  cat > agent-md.toml <<'TOML'
+[verify]
+test = "printf baseline; exit 1"
+
+[verify.policy]
+required = ["test"]
+TOML
+
+  git add agent-md.toml
+  git commit -qm "establish explicit verification policy"
+
+  cat > agent-md.toml <<'TOML'
+[verify]
+test = "printf proposal; exit 0"
+
+[verify.policy]
+required = ["test"]
+TOML
+
+  contract=$(bash -c '. .claude/hooks/_lib.sh; effective_verification_contract_json worktree')
+
+  [ "$(echo "$contract" | jq '[.checks[] | select(.name == "test")] | length')" -eq 2 ]
+
+  echo "$contract" | jq -e '
+    any(.checks[];
+      .name == "test" and
+      .origin == "configured" and
+      .requirement == "required" and
+      .command == "printf baseline; exit 1"
+    )
+    and
+    any(.checks[];
+      .name == "test" and
+      .origin == "configured" and
+      .requirement == "required" and
+      .command == "printf proposal; exit 0"
+    )
+  ' >/dev/null
+}

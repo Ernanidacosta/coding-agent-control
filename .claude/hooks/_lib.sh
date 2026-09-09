@@ -611,9 +611,10 @@ EOF
 }
 
 # merge_verification_contracts <baseline-json> <proposal-json>
-# Required commands from either side remain required. Distinct required
-# commands for the same check both run; this avoids guessing whether a command
-# replacement weakens or strengthens the guarantee. Conditional attestation
+# Established configured commands remain conservative across policy changes:
+# distinct configured commands for the same check both run. Inferred commands
+# are fallback only; when an explicit configured command exists for that check,
+# the inferred fallback does not compete with it. Conditional attestation
 # declarations remain singular and continue through their existing HEAD trust
 # validation.
 merge_verification_contracts() {
@@ -631,15 +632,24 @@ merge_verification_contracts() {
     def ordinary:
       [($baseline.checks + $proposal.checks)[] |
         select(.name != "independent" and .name != "approval")]
-      | group_by([.name, .command])
+      | group_by(.name)
       | map(
-          . as $group
-          | $group[0]
-          | .requirement = (if any($group[]; .requirement == "required") then "required" else "optional" end)
-          | .origin = (if any($group[]; .origin == "configured") then "configured"
-                       elif any($group[]; .origin == "inferred") then "inferred"
-                       else "not configured" end)
-        );
+          . as $same_name
+          | (if any($same_name[]; .origin == "configured")
+             then [$same_name[] | select(.origin == "configured")]
+             else $same_name
+             end)
+          | group_by(.command)
+          | map(
+              . as $group
+              | $group[0]
+              | .requirement = (if any($group[]; .requirement == "required") then "required" else "optional" end)
+              | .origin = (if any($group[]; .origin == "configured") then "configured"
+                           elif any($group[]; .origin == "inferred") then "inferred"
+                           else "not configured" end)
+            )
+        )
+      | add // [];
     def spec($contract; $name):
       [$contract.checks[] | select(.name == $name)][0];
     def attestation($name):
