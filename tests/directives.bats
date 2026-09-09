@@ -21,6 +21,20 @@
   [ "$status" -eq 0 ]
 }
 
+@test "directives define advisory README stewardship" {
+  grep -Fxq '## README Stewardship' "$BATS_TEST_DIRNAME/../AGENT.md"
+  grep -Fq 'The README is the durable human entry point to the repository.' \
+    "$BATS_TEST_DIRNAME/../AGENT.md"
+  grep -Fq 'Does the current README still describe the project a new user would actually encounter?' \
+    "$BATS_TEST_DIRNAME/../AGENT.md"
+  grep -Fq 'Prefer visual hierarchy over decoration.' \
+    "$BATS_TEST_DIRNAME/../AGENT.md"
+  grep -Fq 'Editorial quality remains advisory.' \
+    "$BATS_TEST_DIRNAME/../AGENT.md"
+  run grep -Fq 'README.pt-BR' "$BATS_TEST_DIRNAME/../AGENT.md"
+  [ "$status" -ne 0 ]
+}
+
 @test "directives distinguish verification evidence classes without substitution" {
   for evidence_class in Static Automated Runtime Smoke Visual Independent; do
     run grep -q "\*\*${evidence_class}\*\*" "$BATS_TEST_DIRNAME/../AGENT.md"

@@ -119,3 +119,36 @@ EOF
   [ "$(cat "$TARGET_DIR/.claude/settings.json")" = '{invalid json' ]
   echo "$output" | grep -q 'merge failed.*existing file left unchanged'
 }
+
+@test "README stewardship reaches every installed agent target" {
+  install_agent_md --agent=all >/dev/null
+
+  for directives in \
+    AGENT.md \
+    AGENTS.md \
+    CLAUDE.md \
+    .cursor/rules/agent-md.mdc \
+    .windsurf/rules/agent-md.md; do
+    grep -Fxq '## README Stewardship' "$TARGET_DIR/$directives"
+    grep -Fq 'Does the current README still describe the project a new user would actually encounter?' \
+      "$TARGET_DIR/$directives"
+  done
+}
+
+@test "installer preserves existing README and does not generate project docs" {
+  printf '%s\n' '# Project-owned README' > "$TARGET_DIR/README.md"
+  install_agent_md --agent=all >/dev/null
+
+  [ "$(cat "$TARGET_DIR/README.md")" = '# Project-owned README' ]
+  [ ! -d "$TARGET_DIR/docs" ]
+}
+
+@test "README Quickstart names the current installer and its local path succeeds" {
+  quickstart_url='https://raw.githubusercontent.com/Ernanidacosta/coding-agent-control/main/install.sh'
+  grep -Fq "curl -fsSL $quickstart_url | bash" "$BATS_TEST_DIRNAME/../README.md"
+  grep -Fq "curl -fsSL $quickstart_url | bash" "$BATS_TEST_DIRNAME/../install.sh"
+
+  run bash "$BATS_TEST_DIRNAME/../install.sh" --dry-run --no-githooks --agent=all "$TARGET_DIR"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"Target agents: claude codex cursor windsurf"* ]]
+}

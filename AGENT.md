@@ -330,6 +330,92 @@ like a template.
 
 ---
 
+## README Stewardship
+
+The README is the durable human entry point to the repository.
+
+Keep it accurate as the project evolves, but do not turn it into a changelog,
+implementation diary, generated status report, or exhaustive reference manual.
+The README should grow with the project, not ahead of it.
+
+At the end of a material change, assess whether it affects something a new
+user, contributor, operator, or developer needs to know, including:
+
+- project purpose or positioning;
+- installation, onboarding, Quickstart, commands, or configuration;
+- environment variables, CLI/API behavior, or other public interfaces;
+- supported integrations or platforms;
+- relevant user-facing behavior;
+- architecture needed to understand or extend the project;
+- development or verification workflows;
+- guarantees, limitations, non-goals, or compatibility.
+
+If it does, review the README and update it in the same change when that work is
+within scope. Purely internal changes with no documentable effect normally do
+not require a README edit.
+
+Before completion, ask:
+
+> Does the current README still describe the project a new user would actually encounter?
+
+If not, correct it before claiming completion.
+
+### Editorial Quality
+
+- Explain quickly what the project is and why it exists.
+- Keep the path to the first successful use short.
+- Prefer accurate information over marketing language.
+- Keep commands and examples copy-pasteable and representative of supported
+  paths.
+- Use progressive disclosure: orient readers and cover common workflows in the
+  README, then move deep reference material to `docs/`.
+- Preserve the project's existing voice and style.
+- Use clear headings, short paragraphs, and lists or tables when they improve
+  scanning.
+- Use a small diagram only when it communicates a relationship better than
+  prose.
+- Avoid empty sections, duplication, filler, badge walls, excessive decorative
+  emoji, non-informative banners, and artificially grandiose language.
+
+Prefer visual hierarchy over decoration. Aim for writing that is explanatory,
+scannable, pleasant, and professional without becoming ornate.
+
+For a project with enough complexity, a reasonable order is project identity
+and purpose, motivation, Quickstart, main capabilities, common usage,
+configuration, architecture overview, limitations or non-goals, verification
+or development, and links to deeper documentation. This is guidance, not a
+required template. Do not create every section automatically, and keep small
+projects small.
+
+### Living Documentation
+
+As the project grows:
+
+- enrich an existing section before creating a new one;
+- remove obsolete information and behavior that is no longer supported;
+- keep release history out of the README;
+- move excessive detail to `docs/`;
+- keep the Quickstart near the beginning;
+- preserve examples that exercise real supported paths.
+
+The README is not operational memory. Do not place the current Task, Next,
+Blockers, agent conversations, transient planning, implementation progress, or
+temporary internal rationale in it.
+
+### Facts And Judgment
+
+Editorial quality remains advisory. Do not create a Stop hook or other gate
+that tries to decide semantically whether a README is attractive or well
+written.
+
+Cheap factual claims may be tested when useful: installation URLs, referenced
+files and paths, commands, configuration names, TOML snippets, capability
+names, internal links, and supported host names. Fix a broken factual claim.
+Do not introduce a large documentation-lint system merely to enforce this
+guidance.
+
+---
+
 ## 7. Evidence-First Changes
 
 Before implementing or correcting behavior:

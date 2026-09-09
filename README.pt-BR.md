@@ -33,6 +33,7 @@ oferece uma integração capaz de bloquear.
 - bloqueia casos suportados de comandos destrutivos, paths perigosos e limites
   de secrets;
 - mantém estado operacional atual e pequeno para handoff determinístico;
+- orienta a manutenção do README como documentação viva, sem gate semântico;
 - executa a verificação declarada e usa o exit code como fonte de verdade;
 - aumenta requisitos de conclusão conforme o Risk declarado da tarefa;
 - valida evidência com autoridade separada e ligada ao SHA exato em trabalhos

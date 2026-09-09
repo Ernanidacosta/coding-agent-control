@@ -29,6 +29,7 @@ guarantees deterministic where the host exposes a blocking integration.
 - installs shared project directives and idempotently merged host hooks;
 - blocks supported destructive-command, unsafe-path, and secret-boundary cases;
 - maintains bounded current operational state for deterministic handoff;
+- guides README maintenance as living documentation without semantic gating;
 - runs declared verification and treats command exit status as authoritative;
 - raises completion requirements according to the task's declared Risk;
 - validates authority-separated, exact-SHA evidence for high/critical work;
