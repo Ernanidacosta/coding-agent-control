@@ -190,7 +190,7 @@ EOF
   [[ "$output" == *"Recovery:"* ]]
 }
 
-@test "public identity, attribution, and current source URL are explicit" {
+@test "public identity, attribution, and standalone source URL are explicit" {
   grep -Fxq '# coding-agent-control' "$BATS_TEST_DIRNAME/../README.md"
   grep -Fq '**Developer control for coding agents.**' "$BATS_TEST_DIRNAME/../README.md"
   grep -Fq 'A repository-local control, verification, and trust layer for coding agents.' \
@@ -203,9 +203,16 @@ EOF
   run grep -R -n 'iamfakeguru/agent-md' "$BATS_TEST_DIRNAME/../install.sh"
   [ "$status" -ne 0 ]
 
-  # Keep the live source location until the separately authorized remote move.
-  grep -q 'Ernanidacosta/agent-md/main/install.sh' "$BATS_TEST_DIRNAME/../README.md"
-  grep -q 'Ernanidacosta/agent-md/archive/main.tar.gz' "$BATS_TEST_DIRNAME/../install.sh"
+  grep -q 'Ernanidacosta/coding-agent-control/main/install.sh' \
+    "$BATS_TEST_DIRNAME/../README.md"
+  grep -q 'Ernanidacosta/coding-agent-control/main/install.sh' \
+    "$BATS_TEST_DIRNAME/../README.pt-BR.md"
+  grep -q 'Ernanidacosta/coding-agent-control/archive/main.tar.gz' \
+    "$BATS_TEST_DIRNAME/../install.sh"
+  grep -q 'coding-agent-control-main' "$BATS_TEST_DIRNAME/../install.sh"
+  ! grep -q 'Ernanidacosta/agent-md' "$BATS_TEST_DIRNAME/../install.sh"
+  grep -Fxq 'repository=Ernanidacosta/coding-agent-control' \
+    "$BATS_TEST_DIRNAME/../examples/github-actions/github-actions-independent.conf"
 }
 
 @test "legacy interfaces and future state boundary are documented without migration" {
@@ -225,13 +232,9 @@ EOF
 }
 
 @test "public wording reflects repository state and acceptance semantics" {
-  grep -Fq 'substantially evolved into a distinct project direction' \
+  grep -Fq 'substantially evolved into an independent project' \
     "$BATS_TEST_DIRNAME/../README.md"
-  ! grep -Fq 'substantially evolved into an independent project' \
-    "$BATS_TEST_DIRNAME/../README.md"
-  grep -Fq 'substancialmente evoluído para uma direção de projeto própria' \
-    "$BATS_TEST_DIRNAME/../README.pt-BR.md"
-  ! grep -Fq 'substancialmente evoluído para um projeto independente' \
+  grep -Fq 'substancialmente evoluído para um projeto independente' \
     "$BATS_TEST_DIRNAME/../README.pt-BR.md"
   grep -Fq 'retained compatibility interfaces in the current architecture' \
     "$BATS_TEST_DIRNAME/../README.md"

@@ -74,12 +74,11 @@ Public coverage terms are precise:
 
 ```bash
 # From inside your project directory
-curl -fsSL https://raw.githubusercontent.com/Ernanidacosta/agent-md/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/Ernanidacosta/coding-agent-control/main/install.sh | bash
 ```
 
-This is the current source location of this project; the URL will move only as
-part of a separately authorized GitHub repository transition. It is not the
-upstream installation URL.
+This downloads coding-agent-control from its standalone GitHub repository. It
+is not the upstream installation URL.
 
 The installer adds support for Claude Code, Codex, Cursor, and Windsurf by default.
 No `agent-md.toml`, CI provider, `gh`, attestation verifier, approval system,
@@ -1044,7 +1043,7 @@ installer smoke tests.
 
 Originally derived from
 [`iamfakeguru/agent-md`](https://github.com/iamfakeguru/agent-md) under the MIT
-License and substantially evolved into a distinct project direction. The original
+License and substantially evolved into an independent project. The original
 copyright notice remains in [`LICENSE`](LICENSE), and the Git history is
 preserved. The upstream project is acknowledged as the historical origin; it
 is not a runtime or installation dependency.

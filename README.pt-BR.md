@@ -84,12 +84,11 @@ antes de depender de um bloqueio específico.
 Dentro do diretório do seu projeto:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/Ernanidacosta/agent-md/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/Ernanidacosta/coding-agent-control/main/install.sh | bash
 ```
 
-Esse é o endereço atual deste projeto e será alterado somente numa transição
-separadamente autorizada do repositório GitHub. Não é a URL de instalação do
-upstream.
+Esse endereço baixa coding-agent-control de seu repositório GitHub standalone.
+Não é a URL de instalação do upstream.
 
 O installer adiciona suporte a Claude Code, Codex, Cursor e Windsurf. Não é
 necessário criar `agent-md.toml`, instalar `gh`, configurar CI, verifier,
@@ -240,7 +239,7 @@ estado, permanece no [README principal em inglês](README.md).
 
 Originalmente derivado de
 [`iamfakeguru/agent-md`](https://github.com/iamfakeguru/agent-md) sob a licença
-MIT e substancialmente evoluído para uma direção de projeto própria. O aviso de
+MIT e substancialmente evoluído para um projeto independente. O aviso de
 copyright original permanece em [`LICENSE`](LICENSE), e o histórico Git é
 preservado. O upstream é a origem histórica, não uma dependência de runtime ou
 instalação.

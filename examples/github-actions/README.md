@@ -23,10 +23,10 @@ Edit `github-actions-independent.conf` with a literal expected repository,
 workflow filename, and workflow path. It contains no credentials and is parsed
 as data rather than sourced as shell.
 
-This repository's checked-in config still names its current GitHub location,
-`Ernanidacosta/agent-md`. Move it only together with an authorized repository
-transition. Changing the verifier config or trusted workflow establishes a new
-trust-anchor baseline; the change cannot attest itself.
+This repository's checked-in config names its standalone GitHub location,
+`Ernanidacosta/coding-agent-control`. Changing the verifier config or trusted
+workflow establishes a new trust-anchor baseline; the change cannot attest
+itself.
 
 Copy the verifier and config to a reviewed repo-local location, then merge the
 provided [`agent-md.toml.example`](agent-md.toml.example) snippet into the

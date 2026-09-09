@@ -14,7 +14,7 @@
 #   ./install.sh --codex-hooks=skip .               # preserve existing .codex/hooks.json unchanged
 #
 # Or via curl (from inside your project dir):
-#   curl -fsSL https://raw.githubusercontent.com/Ernanidacosta/agent-md/main/install.sh | bash
+#   curl -fsSL https://raw.githubusercontent.com/Ernanidacosta/coding-agent-control/main/install.sh | bash
 #
 # Agents supported: claude, codex, cursor, windsurf, all (default)
 #
@@ -88,11 +88,9 @@ if [ ! -f "$SCRIPT_DIR/AGENT.md" ]; then
   # Running via curl pipe — download the package
   echo "▸ Downloading coding-agent-control..."
   TMP=$(mktemp -d)
-  # Compatibility source URL: update only with the separately authorized
-  # GitHub repository transition, together with the extracted directory name.
-  curl -fsSL https://github.com/Ernanidacosta/agent-md/archive/main.tar.gz | tar -xz -C "$TMP"
-  if [ -d "$TMP/agent-md-main" ]; then
-    SCRIPT_DIR="$TMP/agent-md-main"
+  curl -fsSL https://github.com/Ernanidacosta/coding-agent-control/archive/main.tar.gz | tar -xz -C "$TMP"
+  if [ -d "$TMP/coding-agent-control-main" ]; then
+    SCRIPT_DIR="$TMP/coding-agent-control-main"
   fi
 fi
 

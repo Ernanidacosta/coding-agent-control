@@ -88,7 +88,7 @@ run_reference() {
     }
   ' >/dev/null
   [ "${#HEAD_SHA}" -eq 40 ]
-  grep -Fq "repos/Ernanidacosta/agent-md/actions/workflows/ci.yml/runs" "$GH_CALL_LOG"
+  grep -Fq "repos/Ernanidacosta/coding-agent-control/actions/workflows/ci.yml/runs" "$GH_CALL_LOG"
   grep -Fq "head_sha=$HEAD_SHA" "$GH_CALL_LOG"
 }
 
