@@ -188,6 +188,7 @@ if [ -f "$SHARED_LIB" ] && [ -f memory/progress.md ]; then
     if [ -n "$RISK_VALUE" ]; then RISK_COUNT=1; else RISK_COUNT=0; fi
     RISK_FILES=$(risk_changed_files worktree || true)
     RISK_SIGNALS=$(risk_signals_for_files "$RISK_FILES" worktree)
+    RISK_UNDERRATING_SIGNALS=$(risk_underrating_signals "$RISK_VALUE" "$RISK_SIGNALS")
     printf '  declared: %s\n' "${RISK_VALUE:-not declared}"
     printf '  status: %s\n' "$PROGRESS_STATUS"
     printf '  signals: %s\n' "$(if [ -n "$RISK_SIGNALS" ]; then printf '%s\n' "$RISK_SIGNALS" | awk 'BEGIN { first=1 } { if (!first) printf ", "; printf "%s", $0; first=0 } END { print "" }'; else printf none; fi)"
@@ -199,8 +200,12 @@ if [ -f "$SHARED_LIB" ] && [ -f memory/progress.md ]; then
     elif [ "$RISK_COUNT" -ne 1 ] || ! printf '%s\n' "$RISK_VALUE" | grep -Eq '^(low|medium|high|critical)$'; then
       bad "[ERROR RISK_INVALID] Risk must occur once and be low, medium, high, or critical."
       printf '  consistency: invalid\n'
-    elif [ -n "$(risk_underrating_signals "$RISK_VALUE" "$RISK_SIGNALS")" ]; then
-      warn "[WARNING RISK_POSSIBLY_UNDERRATED] Declared Risk may be inconsistent with observed signals."
+    elif [ -n "$RISK_UNDERRATING_SIGNALS" ]; then
+      RISK_UNDERRATING_RESULT=$(risk_result_json warn warning RISK_POSSIBLY_UNDERRATED \
+        "Declared Risk '${RISK_VALUE}' may be inconsistent with observed sensitive paths or operations." \
+        "Review the declared Risk; signals are advisory and never rewrite it automatically." \
+        "$RISK_VALUE" "$PROGRESS_STATUS" "$RISK_UNDERRATING_SIGNALS" "$RISK_FILES" risk)
+      warn "$(policy_human_message "$RISK_UNDERRATING_RESULT")"
       printf '  consistency: review suggested\n'
     else
       printf '  consistency: ok\n'

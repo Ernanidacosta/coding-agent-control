@@ -315,9 +315,128 @@ policy_result_json() {
     '
 }
 
-# policy_human_message <policy-result-json>
-# Keeps hook output readable while exposing stable severity/code tokens.
-policy_human_message() {
+# diagnostic_language
+# Resolves the user's environment preference without changing structured results.
+# Only the explicitly supported presentation languages are returned.
+diagnostic_language() {
+  local requested normalized
+  requested=${CODING_AGENT_CONTROL_LANG-}
+  [ -n "$requested" ] || requested=${LC_ALL-}
+  [ -n "$requested" ] || requested=${LC_MESSAGES-}
+  [ -n "$requested" ] || requested=${LANG-}
+  [ -n "$requested" ] || requested=en
+
+  normalized=${requested%%@*}
+  normalized=${normalized%%.*}
+  normalized=$(printf '%s' "$normalized" | tr '[:upper:]_' '[:lower:]-')
+  case "$normalized" in
+    pt|pt-br) printf 'pt-BR\n' ;;
+    en|en-us) printf 'en\n' ;;
+    *) printf 'en\n' ;;
+  esac
+}
+
+diagnostic_label() {
+  local language="$1" label="$2"
+  case "$language:$label" in
+    pt-BR:problem) printf 'Problema\n' ;;
+    pt-BR:impact) printf 'Impacto\n' ;;
+    pt-BR:action) printf 'Ação\n' ;;
+    pt-BR:related-files) printf 'Arquivos relacionados\n' ;;
+    *:problem) printf 'Problem\n' ;;
+    *:impact) printf 'Impact\n' ;;
+    *:action) printf 'Action\n' ;;
+    *:related-files) printf 'Related files\n' ;;
+  esac
+}
+
+diagnostic_related_paths_human() {
+  local result="$1" language="$2" path_count remaining path
+  path_count=$(printf '%s' "$result" | jq '(.paths // []) | length')
+  [ "$path_count" -gt 0 ] || return 0
+
+  printf '\n%s:\n' "$(diagnostic_label "$language" related-files)"
+  while IFS= read -r path; do
+    [ -n "$path" ] || continue
+    printf '  %s\n' "$path"
+  done < <(printf '%s' "$result" | jq -r '(.paths // [])[0:3][]')
+
+  if [ "$path_count" -gt 3 ]; then
+    remaining=$((path_count - 3))
+    if [ "$language" = pt-BR ]; then
+      printf '  +%s arquivos relacionados\n' "$remaining"
+    else
+      printf '  +%s related files\n' "$remaining"
+    fi
+  fi
+}
+
+risk_diagnostic_human_message() {
+  local result="$1" language="$2" severity code risk current_status result_status
+  local migration_signal problem impact action
+  severity=$(printf '%s' "$result" | jq -r '.severity | ascii_upcase')
+  code=$(printf '%s' "$result" | jq -r '.code')
+  risk=$(printf '%s' "$result" | jq -r '.risk // "not declared"')
+  current_status=$(printf '%s' "$result" | jq -r '.current_status // "absent"')
+  result_status=$(printf '%s' "$result" | jq -r '.status')
+  migration_signal=$(printf '%s' "$result" | jq -r \
+    '(.observed_signals // []) | index("migration") != null')
+
+  case "$code:$language" in
+    RISK_POSSIBLY_UNDERRATED:pt-BR)
+      if [ "$migration_signal" = true ]; then
+        problem="Foram detectados indícios de alterações relacionadas a migração/schema enquanto o Risk declarado está como ${risk}."
+      else
+        problem="Foram detectados indícios de alterações potencialmente sensíveis enquanto o Risk declarado está como ${risk}."
+      fi
+      impact="Aviso de revisão apenas. O Risk declarado e os requisitos de verificação não foram alterados automaticamente."
+      action="Revise se Risk ${risk} continua adequado."
+      ;;
+    RISK_POSSIBLY_UNDERRATED:*)
+      if [ "$migration_signal" = true ]; then
+        problem="Changes associated with migration/schema-sensitive behavior were detected while the declared Risk is ${risk}."
+      else
+        problem="Potentially sensitive changes were detected while the declared Risk is ${risk}."
+      fi
+      impact="Advisory review only. The declared Risk and verification requirements were not changed automatically."
+      action="Review whether Risk ${risk} is still appropriate."
+      ;;
+    RISK_RUNTIME_EVIDENCE_REQUIRED:pt-BR)
+      if [ "$result_status" = fail ]; then
+        problem="A verificação runtime ou smoke foi declarada aplicável para Risk ${risk}, mas nenhum check válido passou."
+        impact="A conclusão está bloqueada até que a evidência runtime ou smoke obrigatória passe."
+        action="Corrija e execute novamente o check verify.runtime ou verify.smoke configurado antes de concluir a tarefa."
+      else
+        problem="A tarefa está em ${current_status} com Risk ${risk}, mas nenhum check runtime ou smoke declara se evidência executável em runtime se aplica."
+        impact="Aviso apenas. Lint e testes podem ter passado; este aviso não bloqueia a conclusão."
+        action="Se a mudança afetou comportamento em runtime, considere declarar verify.runtime ou verify.smoke. Se não houver uma evidência executável apropriada, nenhuma ação automática é necessária."
+      fi
+      ;;
+    RISK_RUNTIME_EVIDENCE_REQUIRED:*)
+      if [ "$result_status" = fail ]; then
+        problem="Runtime or smoke verification was declared applicable for Risk ${risk}, but no valid check passed."
+        impact="Completion is blocked until the required runtime or smoke evidence passes."
+        action="Fix and rerun the configured verify.runtime or verify.smoke check before completing the task."
+      else
+        problem="The task is ${current_status} with Risk ${risk}, but no runtime or smoke check declares whether executable runtime evidence applies."
+        impact="Advisory only. Lint and tests may have passed; completion is not blocked by this warning."
+        action="If the change affects runtime behavior, consider declaring verify.runtime or verify.smoke. If no executable runtime evidence is appropriate, no automatic action is required."
+      fi
+      ;;
+  esac
+
+  # Compatibility debt: structured missing_requirement="risk" is semantically
+  # inaccurate and remains temporarily for compatibility. Presentation must not
+  # describe an existing Risk declaration as missing.
+  printf '[%s %s]\n\n' "$severity" "$code"
+  printf '%s:\n%s\n' "$(diagnostic_label "$language" problem)" "$problem"
+  printf '\n%s:\n%s\n' "$(diagnostic_label "$language" impact)" "$impact"
+  printf '\n%s:\n%s\n' "$(diagnostic_label "$language" action)" "$action"
+
+  diagnostic_related_paths_human "$result" "$language"
+}
+
+default_policy_human_message() {
   local result="$1" result_status severity code message suggestion paths rendered
   local risk current_status signals missing_requirement
   severity=$(printf '%s' "$result" | jq -r '.severity | ascii_upcase')
@@ -341,6 +460,22 @@ policy_human_message() {
   [ -z "$paths" ] || rendered="${rendered} Paths: ${paths}."
   [ -z "$suggestion" ] || rendered="${rendered} Recovery: ${suggestion}"
   printf '%s\n' "$rendered"
+}
+
+# policy_human_message <policy-result-json>
+# Keeps hook output readable while exposing stable severity/code tokens. Locale
+# affects only the presentation of explicitly supported diagnostics.
+policy_human_message() {
+  local result="$1" code
+  code=$(printf '%s' "$result" | jq -r '.code')
+  case "$code" in
+    RISK_POSSIBLY_UNDERRATED|RISK_RUNTIME_EVIDENCE_REQUIRED)
+      risk_diagnostic_human_message "$result" "$(diagnostic_language)"
+      ;;
+    *)
+      default_policy_human_message "$result"
+      ;;
+  esac
 }
 
 # detect_pm — prints the detected Node package manager based on lockfile,
