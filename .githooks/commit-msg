@@ -1,0 +1,60 @@
+#!/bin/bash
+# .githooks/commit-msg
+# Keeps Git authorship human.
+#
+# Activate: git config core.hooksPath .githooks
+# Bypass (NOT recommended): git commit --no-verify
+#
+# Two controls are separate on purpose:
+#
+#   Commit execution authority — who may run `git commit`. Unchanged here.
+#     An agent still may not commit; that remains the human's call.
+#   Commit authorship — whose name the history carries. An agent may draft a
+#     subject and body, but must not credit itself in the result.
+#
+# This hook enforces the second only. It reports and blocks; it never edits
+# the message, and never touches user.name or user.email. The human removes
+# the offending line and commits again.
+#
+# commit-msg is the right boundary because the final message does not exist
+# reliably at pre-commit: the editor has not run, and -m, -F, templates,
+# squashes and amends all arrive differently. Here the message is a file on
+# disk, exactly as it will be recorded.
+#
+# Detection lives in the shared library so Stop, pre-commit and this hook
+# describe the same policy. It inspects trailer-shaped lines and standalone
+# agent footers, never ordinary prose, so a commit that merely talks about an
+# agent is not attribution.
+
+set -u
+
+MSG_FILE="${1:-}"
+
+# No message file means git is doing something we were not handed. Nothing to
+# inspect, and git's own handling of an empty or invalid message still applies.
+[ -n "$MSG_FILE" ] && [ -f "$MSG_FILE" ] || exit 0
+
+err() { printf '\033[31m✗\033[0m %s\n' "$*" >&2; }
+
+if [ ! -f ".claude/hooks/_lib.sh" ]; then
+  err "[ERROR CONFIG_INVALID] The shared authorship policy is unavailable, so the human-authorship guarantee could not run. Recovery: Reinstall agent-md before committing."
+  exit 1
+fi
+
+# shellcheck source=.claude/hooks/_lib.sh
+. ".claude/hooks/_lib.sh"
+
+RESULT=$(commit_attribution_result "$MSG_FILE")
+[ -n "$RESULT" ] || exit 0
+
+err "$(policy_human_message "$RESULT")"
+while IFS= read -r ENTRY; do
+  [ -n "$ENTRY" ] || continue
+  printf '  line %s: %s\n' "${ENTRY%%	*}" "${ENTRY#*	}" >&2
+done < <(printf '%s' "$RESULT" | jq -r '.lines[]')
+
+echo "" >&2
+err "Commit message BLOCKED. Remove the line(s) above and commit again."
+echo "   Git authorship stays yours; an agent may draft the subject and body." >&2
+echo "   (Bypass not recommended: git commit --no-verify)" >&2
+exit 1

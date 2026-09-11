@@ -93,9 +93,50 @@ EOF
   [ -f "$TARGET_DIR/.claude/hooks/_lib.sh" ]
   echo 'export const x = 1' > "$TARGET_DIR/src.ts"
   git -C "$TARGET_DIR" add src.ts
+  # memory/ is gitignored on a fresh install, so the classifier cannot use the
+  # index and falls back to comparing mtimes: progress.md must be at least as
+  # new as the newest changed source. Second granularity made this test depend
+  # on the install and the edit landing in the same whole second, which failed
+  # roughly one run in ten under load. Both directions are now pinned.
+  touch -t 202001010000 "$TARGET_DIR/memory/progress.md"
   run bash -c "cd '$TARGET_DIR' && .githooks/pre-commit"
-  [ "$status" -eq 0 ]
+  [ "$status" -eq 1 ]
+  echo "$output" | grep -q 'STATE_PROGRESS_STALE'
+
+  touch "$TARGET_DIR/memory/progress.md"
+  run bash -c "cd '$TARGET_DIR' && .githooks/pre-commit"
+  [ "$status" -eq 0 ] || { printf 'pre-commit exit %s:\n%s\n' "$status" "$output" >&2; false; }
   [ -z "$(git -C "$TARGET_DIR" status --short -- memory)" ]
+}
+
+@test "a fresh install receives both git hooks, executable" {
+  install_agent_md --agent=cursor
+  [ -x "$TARGET_DIR/.githooks/pre-commit" ]
+  [ -x "$TARGET_DIR/.githooks/commit-msg" ]
+  # Installed but not activated: execution authority stays with the human.
+  [ -z "$(git -C "$TARGET_DIR" config --get core.hooksPath || true)" ]
+}
+
+@test "reinstalling leaves the commit-msg hook byte-identical" {
+  install_agent_md --agent=cursor
+  first=$(md5sum < "$TARGET_DIR/.githooks/commit-msg")
+  install_agent_md --agent=cursor
+  second=$(md5sum < "$TARGET_DIR/.githooks/commit-msg")
+  [ "$first" = "$second" ]
+  [ -x "$TARGET_DIR/.githooks/commit-msg" ]
+}
+
+@test "the installed commit-msg hook enforces human authorship in the target" {
+  install_agent_md --agent=cursor
+  git -C "$TARGET_DIR" config user.name "A Developer"
+  git -C "$TARGET_DIR" config user.email dev@example.com
+  printf 'fix: thing\n\nCo-Authored-By: Claude <noreply@anthropic.com>\n' > "$TARGET_DIR/msg.txt"
+  run bash -c "cd '$TARGET_DIR' && .githooks/commit-msg msg.txt"
+  [ "$status" -ne 0 ]
+  echo "$output" | grep -q 'COMMIT_AI_ATTRIBUTION'
+  printf 'fix: thing\n' > "$TARGET_DIR/msg.txt"
+  run bash -c "cd '$TARGET_DIR' && .githooks/commit-msg msg.txt"
+  [ "$status" -eq 0 ]
 }
 
 @test "ICM enabled but unavailable is a non-fatal doctor warning" {

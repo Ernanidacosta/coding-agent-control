@@ -80,6 +80,44 @@ O vocabulário público é preciso:
 Consulte a [matriz detalhada no README principal](README.md#enforcement-matrix)
 antes de depender de um bloqueio específico.
 
+### Autoridade de commit e autoria de commit
+
+São dois controles distintos e um não substitui o outro.
+
+**Autoridade de execução** responde quem pode rodar `git commit`. Isso
+permanece com o humano. O agente pode propor uma mensagem; propor não é
+permissão para executar.
+
+**Autoria do commit** responde qual nome o histórico carrega. O agente pode
+redigir subject e body, mas o commit é trabalho do desenvolvedor e a mensagem
+não pode dizer o contrário. O hook `.githooks/commit-msg` aplica essa regra.
+
+`commit-msg` é a fronteira correta porque a mensagem final não existe de forma
+confiável antes dela. O hook bloqueia atribuição a agentes, como
+`Co-Authored-By:` nomeando um modelo, `Claude-Session:`, `Generated-By:` ou um
+rodapé de geração, aponta a linha exata, não edita a mensagem e não altera
+`user.name` nem `user.email`. Um `Co-Authored-By:` de uma pessoa real continua
+permitido, e texto técnico que apenas menciona um agente não bloqueia. Detalhes
+em [Commit Authority and Commit Authorship](README.md#commit-authority-and-commit-authorship).
+
+### Bloqueio e contexto advisory no Stop
+
+Um hook de Stop responde de duas maneiras distintas. O bloqueio é um
+`decision: "block"` que nomeia a garantia não satisfeita e a ação que a
+satisfaz; ele se repete em toda tentativa de encerramento enquanto a condição
+existir. O contexto advisory é um aviso sem decisão associada e nunca impede o
+encerramento.
+
+O Claude Code marca `stop_hook_active` como `true` em toda tentativa de
+encerramento que sucede outra já respondida por um hook no mesmo ciclo. Esse
+campo é metadado do ciclo, não evidência sobre o trabalho, e só separa as duas
+classes: o bloqueio continua idêntico em cada tentativa, e o contexto advisory
+é emitido uma vez por ciclo em vez de reativar o agente indefinidamente. Uma
+entrada malformada, vazia ou sem o campo é lida como primeira tentativa, de
+modo que a direção fail-safe é uma mensagem advisory a mais, nunca um bloqueio
+suprimido. Detalhes em
+[Blocking Enforcement vs Advisory Context](README.md#blocking-enforcement-vs-advisory-context).
+
 ## Início rápido
 
 Dentro do diretório do seu projeto:

@@ -26,8 +26,8 @@
 #     handlers stay in place; coding-agent-control handlers are refreshed without
 #     duplication. Explicit skip and replace modes remain available.
 #   memory/ files are never overwritten (user state).
-#   .githooks/pre-commit is installed but NOT activated on curl|bash.
-#     You get a printed command to activate it manually.
+#   .githooks/ (pre-commit + commit-msg) is installed but NOT activated on
+#     curl|bash. You get a printed command to activate it manually.
 #   .agent/ is auto-added to .gitignore (hook scratch + visual evidence).
 
 set -e
@@ -456,16 +456,18 @@ if [ "$IN_GIT" -eq 1 ]; then
       chmod +x "$TARGET/.claude/hooks/_lib.sh"
     fi
     mkdir -p "$TARGET/.githooks"
-    copy_file "$SCRIPT_DIR/.githooks/pre-commit" "$TARGET/.githooks/pre-commit" ".githooks/pre-commit"
-    chmod +x "$TARGET/.githooks/pre-commit"
+    for H in pre-commit commit-msg; do
+      copy_file "$SCRIPT_DIR/.githooks/$H" "$TARGET/.githooks/$H" ".githooks/$H"
+      chmod +x "$TARGET/.githooks/$H"
+    done
   fi
 
   if [ "$GITHOOKS" = "ask" ]; then
     if [ "$NON_INTERACTIVE" -eq 1 ]; then
-      # Safe default for curl|bash: do NOT auto-activate a pre-commit hook.
+      # Safe default for curl|bash: do NOT auto-activate repository git hooks.
       GITHOOKS="no"
     else
-      printf "▸ Activate .githooks/pre-commit now (runs on every git commit)? [y/N] "
+      printf "▸ Activate .githooks/ now (pre-commit + commit-msg, run on every git commit)? [y/N] "
       read -r REPLY
       REPLY="${REPLY:-N}"
       case "$REPLY" in Y|y|yes|Yes) GITHOOKS="yes" ;; *) GITHOOKS="no" ;; esac

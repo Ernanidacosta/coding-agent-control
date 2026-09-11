@@ -945,6 +945,99 @@ verification_result_json() {
     '
 }
 
+# --- Commit authorship policy --------------------------------------------
+#
+# Two controls are deliberately separate.
+#
+#   Commit execution authority — who may run `git commit`. That stays with
+#     the human and is unchanged by anything here.
+#   Commit authorship — whose name the resulting history carries. An agent
+#     may draft a subject and body, but the commit is the developer's work
+#     and the message must not say otherwise.
+#
+# This enforces the second. It never touches user.name, user.email, or the
+# message content; it reports and blocks, and the human edits and retries.
+#
+# Detection is deliberately narrow. A blanket ban on Co-Authored-By would
+# break legitimate human pair authorship, and scanning prose for the word
+# "Claude" would block a commit that merely describes this project. So only
+# two things are examined: trailer-shaped lines, and the standalone footer
+# lines agents append. Ordinary prose is never inspected.
+
+# Trailer keys that exist only to credit an agent. Blocked on any value.
+# Pipe-delimited for exact membership, so no key is matched as a substring.
+commit_attribution_agent_keys() {
+  printf '%s\n' '|claude-session|codex-session|agent-session|generated-by|generated-with|ai-assisted-by|'
+}
+
+# Trailer keys that carry authorship and are therefore checked against the
+# agent identities below. A human value on these keys is always allowed.
+commit_attribution_authorship_keys() {
+  printf '%s\n' '|co-authored-by|signed-off-by|on-behalf-of|'
+}
+
+# Identities that name an agent rather than a person. Applied only to the
+# value of an authorship trailer. Word boundaries are spelled out so that a
+# person named Bardot or Hellman is not mistaken for a model.
+commit_attribution_agent_identity_pattern() {
+  printf '%s\n' '(^|[^a-z])(claude|anthropic|chatgpt|openai|copilot|codex|cursor|windsurf|gemini|bard|devin)([^a-z]|$)|gpt-?[0-9]|[[]bot[]]|noreply@(anthropic|openai)|copilot@github'
+}
+
+# Standalone footer lines agents append. Anchored at line start so that prose
+# mentioning a tool mid-sentence is not attribution.
+commit_attribution_agent_footer_pattern() {
+  printf '%s\n' '^[[:space:]]*(🤖[[:space:]]*)?generated (with|by) |^[[:space:]]*https?://(claude[.]ai/code/session|claude[.]com/claude-code)'
+}
+
+# commit_attribution_offending_lines <message-file>
+# Prints "<line number><tab><line>" for each line that credits an agent.
+# Empty output means the message carries no agent authorship metadata.
+#
+# Git comment lines are ignored because git strips them, and scanning stops
+# at the scissors marker so a `git commit --verbose` diff is never treated as
+# part of the message. That matters here: the diff can legitimately contain
+# the very strings this policy blocks.
+commit_attribution_offending_lines() {
+  local file="$1"
+  [ -f "$file" ] || return 0
+  awk \
+    -v agent_keys="$(commit_attribution_agent_keys)" \
+    -v authorship_keys="$(commit_attribution_authorship_keys)" \
+    -v identity="$(commit_attribution_agent_identity_pattern)" \
+    -v footer="$(commit_attribution_agent_footer_pattern)" '
+    /^#/ && /^#.*>8/ { exit }
+    /^#/ { next }
+    {
+      lowered = tolower($0)
+      if (lowered ~ footer) { printf "%d\t%s\n", FNR, $0; next }
+      colon = index($0, ":")
+      if (colon < 2) next
+      key = tolower(substr($0, 1, colon - 1))
+      if (key !~ /^[a-z][a-z0-9-]*$/) next
+      if (index(agent_keys, "|" key "|") > 0) { printf "%d\t%s\n", FNR, $0; next }
+      if (index(authorship_keys, "|" key "|") > 0) {
+        value = tolower(substr($0, colon + 1))
+        if (value ~ identity) printf "%d\t%s\n", FNR, $0
+      }
+    }
+  ' "$file"
+}
+
+# commit_attribution_result <message-file>
+# Prints one structured policy result, or nothing when the message is clean.
+# Integrity class: a message that misstates authorship is blocking.
+commit_attribution_result() {
+  local file="$1" offending count result
+  offending=$(commit_attribution_offending_lines "$file")
+  [ -n "$offending" ] || return 0
+  count=$(printf '%s\n' "$offending" | awk 'END { print NR }')
+  result=$(policy_result_json \
+    "fail" "error" "COMMIT_AI_ATTRIBUTION" \
+    "${count} commit message line(s) attribute authorship to an AI agent; authorship belongs to the developer." \
+    "Delete the line(s) listed below and commit again. Drafting a subject and body with an agent is fine; crediting one in history is not.")
+  printf '%s' "$result" | jq -c --arg lines "$offending" '. + {lines: ($lines | split("\n") | map(select(length > 0)))}'
+}
+
 # --- Verification evidence excerpts ---------------------------------------
 #
 # Hook output becomes agent context, so a check's output is always excerpted
