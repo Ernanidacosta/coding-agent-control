@@ -478,6 +478,65 @@ policy_human_message() {
   esac
 }
 
+# --- Stop-hook input contract -------------------------------------------
+#
+# Claude Code sends one JSON object on stdin for Stop and SubagentStop.
+# Two fields matter to these policies:
+#
+#   stop_hook_active  true when this stop attempt follows an earlier one
+#                     that a hook already answered in the same cycle.
+#   hook_event_name   "Stop" or "SubagentStop".
+#
+# stop_hook_active is not evidence and never releases enforcement. A
+# required check that still fails, invalid enforcement configuration, an
+# operational-state violation, or missing Risk evidence blocks on every
+# attempt, retry or not. What the flag does tell us is that the agent has
+# already received this cycle's advisory context once. Advisory context
+# carries no decision the agent can satisfy, so repeating it cannot change
+# the outcome and only feeds the agent back into another turn. That is the
+# loop this contract removes, without a retry counter and without relying
+# on the host's consecutive-block cap.
+
+# hook_input_is_retry <raw-stdin>
+# True when the payload is an object whose stop_hook_active is exactly
+# true. Malformed, empty, or absent input reads as a first attempt: the
+# fail-safe direction is one extra advisory message, never a suppressed
+# block.
+hook_input_is_retry() {
+  local raw="${1:-}"
+  [ -n "$raw" ] || return 1
+  printf '%s' "$raw" | jq -e 'type == "object" and .stop_hook_active == true' >/dev/null 2>&1
+}
+
+# hook_input_stop_event <raw-stdin>
+# Echoes back the stop event we were invoked for so hookSpecificOutput
+# names the right event. Anything unrecognized falls back to Stop.
+hook_input_stop_event() {
+  local raw="${1:-}" name
+  name=$(printf '%s' "$raw" | jq -r 'if type == "object" then (.hook_event_name // empty) else empty end' 2>/dev/null || true)
+  case "$name" in
+    Stop|SubagentStop) printf '%s\n' "$name" ;;
+    *) printf 'Stop\n' ;;
+  esac
+}
+
+# emit_stop_block <reason>
+# Blocking decisions are unconditional. They never consult stop_hook_active.
+emit_stop_block() {
+  jq -n --arg r "$1" '{decision: "block", reason: $r}'
+}
+
+# emit_stop_advisory <raw-stdin> <message>
+# Emits non-blocking context once per stop cycle and stays silent on a
+# retry, so advisory text cannot restart the agent indefinitely.
+emit_stop_advisory() {
+  local raw="$1" message="$2" event
+  hook_input_is_retry "$raw" && return 0
+  event=$(hook_input_stop_event "$raw")
+  jq -n --arg e "$event" --arg m "$message" \
+    '{hookSpecificOutput: {hookEventName: $e, additionalContext: $m}}'
+}
+
 # detect_pm — prints the detected Node package manager based on lockfile,
 # or nothing. Order: pnpm > yarn > bun > npm > (nothing).
 detect_pm() {
@@ -886,6 +945,110 @@ verification_result_json() {
     '
 }
 
+# --- Verification evidence excerpts ---------------------------------------
+#
+# Hook output becomes agent context, so a check's output is always excerpted
+# rather than dumped. Which part to keep depends on what happened.
+#
+# A passing check keeps the first lines: a successful run states what it did
+# up front. A failing check needs the opposite. The first lines of a long
+# failing run are almost always the part that succeeded, which is how a real
+# failure can hide behind a truncation notice while the excerpt shows nothing
+# but passing records.
+#
+# Selection for a failure is runner-agnostic. It anchors on failure records
+# wherever they appear, keeps a little context around each, and always keeps
+# the end of the output. When nothing recognizable is found, the end of the
+# output is the evidence. This is not a parser for any one runner and must
+# not become one.
+
+# Evidence budget in content lines. Gap markers are not counted; they are a
+# handful of characters each and they carry the omission count.
+verification_evidence_max_lines() { printf '30\n'; }
+
+# Explicit failure records, in the shapes real tools print. Word boundaries
+# are spelled out and brackets are written as character classes because
+# neither \b nor backslash escapes survive awk's -v processing portably.
+verification_evidence_strong_pattern() {
+  printf '%s\n' '^not ok|^panic:|^[[:space:]]*Traceback [(]most recent call last[)]|^##[[]error[]]|^E[[:space:]]|^[[:space:]]*(✗|✘)[[:space:]]|(^|[^A-Za-z])FAILED([^A-Za-z]|$)|(^|[^A-Za-z])error([[][A-Za-z0-9_]+[]])?( [A-Za-z]*[0-9]+)?:|(^|[^A-Za-z])ERROR:'
+}
+
+# Generic error words. Consulted only when no explicit failure record exists,
+# because words like FAIL appear inside passing test descriptions and would
+# otherwise refill the excerpt with the very lines that hid the failure.
+verification_evidence_weak_pattern() {
+  printf '%s\n' '(^|[^A-Za-z])(FAIL|ERROR|ERRORS|Exception|AssertionError)([^A-Za-z]|$)|Segmentation fault|command not found'
+}
+
+# verification_evidence <output-file> <exit-code>
+# Prints the excerpt. Never decides pass or fail; the caller already has the
+# exit status and this only chooses which lines to show.
+verification_evidence() {
+  local file="$1" exit_code="${2:-0}" max
+  max=$(verification_evidence_max_lines)
+
+  if [ "$exit_code" -eq 0 ]; then
+    awk -v max="$max" 'NR <= max' "$file"
+    return 0
+  fi
+
+  awk -v max="$max" -v before=1 -v after_max=20 -v tail=5 \
+    -v strong="$(verification_evidence_strong_pattern)" \
+    -v weak="$(verification_evidence_weak_pattern)" '
+    FNR == NR {
+      if ($0 ~ strong) strong_line[++strong_n] = FNR
+      else if ($0 ~ weak) weak_line[++weak_n] = FNR
+      total = FNR
+      next
+    }
+    FNR == 1 {
+      if (total <= max) {
+        for (i = 1; i <= total; i++) want[i] = 1
+      } else {
+        tail_start = total - tail + 1
+        if (tail_start < 1) tail_start = 1
+        for (i = tail_start; i <= total; i++) { want[i] = 1; count++ }
+        markers = strong_n
+        for (i = 1; i <= strong_n; i++) marker[i] = strong_line[i]
+        if (markers == 0) {
+          markers = weak_n
+          for (i = 1; i <= weak_n; i++) marker[i] = weak_line[i]
+        }
+        # Name every failure record before giving any of them context, so a
+        # run with many failures still lists them all.
+        for (i = 1; i <= markers && count < max; i++)
+          if (!(marker[i] in want)) { want[marker[i]] = 1; count++ }
+        # One line of lead-in each.
+        for (i = 1; i <= markers && count < max; i++) {
+          j = marker[i] - before
+          if (j >= 1 && !(j in want)) { want[j] = 1; count++ }
+        }
+        # Then widen the window after each record one round at a time. What
+        # explains a failure is what follows it: the assertion, the traceback,
+        # the compiler note. A lone failure gets a deep excerpt; many failures
+        # share the remaining budget evenly.
+        for (radius = 1; radius <= after_max && count < max; radius++)
+          for (i = 1; i <= markers && count < max; i++) {
+            j = marker[i] + radius
+            if (j <= total && !(j in want)) { want[j] = 1; count++ }
+          }
+      }
+    }
+    {
+      if (FNR in want) {
+        if (gap > 0) {
+          if (tail_start > 0 && FNR == tail_start)
+            printf "... (%d line%s omitted; end of output follows)\n", gap, (gap == 1 ? "" : "s")
+          else
+            printf "... (%d line%s omitted)\n", gap, (gap == 1 ? "" : "s")
+          gap = 0
+        }
+        print
+      } else gap++
+    }
+  ' "$file" "$file"
+}
+
 run_verification_check() {
   local spec="$1" timeout_seconds="${2:-}" name requirement origin command
   local output_file exit_code evidence line_count truncated=false timeout_command="" label
@@ -942,12 +1105,12 @@ run_verification_check() {
     exit_code=$?
   fi
 
-  line_count=$(wc -l < "$output_file" | tr -d ' ')
-  evidence=$(awk 'NR <= 30' "$output_file")
+  line_count=$(awk 'END { print NR }' "$output_file")
+  evidence=$(verification_evidence "$output_file" "$exit_code")
   if [ -z "$evidence" ]; then
     evidence="No output; exit code ${exit_code}."
   fi
-  if [ "${line_count:-0}" -gt 30 ]; then truncated=true; fi
+  if [ "${line_count:-0}" -gt "$(verification_evidence_max_lines)" ]; then truncated=true; fi
   rm -f "$output_file"
 
   if [ "$exit_code" -eq 0 ]; then
@@ -1072,7 +1235,12 @@ verification_result_human() {
     printf 'Evidence:\n%s\n' "$evidence"
   fi
   if [ "$truncated" = true ]; then
-    printf 'Evidence truncated to 30 lines; rerun the command above for complete output.\n'
+    if [ -n "$exit_code" ] && [ "$exit_code" != 0 ]; then
+      printf 'Evidence is an excerpt around detected failures plus the end of the output; rerun the command above for complete output.\n'
+    else
+      printf 'Evidence is the first %s lines; rerun the command above for complete output.\n' \
+        "$(verification_evidence_max_lines)"
+    fi
   fi
   anchor_path=$(printf '%s' "$result" | jq -r '.trust_anchor.path // empty')
   if [ -n "$anchor_path" ]; then

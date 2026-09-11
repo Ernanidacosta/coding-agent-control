@@ -131,6 +131,16 @@ EOF
   ' >/dev/null
 }
 
+@test "a failing check reports evidence around the failure, not the head" {
+  write_contract "seq 1 200 | sed 's/^/ok /'; echo 'not ok 201 broke'; seq 1 40 | sed 's/^/ok trailing /'; exit 1" '"test"'
+  summary=$(bash -c '. .claude/hooks/_lib.sh; run_verification_contract')
+  echo "$summary" | jq -e '.results[0].evidence | test("not ok 201 broke")' >/dev/null
+  echo "$summary" | jq -e '.results[0].evidence | test("ok trailing 40")' >/dev/null
+  echo "$summary" | jq -e '.results[0].evidence | test("^ok 1$"; "m") | not' >/dev/null
+  echo "$summary" | jq -e '.results[0].truncated == true' >/dev/null
+  echo "$summary" | jq -e '.results[0].exit_code == 1' >/dev/null
+}
+
 @test "configured command takes precedence over inferred command" {
   touch tsconfig.json
   cat > agent-md.toml <<'EOF'

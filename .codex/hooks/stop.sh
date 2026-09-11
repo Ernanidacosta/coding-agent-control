@@ -4,6 +4,12 @@
 # Codex launches matching hook handlers concurrently. For Stop checks we
 # want deterministic ordering and at most one continuation prompt, so this
 # wrapper runs the shared policies serially and emits the first block.
+#
+# The payload is forwarded verbatim, so the shared stop-hook input contract
+# applies here too: a block is emitted on every attempt, and advisory
+# context is emitted only while the host reports this is not a retry. A
+# host that does not send stop_hook_active reads as a first attempt on
+# every stop, which is the behavior Codex had before the contract existed.
 
 ROOT=$(git rev-parse --show-toplevel 2>/dev/null || pwd)
 INPUT=$(cat)

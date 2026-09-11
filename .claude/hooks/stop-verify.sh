@@ -13,11 +13,15 @@
 #   avoid trapping the agent in a loop. That escape hatch meant
 #   "enforcement" was conditional on the agent's persistence — not
 #   enforcement at all. We keep blocking until the commands actually
-#   pass. `stop_hook_active=true` does NOT short-circuit us; if the
+#   pass. `stop_hook_active=true` does NOT short-circuit a block; if the
 #   agent retries without fixing anything, we block again.
 #
 #   The only way out is to satisfy the required verification contract or
 #   fix invalid enforcement configuration.
+#
+#   `stop_hook_active` does bound advisory context: a warning carries no
+#   decision to satisfy, so it is said once per stop cycle instead of on
+#   every retry. See the stop-hook input contract in _lib.sh.
 #
 # Configuration:
 #   agent-md.toml [verify] commands override heuristics. An optional
@@ -28,8 +32,7 @@
 # shellcheck source=.claude/hooks/_lib.sh
 . "$(dirname "$0")/_lib.sh"
 
-# Read and discard stdin — Claude sends JSON but we don't branch on it.
-cat > /dev/null
+HOOK_INPUT=$(cat)
 
 VERIFY_SUMMARY=$(run_effective_verification_contract worktree)
 RISK_SUMMARY=$(run_risk_contract "$VERIFY_SUMMARY" worktree completion)
@@ -38,13 +41,13 @@ STATUS=$(printf '%s' "$SUMMARY" | jq -r '.status')
 
 if [ "$STATUS" = fail ]; then
   REASON=$(verification_summary_human "$SUMMARY" nonpass)
-  jq -n --arg r "$REASON" '{decision: "block", reason: $r}'
+  emit_stop_block "$REASON"
   exit 0
 fi
 
 if [ "$STATUS" = warn ]; then
   MESSAGE=$(verification_summary_human "$SUMMARY" nonpass)
-  jq -n --arg m "$MESSAGE" '{hookSpecificOutput: {hookEventName: "Stop", additionalContext: $m}}'
+  emit_stop_advisory "$HOOK_INPUT" "$MESSAGE"
   exit 0
 fi
 
