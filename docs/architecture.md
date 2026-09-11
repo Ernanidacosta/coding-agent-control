@@ -116,6 +116,12 @@ GitHub Actions is likewise a reference source of independent evidence, not a
 core dependency. The core validates a provider-neutral attestation contract;
 provider-specific API access stays outside the core.
 
+The same separation applies to the planned optimization for repeated ordinary
+verification. [Authenticated verification receipts](authenticated-verification-receipts.md)
+bind check results to canonical worktree/control/contract identity, but only an
+authority-separated issuer can prove that those checks executed. Until such an
+issuer is configured, Stop continues to run the complete contract.
+
 ## Enforcement Vocabulary
 
 - **Enforced** — a deterministic mechanism can block the relevant action or

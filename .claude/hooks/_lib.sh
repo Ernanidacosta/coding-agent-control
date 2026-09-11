@@ -204,6 +204,485 @@ snapshot_to_temp() {
   file_snapshot "$path" "$scope" > "$destination"
 }
 
+# --- Authenticated verification receipt protocol --------------------------
+#
+# Phase A defines deterministic state identity and the provider-neutral data
+# contract only. These helpers do not issue, persist, or trust a receipt. In
+# particular, a caller-provided authentication result is meaningful only after
+# a future gate obtains it from an eligible authority-separated provider.
+
+verification_receipt_protocol_schema() {
+  printf '1\n'
+}
+
+# The receipt cache and local working memory are never verification inputs.
+# Their own validators remain responsible for completion claims and state.
+verification_receipt_path_is_structurally_excluded() {
+  case "$1" in
+    .git|.git/*|.agent/verification|.agent/verification/*|\
+    memory/agents.md|memory/plan.md|memory/progress.md|memory/verify.md|memory/gotchas.md) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+verification_receipt_hash_algorithm() {
+  printf 'sha256\n'
+}
+
+verification_receipt_sha256_stream() {
+  local output
+  if command -v sha256sum >/dev/null 2>&1; then
+    output=$(sha256sum) || return 1
+    printf '%s\n' "${output%% *}"
+  elif command -v shasum >/dev/null 2>&1; then
+    output=$(shasum -a 256) || return 1
+    printf '%s\n' "${output%% *}"
+  elif command -v openssl >/dev/null 2>&1; then
+    output=$(openssl dgst -sha256) || return 1
+    printf '%s\n' "${output##* }"
+  else
+    return 127
+  fi
+}
+
+# Hashes a byte stream with the dependency-light SHA-256 implementation
+# available on the host. The digest supplies deterministic identity, not
+# authority; absence of a supported implementation fails identity construction.
+verification_receipt_stream_fingerprint_json() {
+  local algorithm value
+  algorithm=$(verification_receipt_hash_algorithm) || return 1
+  value=$(verification_receipt_sha256_stream) || return 1
+  jq -cn --arg algorithm "$algorithm" --arg value "$value" \
+    '{algorithm:$algorithm,value:$value}'
+}
+
+verification_receipt_json_fingerprint_json() {
+  local value="$1" canonical
+  canonical=$(printf '%s' "$value" | jq -cS . 2>/dev/null) || return 1
+  printf '%s' "$canonical" | verification_receipt_stream_fingerprint_json
+}
+
+# Hash the raw target bytes of a symlink without following it. readlink writes
+# one terminator newline; dd removes exactly that byte while preserving any
+# newline that is part of the target itself.
+verification_receipt_symlink_digest() {
+  local path="$1" target_file content_file target_size digest
+  target_file=$(mktemp "${TMPDIR:-/tmp}/agent-md-link-target.XXXXXX") || return 1
+  content_file=$(mktemp "${TMPDIR:-/tmp}/agent-md-link-content.XXXXXX") || {
+    rm -f "$target_file"
+    return 1
+  }
+  if ! readlink "./$path" > "$target_file"; then
+    rm -f "$target_file" "$content_file"
+    return 1
+  fi
+  target_size=$(file_size "$target_file") || {
+    rm -f "$target_file" "$content_file"
+    return 1
+  }
+  if [ "$target_size" -lt 1 ]; then
+    rm -f "$target_file" "$content_file"
+    return 1
+  fi
+  if ! dd if="$target_file" of="$content_file" bs=1 count=$((target_size - 1)) 2>/dev/null; then
+    rm -f "$target_file" "$content_file"
+    return 1
+  fi
+  digest=$(verification_receipt_sha256_stream < "$content_file") || {
+    rm -f "$target_file" "$content_file"
+    return 1
+  }
+  rm -f "$target_file" "$content_file"
+  printf '%s\n' "$digest"
+}
+
+verification_receipt_index_blob_digest() {
+  local oid="$1" blob_file digest
+  blob_file=$(mktemp "${TMPDIR:-/tmp}/agent-md-index-blob.XXXXXX") || return 1
+  if ! git cat-file blob "$oid" > "$blob_file"; then
+    rm -f "$blob_file"
+    return 1
+  fi
+  digest=$(verification_receipt_sha256_stream < "$blob_file") || {
+    rm -f "$blob_file"
+    return 1
+  }
+  rm -f "$blob_file"
+  printf '%s\n' "$digest"
+}
+
+verification_receipt_index_state_json() {
+  local path="$1" records_file record prefix mode="" oid="" digest="" stage="" count=0
+  records_file=$(mktemp "${TMPDIR:-/tmp}/agent-md-index-state.XXXXXX") || return 1
+  if ! git --literal-pathspecs ls-files --stage -z -- "$path" > "$records_file"; then
+    rm -f "$records_file"
+    return 1
+  fi
+  while IFS= read -r -d '' record; do
+    prefix=${record%%$'\t'*}
+    read -r mode oid stage <<< "$prefix"
+    count=$((count + 1))
+  done < "$records_file"
+  rm -f "$records_file"
+
+  if [ "$count" -eq 0 ]; then
+    jq -cn '{valid:true,state:"absent"}'
+  elif [ "$count" -ne 1 ] || [ "$stage" != 0 ]; then
+    jq -cn '{valid:false,state:"conflicted",error:"index contains unresolved stages"}'
+  else
+    case "$mode" in
+      100644|100755) ;;
+      120000) ;;
+      160000)
+        jq -cn --arg mode "$mode" --arg oid "$oid" \
+          '{valid:false,state:"unsupported",mode:$mode,oid:$oid,error:"gitlinks are not supported by receipt protocol v1"}'
+        return 0
+        ;;
+      *)
+        jq -cn --arg mode "$mode" --arg oid "$oid" \
+          '{valid:false,state:"unsupported",mode:$mode,oid:$oid,error:"unsupported index mode"}'
+        return 0
+        ;;
+    esac
+    digest=$(verification_receipt_index_blob_digest "$oid") || return 1
+    jq -cn --arg mode "$mode" --arg oid "$oid" --arg digest "$digest" \
+      '{valid:true,state:"present",mode:$mode,oid:$oid,digest:$digest}'
+  fi
+}
+
+verification_receipt_worktree_state_json() {
+  local path="$1" mode digest
+  if [ -L "$path" ]; then
+    digest=$(verification_receipt_symlink_digest "$path") || {
+      jq -cn '{valid:false,state:"unsupported",error:"symlink target could not be hashed"}'
+      return 0
+    }
+    jq -cn --arg digest "$digest" \
+      '{valid:true,state:"present",kind:"symlink",mode:"120000",digest:$digest}'
+  elif [ -f "$path" ]; then
+    if [ -x "$path" ]; then mode=100755; else mode=100644; fi
+    digest=$(verification_receipt_sha256_stream < "$path") || {
+      jq -cn '{valid:false,state:"unreadable",error:"file content could not be hashed"}'
+      return 0
+    }
+    jq -cn --arg mode "$mode" --arg digest "$digest" \
+      '{valid:true,state:"present",kind:"file",mode:$mode,digest:$digest}'
+  elif [ -e "$path" ]; then
+    jq -cn '{valid:false,state:"unsupported",error:"special filesystem entries are not supported by receipt protocol v1"}'
+  else
+    jq -cn '{valid:true,state:"absent"}'
+  fi
+}
+
+verification_receipt_manifest_entry_json() {
+  local path="$1" scope="$2" index_state worktree_state
+  index_state=$(verification_receipt_index_state_json "$path") || return 1
+  if [ "$scope" = staged ]; then
+    jq -cn --arg path "$path" --argjson index "$index_state" \
+      '{valid:$index.valid,path:$path,index:$index}'
+    return 0
+  fi
+  worktree_state=$(verification_receipt_worktree_state_json "$path") || return 1
+  jq -cn --arg path "$path" --argjson index "$index_state" --argjson worktree "$worktree_state" \
+    '{valid:($index.valid and $worktree.valid),path:$path,index:$index,worktree:$worktree}'
+}
+
+# verification_receipt_source_manifest_json [worktree|staged]
+#
+# HEAD supplies the factual base. The manifest enumerates the complete HEAD and
+# index path sets (not only `git diff` output), plus non-ignored untracked files
+# for worktree scope. This catches deletes, mode changes, staged/unstaged
+# divergence, and assume-unchanged paths. JSON escaping plus canonical sorting
+# provide unambiguous framing for unusual pathnames.
+verification_receipt_source_manifest_json() {
+  local scope="${1:-worktree}" head="" paths_file entries_file path entry entries valid entry_error=0
+  case "$scope" in
+    worktree|staged) ;;
+    *)
+      jq -cn --arg scope "$scope" \
+        '{valid:false,schema:1,scope:$scope,error:"receipt scope must be worktree or staged"}'
+      return 0
+      ;;
+  esac
+  if ! git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    jq -cn --arg scope "$scope" \
+      '{valid:false,schema:1,scope:$scope,error:"verification receipts require a Git worktree"}'
+    return 0
+  fi
+
+  head=$(git rev-parse --verify HEAD 2>/dev/null || true)
+  paths_file=$(mktemp "${TMPDIR:-/tmp}/agent-md-receipt-paths.XXXXXX") || return 1
+  entries_file=$(mktemp "${TMPDIR:-/tmp}/agent-md-receipt-entries.XXXXXX") || {
+    rm -f "$paths_file"
+    return 1
+  }
+  : > "$paths_file"
+  : > "$entries_file"
+  if [ -n "$head" ]; then
+    git ls-tree -r -z --name-only HEAD >> "$paths_file" || {
+      rm -f "$paths_file" "$entries_file"
+      return 1
+    }
+  fi
+  git ls-files -z --cached >> "$paths_file" || {
+    rm -f "$paths_file" "$entries_file"
+    return 1
+  }
+  if [ "$scope" = worktree ]; then
+    git ls-files -z --others --exclude-standard >> "$paths_file" || {
+      rm -f "$paths_file" "$entries_file"
+      return 1
+    }
+  fi
+
+  while IFS= read -r -d '' path; do
+    verification_receipt_path_is_structurally_excluded "$path" && continue
+    entry=$(verification_receipt_manifest_entry_json "$path" "$scope") || {
+      entry_error=1
+      break
+    }
+    printf '%s\n' "$entry" >> "$entries_file"
+  done < "$paths_file"
+  rm -f "$paths_file"
+  if [ "$entry_error" -ne 0 ]; then
+    rm -f "$entries_file"
+    return 1
+  fi
+
+  # Duplicate paths arise from the HEAD/index union. Identical observations are
+  # collapsed; disagreement means the repository changed during enumeration.
+  entries=$(jq -sc '
+    sort_by(.path) | group_by(.path) | map(
+      if (map(del(.path)) | unique | length) == 1 then .[0]
+      else {valid:false,path:.[0].path,error:"path changed while the manifest was being built"}
+      end
+    )
+  ' "$entries_file")
+  rm -f "$entries_file"
+  valid=$(printf '%s' "$entries" | jq 'all(.[]; .valid == true)')
+  jq -cn --argjson schema "$(verification_receipt_protocol_schema)" \
+    --arg scope "$scope" --arg head "$head" --argjson entries "$entries" --argjson valid "$valid" '
+      {
+        valid:$valid,
+        schema:$schema,
+        scope:$scope,
+        head:(if $head == "" then null else $head end),
+        exclusions:[
+          ".git/**",
+          ".agent/verification/**",
+          "memory/agents.md",
+          "memory/plan.md",
+          "memory/progress.md",
+          "memory/verify.md",
+          "memory/gotchas.md"
+        ],
+        entries:$entries
+      }
+    '
+}
+
+verification_receipt_mechanism_manifest_json() {
+  local scope="${1:-worktree}" files_file path entry files valid=false
+  files_file=$(mktemp "${TMPDIR:-/tmp}/agent-md-receipt-mechanism.XXXXXX") || return 1
+  : > "$files_file"
+  for path in \
+    .claude/hooks/_lib.sh \
+    .claude/hooks/stop-verify.sh \
+    .agent-md/bin/verify.sh; do
+    entry=$(verification_receipt_manifest_entry_json "$path" "$scope") || {
+      rm -f "$files_file"
+      return 1
+    }
+    printf '%s\n' "$entry" >> "$files_file"
+  done
+  files=$(jq -sc 'sort_by(.path)' "$files_file")
+  rm -f "$files_file"
+  if [ "$scope" = staged ]; then
+    valid=$(printf '%s' "$files" | jq 'all(.[]; .valid and .index.state == "present")')
+  else
+    valid=$(printf '%s' "$files" | jq 'all(.[]; .valid and .worktree.state == "present")')
+  fi
+  jq -cn --argjson schema "$(verification_receipt_protocol_schema)" \
+    --arg scope "$scope" --argjson valid "$valid" --argjson files "$files" \
+    '{valid:$valid,schema:$schema,scope:$scope,files:$files}'
+}
+
+# Ordinary coverage is calculated separately from external authority. A valid
+# local receipt can never satisfy the independent or approval arrays.
+verification_receipt_requirements_json() {
+  local contract="$1" control="$2"
+  jq -cn --argjson contract "$contract" --argjson control "$control" '
+    def ordinary_spec:
+      {name,requirement,origin,command};
+    ($control.effective.risk // null) as $risk
+    | ([ $contract.checks[] |
+          select(.name != "independent" and .name != "approval" and .requirement == "required") |
+          ordinary_spec ] | sort_by(.name,.command,.origin,.requirement)) as $required
+    | ([ $contract.checks[] |
+          select((.name == "runtime" or .name == "smoke") and .origin != "not configured") |
+          ordinary_spec ] | sort_by(.name,.command,.origin,.requirement)) as $runtime
+    | {
+        valid:($contract.valid == true and $control.valid == true),
+        required:$required,
+        any_of:(if (($risk == "medium" or $risk == "high" or $risk == "critical") and ($runtime | length) > 0)
+                then [{name:"runtime-or-smoke",checks:$runtime}]
+                else [] end),
+        external:([if ($risk == "high" or $risk == "critical") then "independent" else empty end,
+                   if ($risk == "critical" or
+                       ($control.risk_downgrade == "pending" and $control.downgrade_authority == "approval"))
+                   then "approval" else empty end] | unique)
+      }
+  '
+}
+
+verification_receipt_identity_json() {
+  local scope="${1:-worktree}" source contract control mechanism requirements
+  local source_fingerprint contract_fingerprint control_fingerprint mechanism_fingerprint
+  source=$(verification_receipt_source_manifest_json "$scope") || return 1
+  contract=$(effective_verification_contract_json "$scope") || return 1
+  control=$(effective_control_requirements_json "$scope") || return 1
+  mechanism=$(verification_receipt_mechanism_manifest_json "$scope") || return 1
+  requirements=$(verification_receipt_requirements_json "$contract" "$control") || return 1
+  if [ "$(printf '%s' "$source" | jq -r '.valid')" != true ] \
+    || [ "$(printf '%s' "$contract" | jq -r '.valid')" != true ] \
+    || [ "$(printf '%s' "$control" | jq -r '.valid')" != true ] \
+    || [ "$(printf '%s' "$mechanism" | jq -r '.valid')" != true ] \
+    || [ "$(printf '%s' "$requirements" | jq -r '.valid')" != true ]; then
+    jq -cn --argjson schema "$(verification_receipt_protocol_schema)" --arg scope "$scope" \
+      --argjson source "$source" --argjson contract "$contract" \
+      --argjson control "$control" --argjson mechanism "$mechanism" \
+      '{valid:false,schema:$schema,scope:$scope,error:"current verification identity is invalid",
+        components:{source:$source,contract:$contract,control:$control,mechanism:$mechanism}}'
+    return 0
+  fi
+  source_fingerprint=$(verification_receipt_json_fingerprint_json "$source") || return 1
+  contract_fingerprint=$(verification_receipt_json_fingerprint_json "$contract") || return 1
+  control_fingerprint=$(verification_receipt_json_fingerprint_json "$control") || return 1
+  mechanism_fingerprint=$(verification_receipt_json_fingerprint_json "$mechanism") || return 1
+  jq -cn --argjson schema "$(verification_receipt_protocol_schema)" --arg scope "$scope" \
+    --argjson source "$source_fingerprint" --argjson contract "$contract_fingerprint" \
+    --argjson control "$control_fingerprint" --argjson mechanism "$mechanism_fingerprint" \
+    --argjson requirements "$requirements" '
+      {valid:true,schema:$schema,scope:$scope,
+       fingerprints:{source:$source,contract:$contract,control:$control,mechanism:$mechanism},
+       requirements:$requirements}
+    '
+}
+
+# The authenticated payload is every receipt field except the provider-owned
+# authentication envelope. No field used for freshness, ordering, coverage, or
+# result interpretation is left unauthenticated.
+verification_receipt_payload_json() {
+  printf '%s' "$1" | jq -cS 'del(.authentication)' 2>/dev/null
+}
+
+verification_receipt_payload_fingerprint_json() {
+  local payload
+  payload=$(verification_receipt_payload_json "$1") || return 1
+  verification_receipt_json_fingerprint_json "$payload"
+}
+
+verification_receipt_state_json() {
+  local receipt="${1:-}" identity="${2:-}" provider_validation="${3:-}"
+  local payload_fingerprint coverage
+  if [ -z "$receipt" ]; then
+    jq -cn '{schema:1,state:"absent",reason:"no receipt was supplied"}'
+    return 0
+  fi
+  if ! printf '%s' "$receipt" | jq -e '
+    type == "object" and .schema == 1 and
+    (.scope == "worktree" or .scope == "staged") and
+    (.attempt | type == "object") and
+    (.attempt.issuer | type == "string" and length > 0) and
+    (.attempt.sequence | type == "string" and length > 0) and
+    (.fingerprints | type == "object") and
+    ([.fingerprints.source,.fingerprints.contract,.fingerprints.control,.fingerprints.mechanism] |
+      all(.[]; type == "object" and (.algorithm | type == "string" and length > 0) and
+                         (.value | type == "string" and length > 0))) and
+    (.status == "pass" or .status == "warn" or .status == "fail") and
+    (.checks | type == "array") and
+    (all(.checks[];
+      (.name | type == "string" and length > 0) and
+      (.requirement == "required" or .requirement == "optional") and
+      (.origin | type == "string" and length > 0) and
+      (.command | type == "string") and
+      (.status == "pass" or .status == "warn" or .status == "fail") and
+      (.exit_code | type == "number" and floor == .))) and
+    (.authentication | type == "object")
+  ' >/dev/null 2>&1; then
+    jq -cn '{schema:1,state:"invalid",reason:"receipt does not match protocol schema 1"}'
+    return 0
+  fi
+  if ! printf '%s' "$identity" | jq -e '
+    type == "object" and .valid == true and .schema == 1 and
+    (.scope == "worktree" or .scope == "staged") and
+    (.fingerprints | type == "object") and (.requirements.valid == true)
+  ' >/dev/null 2>&1; then
+    jq -cn '{schema:1,state:"invalid",reason:"current verification identity is unavailable or invalid"}'
+    return 0
+  fi
+  if ! printf '%s' "$provider_validation" | jq -e '
+    type == "object" and .schema == 1 and .status == "pass" and .authentic == true and
+    (.latest | type == "boolean") and
+    (.issuer | type == "string" and length > 0) and
+    (.sequence | type == "string" and length > 0) and
+    (.payload_fingerprint | type == "object")
+  ' >/dev/null 2>&1; then
+    jq -cn '{schema:1,state:"invalid",reason:"authority-separated authentication was not established"}'
+    return 0
+  fi
+
+  payload_fingerprint=$(verification_receipt_payload_fingerprint_json "$receipt") || {
+    jq -cn '{schema:1,state:"invalid",reason:"authenticated payload could not be canonicalized"}'
+    return 0
+  }
+  if ! jq -en --argjson receipt "$receipt" --argjson validation "$provider_validation" \
+    --argjson payload "$payload_fingerprint" '
+      $validation.issuer == $receipt.attempt.issuer and
+      $validation.sequence == $receipt.attempt.sequence and
+      $validation.payload_fingerprint == $payload
+    ' >/dev/null; then
+    jq -cn '{schema:1,state:"invalid",reason:"provider validation does not authenticate this receipt payload"}'
+    return 0
+  fi
+  if [ "$(printf '%s' "$provider_validation" | jq -r '.latest')" != true ]; then
+    jq -cn '{schema:1,state:"stale",reason:"receipt was superseded by a newer authenticated attempt"}'
+    return 0
+  fi
+  if ! jq -en --argjson receipt "$receipt" --argjson identity "$identity" '
+    $receipt.scope == $identity.scope and $receipt.fingerprints == $identity.fingerprints
+  ' >/dev/null; then
+    jq -cn '{schema:1,state:"stale",reason:"receipt fingerprints do not match the current state"}'
+    return 0
+  fi
+
+  coverage=$(jq -cn --argjson receipt "$receipt" --argjson identity "$identity" '
+    def passed($expected):
+      any($receipt.checks[];
+        .name == $expected.name and
+        .requirement == $expected.requirement and
+        .origin == $expected.origin and
+        .command == $expected.command and
+        .status == "pass" and .exit_code == 0);
+    ($identity.requirements) as $requirements
+    | ($requirements.required | map(select(passed(.) | not))) as $missing_required
+    | ($requirements.any_of | map(select(any(.checks[]; passed(.)) | not) | .name)) as $missing_groups
+    | {complete:($receipt.status != "fail" and
+                 ($missing_required | length) == 0 and
+                 ($missing_groups | length) == 0),
+       missing_required:$missing_required,
+       missing_groups:$missing_groups,
+       external:$requirements.external}
+  ')
+  if [ "$(printf '%s' "$coverage" | jq -r '.complete')" != true ]; then
+    jq -cn --argjson coverage "$coverage" \
+      '{schema:1,state:"insufficient-coverage",reason:"latest authenticated attempt does not cover every current ordinary requirement",coverage:$coverage}'
+    return 0
+  fi
+  jq -cn --argjson coverage "$coverage" \
+    '{schema:1,state:"authentic-current",reason:"latest authenticated attempt matches the current state and ordinary requirements",coverage:$coverage}'
+}
+
 risk_rank() {
   case "$1" in
     low) printf '1\n' ;;
