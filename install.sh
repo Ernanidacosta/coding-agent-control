@@ -176,6 +176,7 @@ fi
 # or verification action.
 if [ -f "$SCRIPT_DIR/.claude/hooks/_lib.sh" ]; then
   # shellcheck source=.claude/hooks/_lib.sh
+  # shellcheck disable=SC1091
   . "$SCRIPT_DIR/.claude/hooks/_lib.sh"
 fi
 
