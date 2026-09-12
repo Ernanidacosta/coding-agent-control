@@ -151,7 +151,11 @@ fetch_source_package() {
 SCRIPT_DIR=""
 INSTALL_SOURCE_MODE="package"
 if [ -n "${BASH_SOURCE[0]:-}" ] && [ -f "${BASH_SOURCE[0]}" ]; then
-  SCRIPT_CANDIDATE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd 2>/dev/null || true)"
+  if SCRIPT_CANDIDATE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd 2>/dev/null)"; then
+    :
+  else
+    SCRIPT_CANDIDATE=""
+  fi
   if is_source_package "$SCRIPT_CANDIDATE"; then
     SCRIPT_DIR="$SCRIPT_CANDIDATE"
   fi
