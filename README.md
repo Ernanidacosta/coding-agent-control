@@ -503,8 +503,13 @@ the behavior it had before the contract existed.
 ```
 
 The installer backs up existing top-level rule files before replacing
-them. Existing `memory/*.md` files are never overwritten. Existing
-Claude and Codex hook configs are merged by default. Merge preserves
+them, and leaves a file that already matches untouched, so reinstalling
+does not accumulate redundant `*.bak` copies. When the script runs from a
+real file it installs from that package directory; piped execution
+(`curl | bash`) fetches the official archive rather than treating the
+target project as the source, which matters because an already-installed
+project also contains `AGENT.md`. Existing `memory/*.md` files are never
+overwritten. Existing Claude and Codex hook configs are merged by default. Merge preserves
 third-party events and handlers, refreshes only commands owned by
 coding-agent-control, and is idempotent across reinstalls. `skip` and `replace`
 remain explicit options.

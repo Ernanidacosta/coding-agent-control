@@ -227,7 +227,10 @@ EOF
     "$BATS_TEST_DIRNAME/../README.pt-BR.md"
   grep -q 'Ernanidacosta/coding-agent-control/archive/main.tar.gz' \
     "$BATS_TEST_DIRNAME/../install.sh"
-  grep -q 'coding-agent-control-main' "$BATS_TEST_DIRNAME/../install.sh"
+  # The extracted package root is validated by its marker files rather than a
+  # hardcoded archive directory name, so no fixed directory is asserted here.
+  grep -q 'PACKAGE_MARKERS=' "$BATS_TEST_DIRNAME/../install.sh"
+  grep -q 'is_source_package' "$BATS_TEST_DIRNAME/../install.sh"
   ! grep -q 'Ernanidacosta/agent-md' "$BATS_TEST_DIRNAME/../install.sh"
   grep -Fxq 'repository=Ernanidacosta/coding-agent-control' \
     "$BATS_TEST_DIRNAME/../examples/github-actions/github-actions-independent.conf"
