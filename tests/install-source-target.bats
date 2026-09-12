@@ -50,9 +50,9 @@ install_from_stdin() {
 }
 
 # Installed content only. Backups are excluded because they record history
-# rather than installed state, and JSON is compared by value: the hook merge
-# emits event keys in sorted order, which is a formatting difference from the
-# first install's plain copy, not a difference in installed configuration.
+# rather than installed state, and JSON is compared by value so that a
+# difference in object key order is never mistaken for a difference in
+# installed configuration.
 tree_checksum() {
   local root="$1" f
   while IFS= read -r -d '' f; do
@@ -65,9 +65,12 @@ tree_checksum() {
     ! -name '*.bak' ! -name '*.bak.*' -print0 | LC_ALL=C sort -z) | sha256sum
 }
 
+# Every backup in the target, with no exemption. The hook transport configs
+# used to be excluded here because reinstalling churned them; they are resolved
+# through a staged candidate now, so a clean reinstall backs up nothing at all.
+# tests/install-idempotence.bats covers that contract in detail.
 plain_backup_count() {
-  find "$1" -name '*.bak' -o -name '*.bak.*' \
-    | grep -vE '/(settings\.json|hooks\.json)\.bak' | wc -l
+  find "$1" \( -name '*.bak' -o -name '*.bak.*' \) | wc -l
 }
 
 @test "fresh install from a local script populates the target" {

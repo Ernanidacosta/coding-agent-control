@@ -510,8 +510,11 @@ real file it installs from that package directory; piped execution
 target project as the source, which matters because an already-installed
 project also contains `AGENT.md`. Existing `memory/*.md` files are never
 overwritten. Existing Claude and Codex hook configs are merged by default. Merge preserves
-third-party events and handlers, refreshes only commands owned by
-coding-agent-control, and is idempotent across reinstalls. `skip` and `replace`
+third-party events and handlers and refreshes only commands owned by
+coding-agent-control. The merged result — including the Stop timeout envelope this
+project resolves to — is computed in full and compared with what is installed
+before anything is touched, so a reinstall that changes nothing writes nothing
+and leaves no backup, and a real change costs exactly one. `skip` and `replace`
 remain explicit options.
 
 ## Deterministic Verification

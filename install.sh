@@ -106,9 +106,13 @@ is_source_package() {
 }
 
 INSTALL_TMPDIR=""
+INSTALL_HOOK_CANDIDATE=""
 cleanup_install_tmpdir() {
   # Only ever removes a directory this script created with mktemp -d, and
   # leaves the caller's exit status untouched.
+  if [ -n "$INSTALL_HOOK_CANDIDATE" ] && [ -f "$INSTALL_HOOK_CANDIDATE" ]; then
+    rm -f "$INSTALL_HOOK_CANDIDATE"
+  fi
   if [ -n "$INSTALL_TMPDIR" ] && [ -d "$INSTALL_TMPDIR" ]; then
     rm -rf "$INSTALL_TMPDIR"
   fi
@@ -295,141 +299,131 @@ copy_with_agent_body() {
   echo "  ✓ $label"
 }
 
-merge_hook_config() {
-  # src, dst, label, mode. In merge mode, command strings identify the
-  # handlers owned by coding-agent-control. Existing copies of those handlers are
-  # refreshed; every other top-level key, event, group, and handler is
-  # preserved byte-for-byte at the JSON-value level.
-  local src="$1" dst="$2" label="$3" mode="$4"
+# --- Hook transport configuration ---
+#
+# Claude settings.json and Codex hooks.json are installed through a staged
+# candidate. The candidate is resolved completely — merged with what is already
+# installed, then materialized with the target's effective Stop envelope —
+# before the installed file is read for comparison or moved aside.
+#
+# The order matters. Merging straight onto the target imports the *package's*
+# Stop timeout, which materialization then has to recompute from the *target's*
+# completion budget. Comparing the post-merge file against the target therefore
+# always differed, so every reinstall took a backup, wrote the package
+# envelope, and recomputed the target envelope right back: one new .bak per run
+# holding byte-identical content. Resolving the candidate first makes the
+# comparison answer the only question worth asking — does the effective result
+# change?
 
-  if same_file "$src" "$dst"; then
-    report_same_file "$label"
-    return 0
-  fi
+hook_config_merge() {
+  # existing, package, out. Command strings identify the handlers owned by
+  # coding-agent-control. Existing copies of those handlers are refreshed; every
+  # other top-level key, event, group, and handler is preserved byte-for-byte
+  # at the JSON-value level.
+  local existing="$1" package="$2" out="$3"
+  jq -s '
+    .[0] as $existing | .[1] as $agent_md |
 
-  if [ ! -f "$dst" ]; then
-    if [ "$DRY_RUN" -eq 1 ]; then
-      echo "  → would write     $label"
-    else
-      cp "$src" "$dst"
-      echo "  ✓ $label"
-    fi
-    return 0
-  fi
+    def commands($groups):
+      [$groups[]?.hooks[]?.command // empty];
 
-  if [ "$NO_OVERWRITE" -eq 1 ]; then
-    echo "  · skip (exists)    $label"
-    return 0
-  fi
+    def remove_owned($groups; $owned):
+      [$groups[]? |
+        . as $group |
+        if ($group | has("hooks")) then
+          ($group.hooks | map(
+            select((.command // "") as $command |
+              ($owned | index($command)) == null)
+          )) as $remaining |
+          if ($remaining | length) > 0
+          then $group * {hooks: $remaining}
+          else empty
+          end
+        else $group
+        end
+      ];
 
-  case "$mode" in
-    skip)
-      echo "  · $label exists — not touched"
-      ;;
-    replace)
-      if [ "$DRY_RUN" -eq 1 ]; then
-        echo "  → would back up + replace $label"
-      else
-        backup_if_exists "$dst"
-        cp "$src" "$dst"
-        echo "  ✓ $label (replaced, backup kept)"
-      fi
-      ;;
-    merge)
-      if ! command -v jq &>/dev/null; then
-        echo "  ! jq required to merge $label — existing file left unchanged"
-      elif [ "$DRY_RUN" -eq 1 ]; then
-        echo "  → would merge     $label (idempotent, third-party hooks preserved)"
-      else
-        local merged
-        merged=$(mktemp)
-        if jq -s '
-          .[0] as $existing | .[1] as $agent_md |
+    (($existing * ($agent_md | del(.hooks)))) as $result |
+    (((($existing.hooks // {}) | keys) +
+      (($agent_md.hooks // {}) | keys)) | unique) as $events |
+    $result |
+    .hooks = reduce $events[] as $event ({};
+      (commands($agent_md.hooks[$event] // [])) as $owned |
+      .[$event] = (
+        remove_owned($existing.hooks[$event] // []; $owned) +
+        ($agent_md.hooks[$event] // [])
+      )
+    )
+  ' "$existing" "$package" > "$out" 2>/dev/null
+}
 
-          def commands($groups):
-            [$groups[]?.hooks[]?.command // empty];
-
-          def remove_owned($groups; $owned):
-            [$groups[]? |
-              . as $group |
-              if ($group | has("hooks")) then
-                ($group.hooks | map(
-                  select((.command // "") as $command |
-                    ($owned | index($command)) == null)
-                )) as $remaining |
-                if ($remaining | length) > 0
-                then $group * {hooks: $remaining}
-                else empty
-                end
-              else $group
-              end
-            ];
-
-          (($existing * ($agent_md | del(.hooks)))) as $result |
-          (((($existing.hooks // {}) | keys) +
-            (($agent_md.hooks // {}) | keys)) | unique) as $events |
-          $result |
-          .hooks = reduce $events[] as $event ({};
-            (commands($agent_md.hooks[$event] // [])) as $owned |
-            .[$event] = (
-              remove_owned($existing.hooks[$event] // []; $owned) +
-              ($agent_md.hooks[$event] // [])
-            )
-          )
-        ' "$dst" "$src" > "$merged" 2>/dev/null; then
-          if cmp -s "$merged" "$dst"; then
-            rm -f "$merged"
-            echo "  · already current  $label"
-          else
-            backup_if_exists "$dst"
-            mv "$merged" "$dst"
-            echo "  ✓ $label (merged; third-party hooks preserved)"
-          fi
-        else
-          rm -f "$merged"
-          echo "  ! merge failed for $label — existing file left unchanged"
-        fi
-      fi
-      ;;
-  esac
+hook_config_equivalent() {
+  # Object key order carries no meaning in these configs; handler array order
+  # does, and `jq -S` sorts keys while leaving arrays alone. Canonicalizing for
+  # the comparison only keeps the persisted file in its authored order, so a
+  # pure reordering never manufactures a backup and a real edit always does.
+  # A file that will not parse is never declared equivalent.
+  local a="$1" b="$2" canonical_a canonical_b
+  [ -f "$a" ] && [ -f "$b" ] || return 1
+  cmp -s "$a" "$b" && return 0
+  canonical_a=$(jq -S . "$a" 2>/dev/null) || return 1
+  canonical_b=$(jq -S . "$b" 2>/dev/null) || return 1
+  [ "$canonical_a" = "$canonical_b" ]
 }
 
 INSTALL_COMPLETION_CONTEXT=""
-materialize_stop_timeout() {
-  # dst, host, mode. Resolve the target once with the same effective core
-  # resolver used at runtime, including legacy derived/compatibility budgets.
-  local dst="$1" host="$2" mode="$3" total reserve desired needle updated
-  [ "$mode" != skip ] || return 0
-  [ "$NO_OVERWRITE" -eq 0 ] || return 0
-  command -v jq >/dev/null 2>&1 || return 0
-  if ! command -v completion_evaluation_context_json >/dev/null 2>&1; then
-    echo "  ! shared budget resolver unavailable — ${host} Stop timeout left unchanged"
-    return 0
-  fi
-  if [ -z "$INSTALL_COMPLETION_CONTEXT" ]; then
-    INSTALL_COMPLETION_CONTEXT=$(
+INSTALL_COMPLETION_CONTEXT_STATE=""
+
+install_completion_budget_seconds() {
+  # Resolve the target's effective completion budget once per run with the same
+  # core resolver used at runtime, including legacy derived and explicit total
+  # budgets. Both the value and the reason it is unavailable are cached so each
+  # host reports one consistent diagnosis.
+  if [ -z "$INSTALL_COMPLETION_CONTEXT_STATE" ]; then
+    if ! command -v completion_evaluation_context_json >/dev/null 2>&1; then
+      INSTALL_COMPLETION_CONTEXT_STATE=missing
+    elif ! INSTALL_COMPLETION_CONTEXT=$(
       cd "$TARGET" || exit 1
       AGENT_MD_TOML=agent-md.toml completion_evaluation_context_json worktree host
-    ) || return 0
+    ); then
+      INSTALL_COMPLETION_CONTEXT_STATE=unresolved
+    elif ! printf '%s' "$INSTALL_COMPLETION_CONTEXT" | jq -e \
+      '.contract.valid and .control.valid and .budget.valid and .budget.bounded' >/dev/null; then
+      INSTALL_COMPLETION_CONTEXT_STATE=invalid
+    else
+      INSTALL_COMPLETION_CONTEXT_STATE=ok
+    fi
   fi
-  if ! printf '%s' "$INSTALL_COMPLETION_CONTEXT" | jq -e \
-    '.contract.valid and .control.valid and .budget.valid and .budget.bounded' >/dev/null; then
-    echo "  ! completion budget is invalid — runtime verification remains fail-closed"
-    return 0
-  fi
-  total=$(printf '%s' "$INSTALL_COMPLETION_CONTEXT" | jq -r '.budget.seconds')
-  reserve=$(completion_host_reservation_seconds "$host")
-  desired=$((total + reserve))
+  [ "$INSTALL_COMPLETION_CONTEXT_STATE" = ok ] || return 1
+  printf '%s' "$INSTALL_COMPLETION_CONTEXT" | jq -r '.budget.seconds'
+}
+
+INSTALL_STOP_ENVELOPE_NOTE=""
+materialize_stop_timeout() {
+  # candidate, host. Rewrites the staged candidate so the Stop handler carries
+  # the envelope this target resolves to. The package ships its own envelope;
+  # leaving it in place would install one project's budget into another.
+  # Failure leaves the candidate as it is and is reported, never silently
+  # downgraded.
+  local candidate="$1" host="$2" total reserve desired needle updated
+  INSTALL_STOP_ENVELOPE_NOTE=""
   case "$host" in
     claude) needle='.claude/hooks/stop-verify.sh' ;;
     codex) needle='.codex/hooks/stop.sh' ;;
     *) return 1 ;;
   esac
-  if [ "$DRY_RUN" -eq 1 ]; then
-    echo "  → would set       ${host} Stop timeout to ${desired}s (${total}s core + ${reserve}s reserved)"
+  command -v jq >/dev/null 2>&1 || return 0
+  if ! total=$(install_completion_budget_seconds); then
+    case "$INSTALL_COMPLETION_CONTEXT_STATE" in
+      missing)
+        echo "  ! shared budget resolver unavailable — ${host} Stop timeout left unchanged" ;;
+      invalid)
+        echo "  ! completion budget is invalid — runtime verification remains fail-closed" ;;
+    esac
     return 0
   fi
-  [ -f "$dst" ] || return 0
+  reserve=$(completion_host_reservation_seconds "$host")
+  desired=$((total + reserve))
   updated=$(mktemp)
   if jq --arg needle "$needle" --argjson desired "$desired" '
     .hooks.Stop |= map(
@@ -437,13 +431,128 @@ materialize_stop_timeout() {
         if ((.command // "") | contains($needle)) then .timeout = $desired else . end
       )
     )
-  ' "$dst" > "$updated"; then
-    mv "$updated" "$dst"
-    echo "  ✓ ${host} Stop timeout (${desired}s = ${total}s core + ${reserve}s reserved)"
+  ' "$candidate" > "$updated"; then
+    mv "$updated" "$candidate"
+    INSTALL_STOP_ENVELOPE_NOTE="${host} Stop timeout (${desired}s = ${total}s core + ${reserve}s reserved)"
   else
     rm -f "$updated"
     echo "  ! could not materialize ${host} Stop timeout — runtime preflight will fail closed"
   fi
+  return 0
+}
+
+install_hook_config() {
+  # src, dst, label, mode, host.
+  local src="$1" dst="$2" label="$3" mode="$4" host="$5"
+  local candidate outcome mode_bits materialize=1
+
+  if same_file "$src" "$dst"; then
+    report_same_file "$label"
+    return 0
+  fi
+  if [ ! -f "$src" ]; then
+    echo "Error: installer source file is missing: $src"
+    exit 1
+  fi
+
+  # Stage beside the destination so the final mv is a same-filesystem rename
+  # and the target is never left partially written. A dry run may reach here
+  # before the directory exists, and never moves anything, so it falls back to
+  # the ordinary temp area.
+  if [ -d "$(dirname "$dst")" ]; then
+    candidate=$(mktemp "$(dirname "$dst")/.$(basename "$dst").install.XXXXXX")
+  else
+    candidate=$(mktemp)
+  fi
+  INSTALL_HOOK_CANDIDATE="$candidate"
+  if [ ! -f "$dst" ]; then
+    # Nothing installed yet: the package file is the candidate. Modes and
+    # --no-overwrite govern replacing an existing file, and a fresh target has
+    # none, so both leave the first write alone — including its envelope.
+    cp "$src" "$candidate"
+    outcome=""
+    if [ "$mode" = skip ] || [ "$NO_OVERWRITE" -eq 1 ]; then
+      materialize=0
+    fi
+  else
+    if [ "$NO_OVERWRITE" -eq 1 ]; then
+      rm -f "$candidate"
+    INSTALL_HOOK_CANDIDATE=""
+      echo "  · skip (exists)    $label"
+      return 0
+    fi
+    case "$mode" in
+      skip)
+        rm -f "$candidate"
+    INSTALL_HOOK_CANDIDATE=""
+        echo "  · $label exists — not touched"
+        return 0
+        ;;
+      replace)
+        cp "$src" "$candidate"
+        outcome="replaced, backup kept"
+        ;;
+      merge)
+        if ! command -v jq >/dev/null 2>&1; then
+          rm -f "$candidate"
+    INSTALL_HOOK_CANDIDATE=""
+          echo "  ! jq required to merge $label — existing file left unchanged"
+          return 0
+        fi
+        if ! hook_config_merge "$dst" "$src" "$candidate"; then
+          rm -f "$candidate"
+    INSTALL_HOOK_CANDIDATE=""
+          echo "  ! merge failed for $label — existing file left unchanged"
+          return 0
+        fi
+        outcome="merged; third-party hooks preserved"
+        ;;
+    esac
+  fi
+
+  if [ "$materialize" -eq 1 ]; then
+    materialize_stop_timeout "$candidate" "$host"
+  fi
+
+  if hook_config_equivalent "$candidate" "$dst"; then
+    rm -f "$candidate"
+    INSTALL_HOOK_CANDIDATE=""
+    echo "  · already current  $label"
+    [ -z "$INSTALL_STOP_ENVELOPE_NOTE" ] || echo "  · $INSTALL_STOP_ENVELOPE_NOTE"
+    return 0
+  fi
+
+  if [ "$DRY_RUN" -eq 1 ]; then
+    rm -f "$candidate"
+    INSTALL_HOOK_CANDIDATE=""
+    if [ -z "$outcome" ]; then
+      echo "  → would write     $label"
+    else
+      echo "  → would write     $label ($outcome)"
+    fi
+    [ -z "$INSTALL_STOP_ENVELOPE_NOTE" ] || echo "  → would set       $INSTALL_STOP_ENVELOPE_NOTE"
+    return 0
+  fi
+
+  # mktemp creates the candidate 0600. Every other installed file arrives
+  # through cp, which follows the umask, so an existing file keeps the mode the
+  # project gave it and a new one gets the ordinary default instead of
+  # inheriting a mode private to whoever ran the installer.
+  if [ -f "$dst" ]; then
+    mode_bits=$(stat -c '%a' "$dst" 2>/dev/null || stat -f '%Lp' "$dst" 2>/dev/null || echo "")
+  else
+    mode_bits=$(printf '%o' "$((0666 & ~0$(umask)))")
+  fi
+  [ -z "$mode_bits" ] || chmod "$mode_bits" "$candidate"
+  backup_if_exists "$dst"
+  mv "$candidate" "$dst"
+  INSTALL_HOOK_CANDIDATE=""
+  if [ -z "$outcome" ]; then
+    echo "  ✓ $label"
+  else
+    echo "  ✓ $label ($outcome)"
+  fi
+  [ -z "$INSTALL_STOP_ENVELOPE_NOTE" ] || echo "  ✓ $INSTALL_STOP_ENVELOPE_NOTE"
 }
 
 # --- Master file ---
@@ -463,8 +572,7 @@ for TOOL in $AGENT_LIST; do
       if [ "$DRY_RUN" -eq 0 ]; then
         mkdir -p "$TARGET/.codex/hooks" "$TARGET/.agents/skills"
       fi
-      merge_hook_config "$SCRIPT_DIR/.codex/hooks.json" "$TARGET/.codex/hooks.json" ".codex/hooks.json" "$CODEX_HOOKS"
-      materialize_stop_timeout "$TARGET/.codex/hooks.json" codex "$CODEX_HOOKS"
+      install_hook_config "$SCRIPT_DIR/.codex/hooks.json" "$TARGET/.codex/hooks.json" ".codex/hooks.json" "$CODEX_HOOKS" codex
       for H in "$SCRIPT_DIR/.codex/hooks/"*.sh; do
         [ -f "$H" ] || continue
         copy_file "$H" "$TARGET/.codex/hooks/$(basename "$H")" ".codex/hooks/$(basename "$H")"
@@ -515,8 +623,7 @@ if echo " $AGENT_LIST " | grep -q " claude "; then
   SETTINGS_SRC="$SCRIPT_DIR/.claude/settings.json"
   SETTINGS_DST="$TARGET/.claude/settings.json"
   if [ -f "$SETTINGS_SRC" ]; then
-    merge_hook_config "$SETTINGS_SRC" "$SETTINGS_DST" ".claude/settings.json" "$CLAUDE_SETTINGS"
-    materialize_stop_timeout "$SETTINGS_DST" claude "$CLAUDE_SETTINGS"
+    install_hook_config "$SETTINGS_SRC" "$SETTINGS_DST" ".claude/settings.json" "$CLAUDE_SETTINGS" claude
   fi
 
   if [ "$DRY_RUN" -eq 0 ]; then
