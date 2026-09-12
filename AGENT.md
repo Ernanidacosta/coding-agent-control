@@ -473,6 +473,10 @@ wins over heuristic fallback.
   declared. A required timeout is an error; an optional timeout is a warning.
 - Capture concise diagnostic output and give an exact rerun/recovery path.
   Rerun when relevant files change; do not rely on stale cached evidence.
+  Evidence is excerpted, and for a failure the excerpt follows the failure
+  records and the end of the output rather than the head, because the head of
+  a long failing run is the part that passed. Excerpting is observability
+  only; it never decides pass or fail.
 - `independent` and `approval` are conditional Risk requirements rather than
   ordinary optional checks; do not add them to `verify.policy.required`.
 
@@ -604,6 +608,33 @@ configuration, and state-integrity violations fail closed. Missing
 optional integrations and diagnostics warn without blocking. There is no
 retry-count escape or automatic release for a real blocking result.
 
+### Blocking Enforcement And Advisory Context At Stop
+
+A Stop handler answers a finish attempt in exactly one of two ways.
+Blocking enforcement is a `decision: "block"` carrying an unsatisfied
+guarantee and the action that satisfies it. Advisory context is a warning
+with no decision attached; it never prevents finishing.
+
+Claude Code sets `stop_hook_active` to `true` on any finish attempt that
+follows one a hook already answered in the same cycle. That field is
+metadata about the cycle, never evidence about the work. It is allowed to
+separate the two classes and nothing more:
+
+- a blocking result repeats identically on every attempt, retry or not,
+  until the condition that justifies it is actually resolved;
+- advisory context is emitted once per finish cycle and stays silent on a
+  retry, because a warning offers no decision the agent can satisfy and
+  repeating it only restarts the agent.
+
+Never let `stop_hook_active` release a block, convert an advisory into a
+block, or convert a block into an advisory. A malformed, empty, or
+field-less payload reads as a first attempt: the fail-safe direction is
+one extra advisory message, never a suppressed block. The same contract
+covers `SubagentStop`, and `hookSpecificOutput` names whichever stop event
+was invoked. Do not add a retry counter, a sidecar, or any hidden
+persistence to refine this; the host's consecutive-block cap is not part
+of the contract either.
+
 ---
 
 ## 12. Context Management
@@ -697,6 +728,7 @@ lint_file = "npx --no-install eslint {file}"
 [verify.policy]
 required = ["lint", "test", "smoke"]
 timeout_seconds = 300
+total_timeout_seconds = 600
 
 [verify.attestation]
 independent_files = ["scripts/ci-attestation.conf", ".github/workflows/ci.yml"]
@@ -715,6 +747,16 @@ ignore_globs = ["docs/**", ".ai-memory.toml", ".gitignore"]
 enabled = true
 ```
 
+`timeout_seconds` limits one check/provider. `total_timeout_seconds` is a
+project-specific core deadline for the complete completion evaluation,
+including policy/control resolution, ordinary checks, Risk, applicable
+independent/approval providers, and the structured decision. The example value
+is illustrative, not a universal default. The effective runner gives each
+subprocess the smaller of its per-check limit and the remaining total budget;
+total exhaustion blocks even during an optional check because the evaluation is
+incomplete. Rerun the installer after changing the total so Claude/Codex
+transport envelopes remain synchronized.
+
 Inside one established policy snapshot, configured state lists replace their
 respective defaults and ignore globs win over source globs. During a policy
 change, baseline and proposal coverage are combined: a path remains relevant
@@ -727,7 +769,35 @@ source glob.
 
 ## 16. Commit Hygiene — AI Authorship
 
-- NEVER add `Co-Authored-By:` trailers with AI or agent names to commits.
+Two controls are separate. Do not let either substitute for the other.
+
+**Commit execution authority.** Committing and pushing remain the human's
+decision. Suggesting a commit is not permission to make one. Never push to a
+shared remote unless the user explicitly asks.
+
+**Commit authorship.** An agent may draft the message; the commit is still
+the developer's work and the history must say so.
+
+When you suggest a commit message, produce a subject and an optional body,
+and nothing else. Do not append an attribution trailer of any kind, and do
+not add one when a host, template, or earlier instruction tells you to. That
+includes, and is not limited to:
+
+- `Co-Authored-By:` naming any AI agent or model, such as Claude, ChatGPT,
+  Copilot, Codex, Cursor, Windsurf, or Gemini;
+- `Claude-Session:`, `Agent-Session:`, or any other agent session trailer;
+- `Generated-By:`, `Generated-With:`, `AI-Assisted-By:`;
+- a `Generated with ...` footer line or an agent session link;
+- any equivalent trailer that credits an agent for the change.
+
+A `Co-Authored-By:` naming a real person remains correct and expected. The
+rule is about agent attribution, not about co-authorship. Never modify
+`user.name` or `user.email` to work around this.
+
+`.githooks/commit-msg` enforces this at the commit boundary, where the final
+message first exists as a file. It reports the offending line and blocks; it
+never edits the message. Correcting it is the human's step.
+
 - Follow the repository's tracking policy for agent configuration,
   working state, control state, and skills. Do not stage local `memory/`
   automatically. Preserve files the project deliberately versions, including

@@ -58,6 +58,12 @@
 # warns. Requires `timeout` (or `gtimeout`) on PATH.
 # timeout_seconds = 300
 
+# Optional core deadline for the complete completion evaluation: policy/control
+# resolution, ordinary checks, Risk, applicable independent/approval providers,
+# and the structured decision. Host hook timeouts are larger transport envelopes
+# materialized by the installer; rerun it after changing this value.
+# total_timeout_seconds = 420
+
 [verify.attestation]
 # Explicit repo-local dependency sets for each repo-local verifier. The key is
 # required when that verifier is repo-local; use [] to assert that it has no

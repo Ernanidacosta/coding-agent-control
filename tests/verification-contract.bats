@@ -118,6 +118,20 @@ EOF
   echo "$out" | jq -e '.reason | test("ERROR CONFIG_INVALID")' >/dev/null
 }
 
+@test "invalid total completion timeout is rejected fail-closed" {
+  cat > agent-md.toml <<'EOF'
+[verify]
+test = "true"
+
+[verify.policy]
+required = ["test"]
+total_timeout_seconds = 0
+EOF
+  out=$(run_hook stop-verify.sh '{"stop_hook_active":false}')
+  echo "$out" | jq -e '.decision == "block"' >/dev/null
+  echo "$out" | jq -e '.reason | test("CONFIG_INVALID") and test("total_timeout_seconds")' >/dev/null
+}
+
 @test "verification result codes and evidence fields are stable" {
   write_contract "printf evidence; exit 1" '"test"'
   summary=$(bash -c '. .claude/hooks/_lib.sh; run_verification_contract')
@@ -129,6 +143,16 @@ EOF
       .command == "printf evidence; exit 1" and .exit_code == 1 and
       .evidence == "evidence" and (.suggestion | length > 0))
   ' >/dev/null
+}
+
+@test "a failing check reports evidence around the failure, not the head" {
+  write_contract "seq 1 200 | sed 's/^/ok /'; echo 'not ok 201 broke'; seq 1 40 | sed 's/^/ok trailing /'; exit 1" '"test"'
+  summary=$(bash -c '. .claude/hooks/_lib.sh; run_verification_contract')
+  echo "$summary" | jq -e '.results[0].evidence | test("not ok 201 broke")' >/dev/null
+  echo "$summary" | jq -e '.results[0].evidence | test("ok trailing 40")' >/dev/null
+  echo "$summary" | jq -e '.results[0].evidence | test("^ok 1$"; "m") | not' >/dev/null
+  echo "$summary" | jq -e '.results[0].truncated == true' >/dev/null
+  echo "$summary" | jq -e '.results[0].exit_code == 1' >/dev/null
 }
 
 @test "configured command takes precedence over inferred command" {

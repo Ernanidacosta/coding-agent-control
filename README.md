@@ -143,6 +143,7 @@ your-project/
     gotchas.md
 
   .githooks/pre-commit             # optional fallback for any agent
+  .githooks/commit-msg             # keeps Git authorship human
 ```
 
 ### Compatibility Names
@@ -395,10 +396,86 @@ file.
 | UI visual evidence | Quality / `warning`, or Integrity / `error` when required | Advisory or enforced when configured required | Advisory or enforced when configured required | Advisory |
 | New export without nearby test | Quality / `warning` | Advisory | Advisory | Advisory |
 | Truncated Bash output | Diagnostic / `warning` | Advisory | Advisory | Unsupported |
+| AI authorship metadata in a commit message | Integrity / `error` | Enforced via `.githooks/commit-msg` when activated | Enforced via `.githooks/commit-msg` when activated | Enforced via `.githooks/commit-msg` when activated |
 | Planning, context, edit safety | Judgment / advisory | Advisory | Advisory | Advisory |
 
 Codex hooks are repo-local. Use `codex features list` to confirm hook
 support in the installed Codex version.
+
+### Commit Authority and Commit Authorship
+
+These are two controls, and neither substitutes for the other.
+
+**Commit execution authority** answers who may run `git commit`. That stays
+with the human. An agent may propose a message; proposing is not permission.
+Nothing in this project grants an agent the right to commit or push.
+
+**Commit authorship** answers whose name the history carries. An agent may
+draft a subject and body, but the commit is the developer's work, and the
+message must not say otherwise. `.githooks/commit-msg` enforces this.
+
+`commit-msg` is the boundary because the final message does not exist
+reliably any earlier. At `pre-commit` the editor has not run, and `-m`, `-F`,
+templates, squashes and amends all arrive differently. By `commit-msg` the
+message is a file on disk, exactly as it will be recorded.
+
+The hook blocks a message that credits an agent: a `Co-Authored-By:` naming a
+model or agent, an agent session trailer such as `Claude-Session:`, a
+`Generated-By:` or `Generated-With:` trailer, or a standalone generation
+footer or session link. It names the offending line and exits non-zero. It
+never edits the message, and never touches `user.name` or `user.email`.
+Removing the line is the human's step.
+
+Detection is deliberately narrow, in two ways. A `Co-Authored-By:` naming a
+real person is always allowed, because the rule is about agent attribution
+and not about co-authorship. And only trailer-shaped lines and standalone
+footers are inspected, never prose, so a commit whose body discusses Claude
+Code or Copilot is not attribution and does not block. A `git commit
+--verbose` diff below the scissors line is not part of the message either.
+
+### Blocking Enforcement vs Advisory Context
+
+Stop hooks answer a finish attempt in exactly one of two ways, and the two
+are not interchangeable.
+
+- **Blocking enforcement** is a `decision: "block"` with a reason. It says a
+  guarantee is unsatisfied and names the action that would satisfy it: make
+  the required check pass, fix invalid enforcement configuration, update
+  operational state, produce the missing evidence. It repeats on every finish
+  attempt for as long as the condition holds.
+- **Advisory context** is a warning with no decision attached. It reports a
+  condition worth reviewing, such as a possibly underrated Risk or a change
+  outside the declared Scope, and never prevents finishing.
+
+Claude Code sets `stop_hook_active` to `true` on any finish attempt that
+follows one a hook already answered in the same cycle. coding-agent-control reads that
+field and lets it separate the two classes, nothing more:
+
+| | first attempt | retry (`stop_hook_active: true`) |
+|---|---|---|
+| Blocking enforcement | blocks | blocks, unchanged |
+| Advisory context | emitted | silent |
+
+The flag is not evidence and never releases a block. A failing required
+check, invalid configuration, a stale completion claim, or missing Risk
+evidence blocks identically on the first attempt and the twentieth. What the
+flag bounds is repetition: an advisory carries no decision the agent can
+satisfy, so re-sending it on every retry cannot change the outcome and only
+feeds the agent into another turn. Saying it once per finish cycle ends that
+loop without a retry counter and without depending on the host's
+consecutive-block cap.
+
+Warnings are not hidden. Every advisory still reaches the agent on the first
+finish attempt, and a blocking reason always carries the full set of
+non-passing results, advisories included.
+
+A malformed, empty, or field-less payload reads as a first attempt. The
+fail-safe direction is one extra advisory message, never a suppressed block.
+The same contract covers `SubagentStop`, and `hookSpecificOutput` echoes back
+whichever stop event was invoked. Codex reuses the shared handlers through
+`.codex/hooks/stop.sh`, which forwards the payload verbatim: a host that
+sends no `stop_hook_active` reads as a first attempt on every stop, which is
+the behavior it had before the contract existed.
 
 ## Install Options
 
@@ -426,8 +503,13 @@ support in the installed Codex version.
 ```
 
 The installer backs up existing top-level rule files before replacing
-them. Existing `memory/*.md` files are never overwritten. Existing
-Claude and Codex hook configs are merged by default. Merge preserves
+them, and leaves a file that already matches untouched, so reinstalling
+does not accumulate redundant `*.bak` copies. When the script runs from a
+real file it installs from that package directory; piped execution
+(`curl | bash`) fetches the official archive rather than treating the
+target project as the source, which matters because an already-installed
+project also contains `AGENT.md`. Existing `memory/*.md` files are never
+overwritten. Existing Claude and Codex hook configs are merged by default. Merge preserves
 third-party events and handlers, refreshes only commands owned by
 coding-agent-control, and is idempotent across reinstalls. `skip` and `replace`
 remain explicit options.
@@ -455,6 +537,7 @@ test      = "pnpm test"
 [verify.policy]
 required = ["lint", "test"]
 timeout_seconds = 300
+total_timeout_seconds = 420 # example policy; measure and choose per project
 ```
 
 Runtime, smoke, visual, independent-verification, approval, and semantic-memory
@@ -490,11 +573,47 @@ is captured only for concise diagnosis and is never evaluated as a command.
 commands; do not populate it from untrusted external or natural-language
 output.
 
-`timeout_seconds` is a simple per-check bound and requires `timeout` or
-`gtimeout`. If the utility is unavailable, a required bounded check fails
-closed and an optional one warns. If no timeout is declared,
-coding-agent-control reports
-that host limits are the only bound; it does not invent a scheduler.
+Captured output is excerpted, never dumped, because it becomes agent context.
+Which part survives depends on the exit status. A passing check keeps the
+first lines, where a successful run says what it did. A failing check keeps
+the diagnostic instead: recognized failure records wherever they appear, a
+little context around each, and always the end of the output. When nothing
+recognizable is found, the end of the output is the evidence. Omitted regions
+are marked with their line count, and the command and exit status are always
+reported alongside.
+
+This matters because head-of-output is actively misleading for a long failing
+run. The beginning of a 300-test suite is the part that passed, so a failure
+at test 287 would otherwise hide behind a truncation notice. Selection is
+runner-agnostic and recognizes the shapes real tools print, including TAP
+`not ok`, pytest `FAILED` and tracebacks, Go panics, and compiler diagnostics.
+It is not a parser for any single runner and does not affect pass or fail,
+which remain decided by exit status alone.
+
+`timeout_seconds` is a per-check/provider bound. `total_timeout_seconds` is a
+separate core deadline covering contract/control resolution, every ordinary
+check, Risk evaluation, applicable independent/approval providers, and the
+structured completion decision. Before each subprocess the runner uses the
+smaller of the per-check limit and the remaining total budget. Exhausting the
+total is always blocking—even during an optional check—because completion was
+not fully evaluated. Both bounds require `timeout` or `gtimeout`.
+
+Claude and Codex timeouts are outer transport envelopes, not verification
+policy. The installer uses the same effective budget resolver, including legacy
+derived ceilings, to materialize them above the core total: Claude adds
+30 seconds for finalization; the serial Codex wrapper additionally reserves 10
+seconds each for state and sensory enforcement. Stop validates that relationship
+before starting an expensive check and fails closed with
+`VERIFY_HOST_TIMEOUT_INCOMPATIBLE` when an edited policy and installed adapter
+are out of sync. Rerun the installer after changing the total budget.
+
+Legacy configuration does not silently reinterpret 300 seconds per check as
+300 seconds total. When only a per-check timeout exists, the core derives a
+ceiling from every potentially executable ordinary/provider stage plus a
+30-second resolution/finalization reserve. With neither timeout, standalone
+`verify.sh`/pre-commit remain explicitly unbounded; Stop retains its historical
+300-second core budget inside the larger host envelope. New configurations
+should declare an intentional project-specific total.
 
 Verification evidence has distinct classes:
 
@@ -521,7 +640,14 @@ independent/approval commands appear only when configured or when a blocking
 result needs to explain them. It then reports name, status, exit code, command,
 summarized evidence, and recovery. It exits non-zero only for invalid
 configuration or blocking required results. Optional failures remain visible
-warnings. Results are fresh; this phase adds no cache.
+warnings.
+
+The core defines a provider-neutral protocol for
+[authenticated verification receipts](docs/authenticated-verification-receipts.md),
+including canonical worktree, contract, control, and mechanism identity. This
+is not an unsigned local cache: without an authority-separated issuer, Stop
+continues to execute the complete contract. A receipt file written by the
+executor is never accepted as proof that checks ran.
 
 `doctor.sh` validates contract configuration and wiring without executing the
 suite or provider verifiers. For conditional capabilities it leads with:
@@ -659,9 +785,11 @@ Binding is deliberately conservative. If the shared classifier sees any
 uncommitted operationally relevant path, strong high/critical attestation is
 `RISK_ATTESTATION_UNBOUND`; commit the reviewed change and obtain evidence for
 that exact HEAD. Ignored metadata such as Markdown does not invalidate the
-binding. coding-agent-control does not implement a worktree fingerprint in this phase,
-because a weak fingerprint would create false confidence. An attestation for
-a different commit is `RISK_ATTESTATION_STALE`.
+binding. The worktree fingerprint defined for future authenticated ordinary
+receipts does not extend or replace this strong attestation contract. Until an
+authority-separated receipt issuer exists, no local worktree artifact can skip
+Stop verification. An attestation for a different commit is
+`RISK_ATTESTATION_STALE`.
 
 Adding `approval = "true"`, creating `approval.json`, writing `By: human`, or
 claiming approval in chat is never accepted. Invalid JSON, missing target,
@@ -1067,8 +1195,9 @@ Use Codex skills with `$agent-md-verify` or `$visual-evidence`.
 - Command availability preflight is intentionally conservative. Doctor can
   prove a simple executable is present but may label compound shell commands
   “not preflighted”; actual exit status remains authoritative.
-- Per-check timeout depends on the portable environment providing `timeout`
-  or `gtimeout`. Without an explicit timeout, only host/process limits apply.
+- Per-check and total completion deadlines depend on the portable environment
+  providing `timeout` or `gtimeout`. Host timeouts are larger transport
+  envelopes and are validated before full Stop verification starts.
 - Risk signals are keyword/path/diff heuristics. They can flag possible
   underrating but cannot determine safety, intent, reversibility, or blast
   radius.
@@ -1078,8 +1207,9 @@ Use Codex skills with `$agent-md-verify` or `$visual-evidence`.
 - External-verifier filesystem checks are intentionally shallow and portable;
   the host remains responsible for ownership, mount integrity, package supply
   chain, and directories above the immediate parent.
-- Strong attestation currently binds only to a clean operational HEAD. A
-  worktree fingerprint remains out of scope rather than being approximated.
+- Strong attestation currently binds only to a clean operational HEAD. The
+  separately defined worktree receipt fingerprint is not strong attestation
+  and remains inactive until an authority-separated issuer is available.
 - Runtime applicability cannot be inferred generally. No configured
   runtime/smoke command produces a warning rather than false enforcement.
 - Independent evidence is conditional enforcement, not orchestration.

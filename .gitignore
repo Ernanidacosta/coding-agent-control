@@ -2,6 +2,8 @@
 # clean installation templates, even when a developer's global ignore file
 # excludes agent-md artifacts.
 !/agent-md.toml
+!/.githooks/
+!/.githooks/*
 !/.agent-md/
 !/.agent-md/templates/
 !/.agent-md/templates/memory/

@@ -171,6 +171,109 @@ project_control_path() {
   printf '%s\n' '.project-control.toml'
 }
 
+# Completion timing has three deliberately separate layers:
+#
+#   timeout_seconds             maximum for one check/provider execution
+#   total_timeout_seconds       core deadline for one complete evaluation
+#   host handler timeout        outer transport envelope only
+#
+# These constants are the single source for deterministic non-policy reserves.
+# They give the core time to resolve policy and emit a structured result before
+# the host transport terminates the process. The 300-second legacy Stop budget
+# preserves the historical finite host capacity only when neither total nor
+# per-check policy exists; standalone legacy verify/pre-commit stay explicitly
+# unbounded as before.
+completion_legacy_overhead_seconds() { printf '30\n'; }
+completion_legacy_stop_budget_seconds() { printf '300\n'; }
+completion_transport_margin_seconds() { printf '30\n'; }
+completion_state_handler_budget_seconds() { printf '10\n'; }
+completion_sensory_handler_budget_seconds() { printf '10\n'; }
+
+completion_timeout_command() {
+  if command -v timeout >/dev/null 2>&1; then
+    printf 'timeout\n'
+  elif command -v gtimeout >/dev/null 2>&1; then
+    printf 'gtimeout\n'
+  else
+    return 1
+  fi
+}
+
+# A deadline must not depend on the command honoring SIGTERM. GNU timeout and
+# gtimeout use SIGKILL here. Their deadline-driven 137 is normalized to the
+# existing canonical timeout status 124; an earlier ordinary 137 stays intact.
+# Isolate the shell's kill notification; command stdout/stderr stay unchanged.
+completion_execute_bounded_command() {
+  local seconds="$1" timeout_command execution_started execution_exit
+  shift
+  timeout_command=$(completion_timeout_command) || return 127
+  execution_started=$SECONDS
+  {
+    if "$timeout_command" -s KILL "${seconds}s" "$@" 2>&3 3>&-; then
+      execution_exit=0
+    else
+      execution_exit=$?
+    fi
+  } 3>&2 2>/dev/null
+  if [ "$execution_exit" -eq 137 ] \
+    && [ "$((SECONDS - execution_started))" -ge "$seconds" ]; then
+    return 124
+  fi
+  return "$execution_exit"
+}
+
+# Bash SECONDS is an elapsed-time counter inherited by command substitutions.
+# It is independent of filesystem timestamps and available in the Bash 3.2+
+# runtime already required by these hooks. One-second granularity is sufficient
+# because host envelopes reserve a separate finalization margin.
+completion_evaluation_begin() {
+  AGENT_MD_COMPLETION_STARTED_SECONDS=$SECONDS
+  AGENT_MD_COMPLETION_TOTAL_SECONDS=""
+  export AGENT_MD_COMPLETION_STARTED_SECONDS AGENT_MD_COMPLETION_TOTAL_SECONDS
+}
+
+completion_deadline_configure() {
+  local budget="$1"
+  if [ "$budget" = null ] || [ -z "$budget" ]; then
+    AGENT_MD_COMPLETION_TOTAL_SECONDS=""
+  else
+    AGENT_MD_COMPLETION_TOTAL_SECONDS="$budget"
+  fi
+  export AGENT_MD_COMPLETION_TOTAL_SECONDS
+}
+
+completion_deadline_remaining_seconds() {
+  local elapsed remaining
+  [ -n "${AGENT_MD_COMPLETION_TOTAL_SECONDS:-}" ] || return 1
+  elapsed=$((SECONDS - ${AGENT_MD_COMPLETION_STARTED_SECONDS:-SECONDS}))
+  remaining=$((AGENT_MD_COMPLETION_TOTAL_SECONDS - elapsed))
+  if [ "$remaining" -gt 0 ]; then printf '%s\n' "$remaining"; else printf '0\n'; fi
+}
+
+# completion_effective_timeout_json [per-check-timeout]
+# Describes the bound for the next subprocess. limited_by_total distinguishes a
+# global deadline from a normal per-check timeout when `timeout` exits 124.
+completion_effective_timeout_json() {
+  local per_check="${1:-}" remaining="" effective="" limited=false
+  remaining=$(completion_deadline_remaining_seconds 2>/dev/null || true)
+  if [ -n "$remaining" ]; then
+    if [ "$remaining" -le 0 ]; then
+      jq -cn '{available:false,seconds:0,limited_by_total:true}'
+      return 0
+    fi
+    if [ -z "$per_check" ] || [ "$remaining" -le "$per_check" ]; then
+      effective="$remaining"
+      limited=true
+    else
+      effective="$per_check"
+    fi
+  else
+    effective="$per_check"
+  fi
+  jq -cn --arg seconds "$effective" --argjson limited "$limited" \
+    '{available:true,seconds:(if $seconds == "" then null else ($seconds | tonumber) end),limited_by_total:$limited}'
+}
+
 # file_exists_in_snapshot <path> <worktree|staged|head|parent>
 file_exists_in_snapshot() {
   local path="$1" scope="${2:-worktree}"
@@ -202,6 +305,485 @@ snapshot_to_temp() {
   : > "$destination"
   file_exists_in_snapshot "$path" "$scope" || return 0
   file_snapshot "$path" "$scope" > "$destination"
+}
+
+# --- Authenticated verification receipt protocol --------------------------
+#
+# Phase A defines deterministic state identity and the provider-neutral data
+# contract only. These helpers do not issue, persist, or trust a receipt. In
+# particular, a caller-provided authentication result is meaningful only after
+# a future gate obtains it from an eligible authority-separated provider.
+
+verification_receipt_protocol_schema() {
+  printf '1\n'
+}
+
+# The receipt cache and local working memory are never verification inputs.
+# Their own validators remain responsible for completion claims and state.
+verification_receipt_path_is_structurally_excluded() {
+  case "$1" in
+    .git|.git/*|.agent/verification|.agent/verification/*|\
+    memory/agents.md|memory/plan.md|memory/progress.md|memory/verify.md|memory/gotchas.md) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+verification_receipt_hash_algorithm() {
+  printf 'sha256\n'
+}
+
+verification_receipt_sha256_stream() {
+  local output
+  if command -v sha256sum >/dev/null 2>&1; then
+    output=$(sha256sum) || return 1
+    printf '%s\n' "${output%% *}"
+  elif command -v shasum >/dev/null 2>&1; then
+    output=$(shasum -a 256) || return 1
+    printf '%s\n' "${output%% *}"
+  elif command -v openssl >/dev/null 2>&1; then
+    output=$(openssl dgst -sha256) || return 1
+    printf '%s\n' "${output##* }"
+  else
+    return 127
+  fi
+}
+
+# Hashes a byte stream with the dependency-light SHA-256 implementation
+# available on the host. The digest supplies deterministic identity, not
+# authority; absence of a supported implementation fails identity construction.
+verification_receipt_stream_fingerprint_json() {
+  local algorithm value
+  algorithm=$(verification_receipt_hash_algorithm) || return 1
+  value=$(verification_receipt_sha256_stream) || return 1
+  jq -cn --arg algorithm "$algorithm" --arg value "$value" \
+    '{algorithm:$algorithm,value:$value}'
+}
+
+verification_receipt_json_fingerprint_json() {
+  local value="$1" canonical
+  canonical=$(printf '%s' "$value" | jq -cS . 2>/dev/null) || return 1
+  printf '%s' "$canonical" | verification_receipt_stream_fingerprint_json
+}
+
+# Hash the raw target bytes of a symlink without following it. readlink writes
+# one terminator newline; dd removes exactly that byte while preserving any
+# newline that is part of the target itself.
+verification_receipt_symlink_digest() {
+  local path="$1" target_file content_file target_size digest
+  target_file=$(mktemp "${TMPDIR:-/tmp}/agent-md-link-target.XXXXXX") || return 1
+  content_file=$(mktemp "${TMPDIR:-/tmp}/agent-md-link-content.XXXXXX") || {
+    rm -f "$target_file"
+    return 1
+  }
+  if ! readlink "./$path" > "$target_file"; then
+    rm -f "$target_file" "$content_file"
+    return 1
+  fi
+  target_size=$(file_size "$target_file") || {
+    rm -f "$target_file" "$content_file"
+    return 1
+  }
+  if [ "$target_size" -lt 1 ]; then
+    rm -f "$target_file" "$content_file"
+    return 1
+  fi
+  if ! dd if="$target_file" of="$content_file" bs=1 count=$((target_size - 1)) 2>/dev/null; then
+    rm -f "$target_file" "$content_file"
+    return 1
+  fi
+  digest=$(verification_receipt_sha256_stream < "$content_file") || {
+    rm -f "$target_file" "$content_file"
+    return 1
+  }
+  rm -f "$target_file" "$content_file"
+  printf '%s\n' "$digest"
+}
+
+verification_receipt_index_blob_digest() {
+  local oid="$1" blob_file digest
+  blob_file=$(mktemp "${TMPDIR:-/tmp}/agent-md-index-blob.XXXXXX") || return 1
+  if ! git cat-file blob "$oid" > "$blob_file"; then
+    rm -f "$blob_file"
+    return 1
+  fi
+  digest=$(verification_receipt_sha256_stream < "$blob_file") || {
+    rm -f "$blob_file"
+    return 1
+  }
+  rm -f "$blob_file"
+  printf '%s\n' "$digest"
+}
+
+verification_receipt_index_state_json() {
+  local path="$1" records_file record prefix mode="" oid="" digest="" stage="" count=0
+  records_file=$(mktemp "${TMPDIR:-/tmp}/agent-md-index-state.XXXXXX") || return 1
+  if ! git --literal-pathspecs ls-files --stage -z -- "$path" > "$records_file"; then
+    rm -f "$records_file"
+    return 1
+  fi
+  while IFS= read -r -d '' record; do
+    prefix=${record%%$'\t'*}
+    read -r mode oid stage <<< "$prefix"
+    count=$((count + 1))
+  done < "$records_file"
+  rm -f "$records_file"
+
+  if [ "$count" -eq 0 ]; then
+    jq -cn '{valid:true,state:"absent"}'
+  elif [ "$count" -ne 1 ] || [ "$stage" != 0 ]; then
+    jq -cn '{valid:false,state:"conflicted",error:"index contains unresolved stages"}'
+  else
+    case "$mode" in
+      100644|100755) ;;
+      120000) ;;
+      160000)
+        jq -cn --arg mode "$mode" --arg oid "$oid" \
+          '{valid:false,state:"unsupported",mode:$mode,oid:$oid,error:"gitlinks are not supported by receipt protocol v1"}'
+        return 0
+        ;;
+      *)
+        jq -cn --arg mode "$mode" --arg oid "$oid" \
+          '{valid:false,state:"unsupported",mode:$mode,oid:$oid,error:"unsupported index mode"}'
+        return 0
+        ;;
+    esac
+    digest=$(verification_receipt_index_blob_digest "$oid") || return 1
+    jq -cn --arg mode "$mode" --arg oid "$oid" --arg digest "$digest" \
+      '{valid:true,state:"present",mode:$mode,oid:$oid,digest:$digest}'
+  fi
+}
+
+verification_receipt_worktree_state_json() {
+  local path="$1" mode digest
+  if [ -L "$path" ]; then
+    digest=$(verification_receipt_symlink_digest "$path") || {
+      jq -cn '{valid:false,state:"unsupported",error:"symlink target could not be hashed"}'
+      return 0
+    }
+    jq -cn --arg digest "$digest" \
+      '{valid:true,state:"present",kind:"symlink",mode:"120000",digest:$digest}'
+  elif [ -f "$path" ]; then
+    if [ -x "$path" ]; then mode=100755; else mode=100644; fi
+    digest=$(verification_receipt_sha256_stream < "$path") || {
+      jq -cn '{valid:false,state:"unreadable",error:"file content could not be hashed"}'
+      return 0
+    }
+    jq -cn --arg mode "$mode" --arg digest "$digest" \
+      '{valid:true,state:"present",kind:"file",mode:$mode,digest:$digest}'
+  elif [ -e "$path" ]; then
+    jq -cn '{valid:false,state:"unsupported",error:"special filesystem entries are not supported by receipt protocol v1"}'
+  else
+    jq -cn '{valid:true,state:"absent"}'
+  fi
+}
+
+verification_receipt_manifest_entry_json() {
+  local path="$1" scope="$2" index_state worktree_state
+  index_state=$(verification_receipt_index_state_json "$path") || return 1
+  if [ "$scope" = staged ]; then
+    jq -cn --arg path "$path" --argjson index "$index_state" \
+      '{valid:$index.valid,path:$path,index:$index}'
+    return 0
+  fi
+  worktree_state=$(verification_receipt_worktree_state_json "$path") || return 1
+  jq -cn --arg path "$path" --argjson index "$index_state" --argjson worktree "$worktree_state" \
+    '{valid:($index.valid and $worktree.valid),path:$path,index:$index,worktree:$worktree}'
+}
+
+# verification_receipt_source_manifest_json [worktree|staged]
+#
+# HEAD supplies the factual base. The manifest enumerates the complete HEAD and
+# index path sets (not only `git diff` output), plus non-ignored untracked files
+# for worktree scope. This catches deletes, mode changes, staged/unstaged
+# divergence, and assume-unchanged paths. JSON escaping plus canonical sorting
+# provide unambiguous framing for unusual pathnames.
+verification_receipt_source_manifest_json() {
+  local scope="${1:-worktree}" head="" paths_file entries_file path entry entries valid entry_error=0
+  case "$scope" in
+    worktree|staged) ;;
+    *)
+      jq -cn --arg scope "$scope" \
+        '{valid:false,schema:1,scope:$scope,error:"receipt scope must be worktree or staged"}'
+      return 0
+      ;;
+  esac
+  if ! git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    jq -cn --arg scope "$scope" \
+      '{valid:false,schema:1,scope:$scope,error:"verification receipts require a Git worktree"}'
+    return 0
+  fi
+
+  head=$(git rev-parse --verify HEAD 2>/dev/null || true)
+  paths_file=$(mktemp "${TMPDIR:-/tmp}/agent-md-receipt-paths.XXXXXX") || return 1
+  entries_file=$(mktemp "${TMPDIR:-/tmp}/agent-md-receipt-entries.XXXXXX") || {
+    rm -f "$paths_file"
+    return 1
+  }
+  : > "$paths_file"
+  : > "$entries_file"
+  if [ -n "$head" ]; then
+    git ls-tree -r -z --name-only HEAD >> "$paths_file" || {
+      rm -f "$paths_file" "$entries_file"
+      return 1
+    }
+  fi
+  git ls-files -z --cached >> "$paths_file" || {
+    rm -f "$paths_file" "$entries_file"
+    return 1
+  }
+  if [ "$scope" = worktree ]; then
+    git ls-files -z --others --exclude-standard >> "$paths_file" || {
+      rm -f "$paths_file" "$entries_file"
+      return 1
+    }
+  fi
+
+  while IFS= read -r -d '' path; do
+    verification_receipt_path_is_structurally_excluded "$path" && continue
+    entry=$(verification_receipt_manifest_entry_json "$path" "$scope") || {
+      entry_error=1
+      break
+    }
+    printf '%s\n' "$entry" >> "$entries_file"
+  done < "$paths_file"
+  rm -f "$paths_file"
+  if [ "$entry_error" -ne 0 ]; then
+    rm -f "$entries_file"
+    return 1
+  fi
+
+  # Duplicate paths arise from the HEAD/index union. Identical observations are
+  # collapsed; disagreement means the repository changed during enumeration.
+  entries=$(jq -sc '
+    sort_by(.path) | group_by(.path) | map(
+      if (map(del(.path)) | unique | length) == 1 then .[0]
+      else {valid:false,path:.[0].path,error:"path changed while the manifest was being built"}
+      end
+    )
+  ' "$entries_file")
+  rm -f "$entries_file"
+  valid=$(printf '%s' "$entries" | jq 'all(.[]; .valid == true)')
+  jq -cn --argjson schema "$(verification_receipt_protocol_schema)" \
+    --arg scope "$scope" --arg head "$head" --argjson entries "$entries" --argjson valid "$valid" '
+      {
+        valid:$valid,
+        schema:$schema,
+        scope:$scope,
+        head:(if $head == "" then null else $head end),
+        exclusions:[
+          ".git/**",
+          ".agent/verification/**",
+          "memory/agents.md",
+          "memory/plan.md",
+          "memory/progress.md",
+          "memory/verify.md",
+          "memory/gotchas.md"
+        ],
+        entries:$entries
+      }
+    '
+}
+
+verification_receipt_mechanism_manifest_json() {
+  local scope="${1:-worktree}" files_file path entry files valid=false
+  files_file=$(mktemp "${TMPDIR:-/tmp}/agent-md-receipt-mechanism.XXXXXX") || return 1
+  : > "$files_file"
+  for path in \
+    .claude/hooks/_lib.sh \
+    .claude/hooks/stop-verify.sh \
+    .agent-md/bin/verify.sh; do
+    entry=$(verification_receipt_manifest_entry_json "$path" "$scope") || {
+      rm -f "$files_file"
+      return 1
+    }
+    printf '%s\n' "$entry" >> "$files_file"
+  done
+  files=$(jq -sc 'sort_by(.path)' "$files_file")
+  rm -f "$files_file"
+  if [ "$scope" = staged ]; then
+    valid=$(printf '%s' "$files" | jq 'all(.[]; .valid and .index.state == "present")')
+  else
+    valid=$(printf '%s' "$files" | jq 'all(.[]; .valid and .worktree.state == "present")')
+  fi
+  jq -cn --argjson schema "$(verification_receipt_protocol_schema)" \
+    --arg scope "$scope" --argjson valid "$valid" --argjson files "$files" \
+    '{valid:$valid,schema:$schema,scope:$scope,files:$files}'
+}
+
+# Ordinary coverage is calculated separately from external authority. A valid
+# local receipt can never satisfy the independent or approval arrays.
+verification_receipt_requirements_json() {
+  local contract="$1" control="$2"
+  jq -cn --argjson contract "$contract" --argjson control "$control" '
+    def ordinary_spec:
+      {name,requirement,origin,command};
+    ($control.effective.risk // null) as $risk
+    | ([ $contract.checks[] |
+          select(.name != "independent" and .name != "approval" and .requirement == "required") |
+          ordinary_spec ] | sort_by(.name,.command,.origin,.requirement)) as $required
+    | ([ $contract.checks[] |
+          select((.name == "runtime" or .name == "smoke") and .origin != "not configured") |
+          ordinary_spec ] | sort_by(.name,.command,.origin,.requirement)) as $runtime
+    | {
+        valid:($contract.valid == true and $control.valid == true),
+        required:$required,
+        any_of:(if (($risk == "medium" or $risk == "high" or $risk == "critical") and ($runtime | length) > 0)
+                then [{name:"runtime-or-smoke",checks:$runtime}]
+                else [] end),
+        external:([if ($risk == "high" or $risk == "critical") then "independent" else empty end,
+                   if ($risk == "critical" or
+                       ($control.risk_downgrade == "pending" and $control.downgrade_authority == "approval"))
+                   then "approval" else empty end] | unique)
+      }
+  '
+}
+
+verification_receipt_identity_json() {
+  local scope="${1:-worktree}" source contract control mechanism requirements
+  local source_fingerprint contract_fingerprint control_fingerprint mechanism_fingerprint
+  source=$(verification_receipt_source_manifest_json "$scope") || return 1
+  contract=$(effective_verification_contract_json "$scope") || return 1
+  control=$(effective_control_requirements_json "$scope") || return 1
+  mechanism=$(verification_receipt_mechanism_manifest_json "$scope") || return 1
+  requirements=$(verification_receipt_requirements_json "$contract" "$control") || return 1
+  if [ "$(printf '%s' "$source" | jq -r '.valid')" != true ] \
+    || [ "$(printf '%s' "$contract" | jq -r '.valid')" != true ] \
+    || [ "$(printf '%s' "$control" | jq -r '.valid')" != true ] \
+    || [ "$(printf '%s' "$mechanism" | jq -r '.valid')" != true ] \
+    || [ "$(printf '%s' "$requirements" | jq -r '.valid')" != true ]; then
+    jq -cn --argjson schema "$(verification_receipt_protocol_schema)" --arg scope "$scope" \
+      --argjson source "$source" --argjson contract "$contract" \
+      --argjson control "$control" --argjson mechanism "$mechanism" \
+      '{valid:false,schema:$schema,scope:$scope,error:"current verification identity is invalid",
+        components:{source:$source,contract:$contract,control:$control,mechanism:$mechanism}}'
+    return 0
+  fi
+  source_fingerprint=$(verification_receipt_json_fingerprint_json "$source") || return 1
+  contract_fingerprint=$(verification_receipt_json_fingerprint_json "$contract") || return 1
+  control_fingerprint=$(verification_receipt_json_fingerprint_json "$control") || return 1
+  mechanism_fingerprint=$(verification_receipt_json_fingerprint_json "$mechanism") || return 1
+  jq -cn --argjson schema "$(verification_receipt_protocol_schema)" --arg scope "$scope" \
+    --argjson source "$source_fingerprint" --argjson contract "$contract_fingerprint" \
+    --argjson control "$control_fingerprint" --argjson mechanism "$mechanism_fingerprint" \
+    --argjson requirements "$requirements" '
+      {valid:true,schema:$schema,scope:$scope,
+       fingerprints:{source:$source,contract:$contract,control:$control,mechanism:$mechanism},
+       requirements:$requirements}
+    '
+}
+
+# The authenticated payload is every receipt field except the provider-owned
+# authentication envelope. No field used for freshness, ordering, coverage, or
+# result interpretation is left unauthenticated.
+verification_receipt_payload_json() {
+  printf '%s' "$1" | jq -cS 'del(.authentication)' 2>/dev/null
+}
+
+verification_receipt_payload_fingerprint_json() {
+  local payload
+  payload=$(verification_receipt_payload_json "$1") || return 1
+  verification_receipt_json_fingerprint_json "$payload"
+}
+
+verification_receipt_state_json() {
+  local receipt="${1:-}" identity="${2:-}" provider_validation="${3:-}"
+  local payload_fingerprint coverage
+  if [ -z "$receipt" ]; then
+    jq -cn '{schema:1,state:"absent",reason:"no receipt was supplied"}'
+    return 0
+  fi
+  if ! printf '%s' "$receipt" | jq -e '
+    type == "object" and .schema == 1 and
+    (.scope == "worktree" or .scope == "staged") and
+    (.attempt | type == "object") and
+    (.attempt.issuer | type == "string" and length > 0) and
+    (.attempt.sequence | type == "string" and length > 0) and
+    (.fingerprints | type == "object") and
+    ([.fingerprints.source,.fingerprints.contract,.fingerprints.control,.fingerprints.mechanism] |
+      all(.[]; type == "object" and (.algorithm | type == "string" and length > 0) and
+                         (.value | type == "string" and length > 0))) and
+    (.status == "pass" or .status == "warn" or .status == "fail") and
+    (.checks | type == "array") and
+    (all(.checks[];
+      (.name | type == "string" and length > 0) and
+      (.requirement == "required" or .requirement == "optional") and
+      (.origin | type == "string" and length > 0) and
+      (.command | type == "string") and
+      (.status == "pass" or .status == "warn" or .status == "fail") and
+      (.exit_code | type == "number" and floor == .))) and
+    (.authentication | type == "object")
+  ' >/dev/null 2>&1; then
+    jq -cn '{schema:1,state:"invalid",reason:"receipt does not match protocol schema 1"}'
+    return 0
+  fi
+  if ! printf '%s' "$identity" | jq -e '
+    type == "object" and .valid == true and .schema == 1 and
+    (.scope == "worktree" or .scope == "staged") and
+    (.fingerprints | type == "object") and (.requirements.valid == true)
+  ' >/dev/null 2>&1; then
+    jq -cn '{schema:1,state:"invalid",reason:"current verification identity is unavailable or invalid"}'
+    return 0
+  fi
+  if ! printf '%s' "$provider_validation" | jq -e '
+    type == "object" and .schema == 1 and .status == "pass" and .authentic == true and
+    (.latest | type == "boolean") and
+    (.issuer | type == "string" and length > 0) and
+    (.sequence | type == "string" and length > 0) and
+    (.payload_fingerprint | type == "object")
+  ' >/dev/null 2>&1; then
+    jq -cn '{schema:1,state:"invalid",reason:"authority-separated authentication was not established"}'
+    return 0
+  fi
+
+  payload_fingerprint=$(verification_receipt_payload_fingerprint_json "$receipt") || {
+    jq -cn '{schema:1,state:"invalid",reason:"authenticated payload could not be canonicalized"}'
+    return 0
+  }
+  if ! jq -en --argjson receipt "$receipt" --argjson validation "$provider_validation" \
+    --argjson payload "$payload_fingerprint" '
+      $validation.issuer == $receipt.attempt.issuer and
+      $validation.sequence == $receipt.attempt.sequence and
+      $validation.payload_fingerprint == $payload
+    ' >/dev/null; then
+    jq -cn '{schema:1,state:"invalid",reason:"provider validation does not authenticate this receipt payload"}'
+    return 0
+  fi
+  if [ "$(printf '%s' "$provider_validation" | jq -r '.latest')" != true ]; then
+    jq -cn '{schema:1,state:"stale",reason:"receipt was superseded by a newer authenticated attempt"}'
+    return 0
+  fi
+  if ! jq -en --argjson receipt "$receipt" --argjson identity "$identity" '
+    $receipt.scope == $identity.scope and $receipt.fingerprints == $identity.fingerprints
+  ' >/dev/null; then
+    jq -cn '{schema:1,state:"stale",reason:"receipt fingerprints do not match the current state"}'
+    return 0
+  fi
+
+  coverage=$(jq -cn --argjson receipt "$receipt" --argjson identity "$identity" '
+    def passed($expected):
+      any($receipt.checks[];
+        .name == $expected.name and
+        .requirement == $expected.requirement and
+        .origin == $expected.origin and
+        .command == $expected.command and
+        .status == "pass" and .exit_code == 0);
+    ($identity.requirements) as $requirements
+    | ($requirements.required | map(select(passed(.) | not))) as $missing_required
+    | ($requirements.any_of | map(select(any(.checks[]; passed(.)) | not) | .name)) as $missing_groups
+    | {complete:($receipt.status != "fail" and
+                 ($missing_required | length) == 0 and
+                 ($missing_groups | length) == 0),
+       missing_required:$missing_required,
+       missing_groups:$missing_groups,
+       external:$requirements.external}
+  ')
+  if [ "$(printf '%s' "$coverage" | jq -r '.complete')" != true ]; then
+    jq -cn --argjson coverage "$coverage" \
+      '{schema:1,state:"insufficient-coverage",reason:"latest authenticated attempt does not cover every current ordinary requirement",coverage:$coverage}'
+    return 0
+  fi
+  jq -cn --argjson coverage "$coverage" \
+    '{schema:1,state:"authentic-current",reason:"latest authenticated attempt matches the current state and ordinary requirements",coverage:$coverage}'
 }
 
 risk_rank() {
@@ -315,9 +897,128 @@ policy_result_json() {
     '
 }
 
-# policy_human_message <policy-result-json>
-# Keeps hook output readable while exposing stable severity/code tokens.
-policy_human_message() {
+# diagnostic_language
+# Resolves the user's environment preference without changing structured results.
+# Only the explicitly supported presentation languages are returned.
+diagnostic_language() {
+  local requested normalized
+  requested=${CODING_AGENT_CONTROL_LANG-}
+  [ -n "$requested" ] || requested=${LC_ALL-}
+  [ -n "$requested" ] || requested=${LC_MESSAGES-}
+  [ -n "$requested" ] || requested=${LANG-}
+  [ -n "$requested" ] || requested=en
+
+  normalized=${requested%%@*}
+  normalized=${normalized%%.*}
+  normalized=$(printf '%s' "$normalized" | tr '[:upper:]_' '[:lower:]-')
+  case "$normalized" in
+    pt|pt-br) printf 'pt-BR\n' ;;
+    en|en-us) printf 'en\n' ;;
+    *) printf 'en\n' ;;
+  esac
+}
+
+diagnostic_label() {
+  local language="$1" label="$2"
+  case "$language:$label" in
+    pt-BR:problem) printf 'Problema\n' ;;
+    pt-BR:impact) printf 'Impacto\n' ;;
+    pt-BR:action) printf 'Ação\n' ;;
+    pt-BR:related-files) printf 'Arquivos relacionados\n' ;;
+    *:problem) printf 'Problem\n' ;;
+    *:impact) printf 'Impact\n' ;;
+    *:action) printf 'Action\n' ;;
+    *:related-files) printf 'Related files\n' ;;
+  esac
+}
+
+diagnostic_related_paths_human() {
+  local result="$1" language="$2" path_count remaining path
+  path_count=$(printf '%s' "$result" | jq '(.paths // []) | length')
+  [ "$path_count" -gt 0 ] || return 0
+
+  printf '\n%s:\n' "$(diagnostic_label "$language" related-files)"
+  while IFS= read -r path; do
+    [ -n "$path" ] || continue
+    printf '  %s\n' "$path"
+  done < <(printf '%s' "$result" | jq -r '(.paths // [])[0:3][]')
+
+  if [ "$path_count" -gt 3 ]; then
+    remaining=$((path_count - 3))
+    if [ "$language" = pt-BR ]; then
+      printf '  +%s arquivos relacionados\n' "$remaining"
+    else
+      printf '  +%s related files\n' "$remaining"
+    fi
+  fi
+}
+
+risk_diagnostic_human_message() {
+  local result="$1" language="$2" severity code risk current_status result_status
+  local migration_signal problem impact action
+  severity=$(printf '%s' "$result" | jq -r '.severity | ascii_upcase')
+  code=$(printf '%s' "$result" | jq -r '.code')
+  risk=$(printf '%s' "$result" | jq -r '.risk // "not declared"')
+  current_status=$(printf '%s' "$result" | jq -r '.current_status // "absent"')
+  result_status=$(printf '%s' "$result" | jq -r '.status')
+  migration_signal=$(printf '%s' "$result" | jq -r \
+    '(.observed_signals // []) | index("migration") != null')
+
+  case "$code:$language" in
+    RISK_POSSIBLY_UNDERRATED:pt-BR)
+      if [ "$migration_signal" = true ]; then
+        problem="Foram detectados indícios de alterações relacionadas a migração/schema enquanto o Risk declarado está como ${risk}."
+      else
+        problem="Foram detectados indícios de alterações potencialmente sensíveis enquanto o Risk declarado está como ${risk}."
+      fi
+      impact="Aviso de revisão apenas. O Risk declarado e os requisitos de verificação não foram alterados automaticamente."
+      action="Revise se Risk ${risk} continua adequado."
+      ;;
+    RISK_POSSIBLY_UNDERRATED:*)
+      if [ "$migration_signal" = true ]; then
+        problem="Changes associated with migration/schema-sensitive behavior were detected while the declared Risk is ${risk}."
+      else
+        problem="Potentially sensitive changes were detected while the declared Risk is ${risk}."
+      fi
+      impact="Advisory review only. The declared Risk and verification requirements were not changed automatically."
+      action="Review whether Risk ${risk} is still appropriate."
+      ;;
+    RISK_RUNTIME_EVIDENCE_REQUIRED:pt-BR)
+      if [ "$result_status" = fail ]; then
+        problem="A verificação runtime ou smoke foi declarada aplicável para Risk ${risk}, mas nenhum check válido passou."
+        impact="A conclusão está bloqueada até que a evidência runtime ou smoke obrigatória passe."
+        action="Corrija e execute novamente o check verify.runtime ou verify.smoke configurado antes de concluir a tarefa."
+      else
+        problem="A tarefa está em ${current_status} com Risk ${risk}, mas nenhum check runtime ou smoke declara se evidência executável em runtime se aplica."
+        impact="Aviso apenas. Lint e testes podem ter passado; este aviso não bloqueia a conclusão."
+        action="Se a mudança afetou comportamento em runtime, considere declarar verify.runtime ou verify.smoke. Se não houver uma evidência executável apropriada, nenhuma ação automática é necessária."
+      fi
+      ;;
+    RISK_RUNTIME_EVIDENCE_REQUIRED:*)
+      if [ "$result_status" = fail ]; then
+        problem="Runtime or smoke verification was declared applicable for Risk ${risk}, but no valid check passed."
+        impact="Completion is blocked until the required runtime or smoke evidence passes."
+        action="Fix and rerun the configured verify.runtime or verify.smoke check before completing the task."
+      else
+        problem="The task is ${current_status} with Risk ${risk}, but no runtime or smoke check declares whether executable runtime evidence applies."
+        impact="Advisory only. Lint and tests may have passed; completion is not blocked by this warning."
+        action="If the change affects runtime behavior, consider declaring verify.runtime or verify.smoke. If no executable runtime evidence is appropriate, no automatic action is required."
+      fi
+      ;;
+  esac
+
+  # Compatibility debt: structured missing_requirement="risk" is semantically
+  # inaccurate and remains temporarily for compatibility. Presentation must not
+  # describe an existing Risk declaration as missing.
+  printf '[%s %s]\n\n' "$severity" "$code"
+  printf '%s:\n%s\n' "$(diagnostic_label "$language" problem)" "$problem"
+  printf '\n%s:\n%s\n' "$(diagnostic_label "$language" impact)" "$impact"
+  printf '\n%s:\n%s\n' "$(diagnostic_label "$language" action)" "$action"
+
+  diagnostic_related_paths_human "$result" "$language"
+}
+
+default_policy_human_message() {
   local result="$1" result_status severity code message suggestion paths rendered
   local risk current_status signals missing_requirement
   severity=$(printf '%s' "$result" | jq -r '.severity | ascii_upcase')
@@ -341,6 +1042,81 @@ policy_human_message() {
   [ -z "$paths" ] || rendered="${rendered} Paths: ${paths}."
   [ -z "$suggestion" ] || rendered="${rendered} Recovery: ${suggestion}"
   printf '%s\n' "$rendered"
+}
+
+# policy_human_message <policy-result-json>
+# Keeps hook output readable while exposing stable severity/code tokens. Locale
+# affects only the presentation of explicitly supported diagnostics.
+policy_human_message() {
+  local result="$1" code
+  code=$(printf '%s' "$result" | jq -r '.code')
+  case "$code" in
+    RISK_POSSIBLY_UNDERRATED|RISK_RUNTIME_EVIDENCE_REQUIRED)
+      risk_diagnostic_human_message "$result" "$(diagnostic_language)"
+      ;;
+    *)
+      default_policy_human_message "$result"
+      ;;
+  esac
+}
+
+# --- Stop-hook input contract -------------------------------------------
+#
+# Claude Code sends one JSON object on stdin for Stop and SubagentStop.
+# Two fields matter to these policies:
+#
+#   stop_hook_active  true when this stop attempt follows an earlier one
+#                     that a hook already answered in the same cycle.
+#   hook_event_name   "Stop" or "SubagentStop".
+#
+# stop_hook_active is not evidence and never releases enforcement. A
+# required check that still fails, invalid enforcement configuration, an
+# operational-state violation, or missing Risk evidence blocks on every
+# attempt, retry or not. What the flag does tell us is that the agent has
+# already received this cycle's advisory context once. Advisory context
+# carries no decision the agent can satisfy, so repeating it cannot change
+# the outcome and only feeds the agent back into another turn. That is the
+# loop this contract removes, without a retry counter and without relying
+# on the host's consecutive-block cap.
+
+# hook_input_is_retry <raw-stdin>
+# True when the payload is an object whose stop_hook_active is exactly
+# true. Malformed, empty, or absent input reads as a first attempt: the
+# fail-safe direction is one extra advisory message, never a suppressed
+# block.
+hook_input_is_retry() {
+  local raw="${1:-}"
+  [ -n "$raw" ] || return 1
+  printf '%s' "$raw" | jq -e 'type == "object" and .stop_hook_active == true' >/dev/null 2>&1
+}
+
+# hook_input_stop_event <raw-stdin>
+# Echoes back the stop event we were invoked for so hookSpecificOutput
+# names the right event. Anything unrecognized falls back to Stop.
+hook_input_stop_event() {
+  local raw="${1:-}" name
+  name=$(printf '%s' "$raw" | jq -r 'if type == "object" then (.hook_event_name // empty) else empty end' 2>/dev/null || true)
+  case "$name" in
+    Stop|SubagentStop) printf '%s\n' "$name" ;;
+    *) printf 'Stop\n' ;;
+  esac
+}
+
+# emit_stop_block <reason>
+# Blocking decisions are unconditional. They never consult stop_hook_active.
+emit_stop_block() {
+  jq -n --arg r "$1" '{decision: "block", reason: $r}'
+}
+
+# emit_stop_advisory <raw-stdin> <message>
+# Emits non-blocking context once per stop cycle and stays silent on a
+# retry, so advisory text cannot restart the agent indefinitely.
+emit_stop_advisory() {
+  local raw="$1" message="$2" event
+  hook_input_is_retry "$raw" && return 0
+  event=$(hook_input_stop_event "$raw")
+  jq -n --arg e "$event" --arg m "$message" \
+    '{hookSpecificOutput: {hookEventName: $e, additionalContext: $m}}'
 }
 
 # detect_pm — prints the detected Node package manager based on lockfile,
@@ -427,10 +1203,11 @@ verification_invalid_contract_json() {
 #   [verify] <check> = "command"
 #   [verify.policy] required = ["lint", "test"]
 #   [verify.policy] timeout_seconds = 300
+#   [verify.policy] total_timeout_seconds = 420
 # Without `required`, resolved checks retain the legacy required behavior.
 verification_contract_json() {
   local config="${1:-$(toml_path)}" required_values required_status
-  local required_declared=0 timeout_value="" rows='[]' check command origin requirement
+  local required_declared=0 timeout_value="" total_timeout_value="" rows='[]' check command origin requirement
   local seen_required="" value row trusted_values trusted_status trusted_files
   local capability_values capability_status capabilities
 
@@ -477,6 +1254,17 @@ EOF
       ''|*[!0-9]*|0)
         verification_invalid_contract_json \
           "Invalid ${config}: verify.policy.timeout_seconds must be a positive integer."
+        return 0
+        ;;
+    esac
+  fi
+
+  if toml_key_present "$config" verify.policy total_timeout_seconds; then
+    total_timeout_value=$(read_toml "$config" verify.policy total_timeout_seconds)
+    case "$total_timeout_value" in
+      ''|*[!0-9]*|0)
+        verification_invalid_contract_json \
+          "Invalid ${config}: verify.policy.total_timeout_seconds must be a positive integer."
         return 0
         ;;
     esac
@@ -600,11 +1388,13 @@ EOF
   jq -cn \
     --argjson checks "$rows" \
     --arg timeout "$timeout_value" \
+    --arg total_timeout "$total_timeout_value" \
     --arg mode "$(if [ "$required_declared" -eq 1 ]; then printf explicit; else printf legacy; fi)" '
       {
         valid: true,
         policy: $mode,
         timeout_seconds: (if $timeout == "" then null else ($timeout | tonumber) end),
+        total_timeout_seconds: (if $total_timeout == "" then null else ($total_timeout | tonumber) end),
         checks: $checks
       }
     '
@@ -659,10 +1449,12 @@ merge_verification_contracts() {
         else $new
         end;
     ([ $baseline.timeout_seconds, $proposal.timeout_seconds ] | map(select(. != null))) as $timeouts
+    | ([ $baseline.total_timeout_seconds, $proposal.total_timeout_seconds ] | map(select(. != null))) as $total_timeouts
     | {
         valid: true,
         policy: "effective",
         timeout_seconds: (if ($timeouts | length) == 0 then null else ($timeouts | min) end),
+        total_timeout_seconds: (if ($total_timeouts | length) == 0 then null else ($total_timeouts | min) end),
         checks: (ordinary + [attestation("independent"), attestation("approval")]),
         baseline_contract: $baseline,
         proposal_contract: $proposal
@@ -751,9 +1543,206 @@ verification_result_json() {
     '
 }
 
+# --- Commit authorship policy --------------------------------------------
+#
+# Two controls are deliberately separate.
+#
+#   Commit execution authority — who may run `git commit`. That stays with
+#     the human and is unchanged by anything here.
+#   Commit authorship — whose name the resulting history carries. An agent
+#     may draft a subject and body, but the commit is the developer's work
+#     and the message must not say otherwise.
+#
+# This enforces the second. It never touches user.name, user.email, or the
+# message content; it reports and blocks, and the human edits and retries.
+#
+# Detection is deliberately narrow. A blanket ban on Co-Authored-By would
+# break legitimate human pair authorship, and scanning prose for the word
+# "Claude" would block a commit that merely describes this project. So only
+# two things are examined: trailer-shaped lines, and the standalone footer
+# lines agents append. Ordinary prose is never inspected.
+
+# Trailer keys that exist only to credit an agent. Blocked on any value.
+# Pipe-delimited for exact membership, so no key is matched as a substring.
+commit_attribution_agent_keys() {
+  printf '%s\n' '|claude-session|codex-session|agent-session|generated-by|generated-with|ai-assisted-by|'
+}
+
+# Trailer keys that carry authorship and are therefore checked against the
+# agent identities below. A human value on these keys is always allowed.
+commit_attribution_authorship_keys() {
+  printf '%s\n' '|co-authored-by|signed-off-by|on-behalf-of|'
+}
+
+# Identities that name an agent rather than a person. Applied only to the
+# value of an authorship trailer. Word boundaries are spelled out so that a
+# person named Bardot or Hellman is not mistaken for a model.
+commit_attribution_agent_identity_pattern() {
+  printf '%s\n' '(^|[^a-z])(claude|anthropic|chatgpt|openai|copilot|codex|cursor|windsurf|gemini|bard|devin)([^a-z]|$)|gpt-?[0-9]|[[]bot[]]|noreply@(anthropic|openai)|copilot@github'
+}
+
+# Standalone footer lines agents append. Anchored at line start so that prose
+# mentioning a tool mid-sentence is not attribution.
+commit_attribution_agent_footer_pattern() {
+  printf '%s\n' '^[[:space:]]*(🤖[[:space:]]*)?generated (with|by) |^[[:space:]]*https?://(claude[.]ai/code/session|claude[.]com/claude-code)'
+}
+
+# commit_attribution_offending_lines <message-file>
+# Prints "<line number><tab><line>" for each line that credits an agent.
+# Empty output means the message carries no agent authorship metadata.
+#
+# Git comment lines are ignored because git strips them, and scanning stops
+# at the scissors marker so a `git commit --verbose` diff is never treated as
+# part of the message. That matters here: the diff can legitimately contain
+# the very strings this policy blocks.
+commit_attribution_offending_lines() {
+  local file="$1"
+  [ -f "$file" ] || return 0
+  awk \
+    -v agent_keys="$(commit_attribution_agent_keys)" \
+    -v authorship_keys="$(commit_attribution_authorship_keys)" \
+    -v identity="$(commit_attribution_agent_identity_pattern)" \
+    -v footer="$(commit_attribution_agent_footer_pattern)" '
+    /^#/ && /^#.*>8/ { exit }
+    /^#/ { next }
+    {
+      lowered = tolower($0)
+      if (lowered ~ footer) { printf "%d\t%s\n", FNR, $0; next }
+      colon = index($0, ":")
+      if (colon < 2) next
+      key = tolower(substr($0, 1, colon - 1))
+      if (key !~ /^[a-z][a-z0-9-]*$/) next
+      if (index(agent_keys, "|" key "|") > 0) { printf "%d\t%s\n", FNR, $0; next }
+      if (index(authorship_keys, "|" key "|") > 0) {
+        value = tolower(substr($0, colon + 1))
+        if (value ~ identity) printf "%d\t%s\n", FNR, $0
+      }
+    }
+  ' "$file"
+}
+
+# commit_attribution_result <message-file>
+# Prints one structured policy result, or nothing when the message is clean.
+# Integrity class: a message that misstates authorship is blocking.
+commit_attribution_result() {
+  local file="$1" offending count result
+  offending=$(commit_attribution_offending_lines "$file")
+  [ -n "$offending" ] || return 0
+  count=$(printf '%s\n' "$offending" | awk 'END { print NR }')
+  result=$(policy_result_json \
+    "fail" "error" "COMMIT_AI_ATTRIBUTION" \
+    "${count} commit message line(s) attribute authorship to an AI agent; authorship belongs to the developer." \
+    "Delete the line(s) listed below and commit again. Drafting a subject and body with an agent is fine; crediting one in history is not.")
+  printf '%s' "$result" | jq -c --arg lines "$offending" '. + {lines: ($lines | split("\n") | map(select(length > 0)))}'
+}
+
+# --- Verification evidence excerpts ---------------------------------------
+#
+# Hook output becomes agent context, so a check's output is always excerpted
+# rather than dumped. Which part to keep depends on what happened.
+#
+# A passing check keeps the first lines: a successful run states what it did
+# up front. A failing check needs the opposite. The first lines of a long
+# failing run are almost always the part that succeeded, which is how a real
+# failure can hide behind a truncation notice while the excerpt shows nothing
+# but passing records.
+#
+# Selection for a failure is runner-agnostic. It anchors on failure records
+# wherever they appear, keeps a little context around each, and always keeps
+# the end of the output. When nothing recognizable is found, the end of the
+# output is the evidence. This is not a parser for any one runner and must
+# not become one.
+
+# Evidence budget in content lines. Gap markers are not counted; they are a
+# handful of characters each and they carry the omission count.
+verification_evidence_max_lines() { printf '30\n'; }
+
+# Explicit failure records, in the shapes real tools print. Word boundaries
+# are spelled out and brackets are written as character classes because
+# neither \b nor backslash escapes survive awk's -v processing portably.
+verification_evidence_strong_pattern() {
+  printf '%s\n' '^not ok|^panic:|^[[:space:]]*Traceback [(]most recent call last[)]|^##[[]error[]]|^E[[:space:]]|^[[:space:]]*(✗|✘)[[:space:]]|(^|[^A-Za-z])FAILED([^A-Za-z]|$)|(^|[^A-Za-z])error([[][A-Za-z0-9_]+[]])?( [A-Za-z]*[0-9]+)?:|(^|[^A-Za-z])ERROR:'
+}
+
+# Generic error words. Consulted only when no explicit failure record exists,
+# because words like FAIL appear inside passing test descriptions and would
+# otherwise refill the excerpt with the very lines that hid the failure.
+verification_evidence_weak_pattern() {
+  printf '%s\n' '(^|[^A-Za-z])(FAIL|ERROR|ERRORS|Exception|AssertionError)([^A-Za-z]|$)|Segmentation fault|command not found'
+}
+
+# verification_evidence <output-file> <exit-code>
+# Prints the excerpt. Never decides pass or fail; the caller already has the
+# exit status and this only chooses which lines to show.
+verification_evidence() {
+  local file="$1" exit_code="${2:-0}" max
+  max=$(verification_evidence_max_lines)
+
+  if [ "$exit_code" -eq 0 ]; then
+    awk -v max="$max" 'NR <= max' "$file"
+    return 0
+  fi
+
+  awk -v max="$max" -v before=1 -v after_max=20 -v tail=5 \
+    -v strong="$(verification_evidence_strong_pattern)" \
+    -v weak="$(verification_evidence_weak_pattern)" '
+    FNR == NR {
+      if ($0 ~ strong) strong_line[++strong_n] = FNR
+      else if ($0 ~ weak) weak_line[++weak_n] = FNR
+      total = FNR
+      next
+    }
+    FNR == 1 {
+      if (total <= max) {
+        for (i = 1; i <= total; i++) want[i] = 1
+      } else {
+        tail_start = total - tail + 1
+        if (tail_start < 1) tail_start = 1
+        for (i = tail_start; i <= total; i++) { want[i] = 1; count++ }
+        markers = strong_n
+        for (i = 1; i <= strong_n; i++) marker[i] = strong_line[i]
+        if (markers == 0) {
+          markers = weak_n
+          for (i = 1; i <= weak_n; i++) marker[i] = weak_line[i]
+        }
+        # Name every failure record before giving any of them context, so a
+        # run with many failures still lists them all.
+        for (i = 1; i <= markers && count < max; i++)
+          if (!(marker[i] in want)) { want[marker[i]] = 1; count++ }
+        # One line of lead-in each.
+        for (i = 1; i <= markers && count < max; i++) {
+          j = marker[i] - before
+          if (j >= 1 && !(j in want)) { want[j] = 1; count++ }
+        }
+        # Then widen the window after each record one round at a time. What
+        # explains a failure is what follows it: the assertion, the traceback,
+        # the compiler note. A lone failure gets a deep excerpt; many failures
+        # share the remaining budget evenly.
+        for (radius = 1; radius <= after_max && count < max; radius++)
+          for (i = 1; i <= markers && count < max; i++) {
+            j = marker[i] + radius
+            if (j <= total && !(j in want)) { want[j] = 1; count++ }
+          }
+      }
+    }
+    {
+      if (FNR in want) {
+        if (gap > 0) {
+          if (tail_start > 0 && FNR == tail_start)
+            printf "... (%d line%s omitted; end of output follows)\n", gap, (gap == 1 ? "" : "s")
+          else
+            printf "... (%d line%s omitted)\n", gap, (gap == 1 ? "" : "s")
+          gap = 0
+        }
+        print
+      } else gap++
+    }
+  ' "$file" "$file"
+}
+
 run_verification_check() {
   local spec="$1" timeout_seconds="${2:-}" name requirement origin command
-  local output_file exit_code evidence line_count truncated=false timeout_command="" label
+  local output_file exit_code evidence line_count truncated=false label
   local status severity code message suggestion
   name=$(printf '%s' "$spec" | jq -r '.name')
   requirement=$(printf '%s' "$spec" | jq -r '.requirement')
@@ -781,11 +1770,7 @@ run_verification_check() {
   }
 
   if [ -n "$timeout_seconds" ]; then
-    if command -v timeout >/dev/null 2>&1; then
-      timeout_command=timeout
-    elif command -v gtimeout >/dev/null 2>&1; then
-      timeout_command=gtimeout
-    else
+    if ! completion_timeout_utility_available; then
       rm -f "$output_file"
       verification_result_json \
         "$(if [ "$requirement" = required ]; then printf fail; else printf warn; fi)" \
@@ -796,7 +1781,7 @@ run_verification_check() {
         "$name" "$requirement" "$origin" "$command" "" "The check did not run."
       return 0
     fi
-    if "$timeout_command" "${timeout_seconds}s" bash -c "$command" >"$output_file" 2>&1; then
+    if completion_execute_bounded_command "$timeout_seconds" bash -c "$command" >"$output_file" 2>&1; then
       exit_code=0
     else
       exit_code=$?
@@ -807,12 +1792,12 @@ run_verification_check() {
     exit_code=$?
   fi
 
-  line_count=$(wc -l < "$output_file" | tr -d ' ')
-  evidence=$(awk 'NR <= 30' "$output_file")
+  line_count=$(awk 'END { print NR }' "$output_file")
+  evidence=$(verification_evidence "$output_file" "$exit_code")
   if [ -z "$evidence" ]; then
     evidence="No output; exit code ${exit_code}."
   fi
-  if [ "${line_count:-0}" -gt 30 ]; then truncated=true; fi
+  if [ "${line_count:-0}" -gt "$(verification_evidence_max_lines)" ]; then truncated=true; fi
   rm -f "$output_file"
 
   if [ "$exit_code" -eq 0 ]; then
@@ -849,8 +1834,9 @@ run_verification_check() {
 # wrappers can translate results without `set -e` surprises; `.status` is the
 # authoritative control signal.
 run_resolved_verification_contract() {
-  local contract="$1" error_result results_file
-  local spec result timeout_seconds resolved_count=0 results status
+  local contract="$1" error_result results_file specs
+  local spec result timeout_seconds effective_timeout timeout_info limited_by_total
+  local resolved_count=0 results status index=0 pending timeout_result
   if [ "$(printf '%s' "$contract" | jq -r '.valid')" != true ]; then
     error_result=$(printf '%s' "$contract" | jq -c '.error')
     jq -cn --argjson contract "$contract" --argjson result "$error_result" \
@@ -859,6 +1845,9 @@ run_resolved_verification_contract() {
   fi
 
   timeout_seconds=$(printf '%s' "$contract" | jq -r '.timeout_seconds // empty')
+  specs=$(printf '%s' "$contract" | jq -c '[.checks[] |
+    select(.requirement != "conditional" and
+      (.origin != "not configured" or .requirement == "required"))]')
   results_file=$(mktemp "${TMPDIR:-/tmp}/agent-md-results.XXXXXX") || {
     error_result=$(policy_result_json fail error VERIFY_UNAVAILABLE \
       "Verification could not create result storage." \
@@ -870,17 +1859,45 @@ run_resolved_verification_contract() {
 
   while IFS= read -r spec; do
     [ -n "$spec" ] || continue
-    if [ "$(printf '%s' "$spec" | jq -r '.requirement')" = conditional ]; then
-      continue
-    elif [ "$(printf '%s' "$spec" | jq -r '.origin')" != "not configured" ]; then
-      resolved_count=$((resolved_count + 1))
-      result=$(run_verification_check "$spec" "$timeout_seconds")
+    pending=$(printf '%s' "$specs" | jq -c --argjson index "$index" \
+      '[.[$index + 1:][] | .name]')
+    timeout_info=$(completion_effective_timeout_json "$timeout_seconds")
+    if [ "$(printf '%s' "$timeout_info" | jq -r '.available')" != true ]; then
+      result=$(completion_total_timeout_result_json \
+        "check:$(printf '%s' "$spec" | jq -r '.name')" \
+        "$(printf '%s' "$spec" | jq -r '.name')" "$pending")
       printf '%s\n' "$result" >> "$results_file"
-    elif [ "$(printf '%s' "$spec" | jq -r '.requirement')" = required ]; then
-      result=$(run_verification_check "$spec" "$timeout_seconds")
+      break
+    fi
+    effective_timeout=$(printf '%s' "$timeout_info" | jq -r '.seconds // empty')
+    limited_by_total=$(printf '%s' "$timeout_info" | jq -r '.limited_by_total')
+
+    if [ "$(printf '%s' "$spec" | jq -r '.origin')" != "not configured" ]; then
+      resolved_count=$((resolved_count + 1))
+      result=$(run_verification_check "$spec" "$effective_timeout")
+      if [ "$limited_by_total" = true ] \
+        && [ "$(printf '%s' "$result" | jq -r '.code')" = VERIFY_TIMEOUT ]; then
+        timeout_result=$(completion_total_timeout_result_json \
+          "check:$(printf '%s' "$spec" | jq -r '.name')" \
+          "$(printf '%s' "$spec" | jq -r '.name')" "$pending")
+        result=$(jq -cn --argjson timeout "$timeout_result" --argjson original "$result" '
+          $timeout + {
+            exit_code:($original.exit_code // 124),
+            evidence:($original.evidence // ""),
+            truncated:($original.truncated // false),
+            command:($original.command // "")
+          }
+        ')
+        printf '%s\n' "$result" >> "$results_file"
+        break
+      fi
+      printf '%s\n' "$result" >> "$results_file"
+    else
+      result=$(run_verification_check "$spec" "$effective_timeout")
       printf '%s\n' "$result" >> "$results_file"
     fi
-  done < <(printf '%s' "$contract" | jq -c '.checks[]')
+    index=$((index + 1))
+  done < <(printf '%s' "$specs" | jq -c '.[]')
 
   if [ "$resolved_count" -eq 0 ] && [ ! -s "$results_file" ]; then
     result=$(verification_result_json warn warning VERIFY_NOT_CONFIGURED \
@@ -910,17 +1927,75 @@ run_verification_contract() {
 }
 
 # run_effective_verification_contract [worktree|staged]
-# Shared entry point for Stop, pre-commit, verify, and doctor. It executes the
-# conservative union of the Git baseline and the current proposal.
+# Backward-compatible ordinary-check entry point. Completion adapters use
+# run_completion_evaluation so Risk/providers and checks share one deadline.
+# It executes the conservative union of Git baseline and current proposal.
 run_effective_verification_contract() {
   local scope="${1:-worktree}" contract
   contract=$(effective_verification_contract_json "$scope")
   run_resolved_verification_contract "$contract"
 }
 
+completion_timeout_utility_available() {
+  completion_timeout_command >/dev/null 2>&1
+}
+
+# run_completion_evaluation <context-json> [completion|advisory]
+#
+# This is the shared deadline-aware executor for Stop, verify.sh, and
+# pre-commit. Call completion_evaluation_begin before resolving the context so
+# contract/control resolution consumes the same core deadline as subprocesses.
+run_completion_evaluation() {
+  local context="$1" boundary="${2:-completion}"
+  local contract control budget verification risk summary timeout_result remaining
+  contract=$(printf '%s' "$context" | jq -c '.contract')
+  control=$(printf '%s' "$context" | jq -c '.control')
+  budget=$(printf '%s' "$context" | jq -c '.budget')
+  completion_deadline_configure "$(printf '%s' "$budget" | jq -r '.seconds // empty')"
+
+  if [ "$(printf '%s' "$budget" | jq -r '.bounded')" = true ] \
+    && ! completion_timeout_utility_available; then
+    timeout_result=$(policy_result_json fail error VERIFY_UNAVAILABLE \
+      "The core completion deadline requires a timeout utility, but neither timeout nor gtimeout is available." \
+      "Install a compatible timeout utility before running bounded completion verification.")
+    timeout_result=$(printf '%s' "$timeout_result" | jq -c \
+      '. + {check:"completion",requirement:"required",origin:"completion-deadline",command:""}')
+    verification=$(jq -cn --argjson contract "$contract" --argjson result "$timeout_result" \
+      '{status:"fail",contract:$contract,results:[$result]}')
+    risk=$(jq -cn --arg risk "$(printf '%s' "$control" | jq -r '.effective.risk // empty')" \
+      '{status:"pass",risk:(if $risk == "" then null else $risk end),current_status:null,observed_signals:[],results:[]}')
+  else
+    verification=$(run_resolved_verification_contract "$contract")
+    if printf '%s' "$verification" | jq -e \
+      'any(.results[]; .code == "VERIFY_TOTAL_TIMEOUT")' >/dev/null; then
+      risk=$(jq -cn --arg risk "$(printf '%s' "$control" | jq -r '.effective.risk // empty')" \
+        '{status:"pass",risk:(if $risk == "" then null else $risk end),current_status:null,observed_signals:[],results:[]}')
+    else
+      risk=$(run_risk_contract "$verification" "$(printf '%s' "$context" | jq -r '.scope')" \
+        "$boundary" "$control")
+    fi
+  fi
+  summary=$(combine_policy_summaries "$verification" "$risk")
+
+  remaining=$(completion_deadline_remaining_seconds 2>/dev/null || true)
+  if [ "$remaining" = 0 ] \
+    && ! printf '%s' "$summary" | jq -e \
+      'any(.results[]; .code == "VERIFY_TOTAL_TIMEOUT")' >/dev/null; then
+    timeout_result=$(completion_total_timeout_result_json decision completion '[]')
+    summary=$(printf '%s' "$summary" | jq -c --argjson result "$timeout_result" '
+      .results += [$result] | .status = "fail"
+    ')
+  fi
+
+  jq -cn --argjson context "$context" --argjson verification "$verification" \
+    --argjson risk "$risk" --argjson summary "$summary" \
+    '{context:$context,verification:$verification,risk:$risk,summary:$summary}'
+}
+
 verification_result_human() {
   local result="$1" base check requirement origin command exit_code evidence truncated
   local anchor_path anchor_location anchor_integrity anchor_trust attestation_kind attestation_origin attestation_commit
+  local total_timeout timeout_stage unchecked
   base=$(policy_human_message "$result")
   check=$(printf '%s' "$result" | jq -r '.check // empty')
   requirement=$(printf '%s' "$result" | jq -r '.requirement // empty')
@@ -933,11 +2008,22 @@ verification_result_human() {
   [ -z "$check" ] || printf 'Check: %s (%s, %s)\n' "$check" "$requirement" "$origin"
   [ -z "$command" ] || printf 'Command: %s\n' "$command"
   [ -z "$exit_code" ] || printf 'Exit code: %s\n' "$exit_code"
+  total_timeout=$(printf '%s' "$result" | jq -r '.total_timeout_seconds // empty')
+  timeout_stage=$(printf '%s' "$result" | jq -r '.timeout_stage // empty')
+  unchecked=$(printf '%s' "$result" | jq -r '(.unchecked_checks // []) | join(", ")')
+  [ -z "$total_timeout" ] || printf 'Total completion budget: %ss\n' "$total_timeout"
+  [ -z "$timeout_stage" ] || printf 'Timeout stage: %s\n' "$timeout_stage"
+  [ -z "$unchecked" ] || printf 'Not evaluated: %s\n' "$unchecked"
   if [ -n "$evidence" ]; then
     printf 'Evidence:\n%s\n' "$evidence"
   fi
   if [ "$truncated" = true ]; then
-    printf 'Evidence truncated to 30 lines; rerun the command above for complete output.\n'
+    if [ -n "$exit_code" ] && [ "$exit_code" != 0 ]; then
+      printf 'Evidence is an excerpt around detected failures plus the end of the output; rerun the command above for complete output.\n'
+    else
+      printf 'Evidence is the first %s lines; rerun the command above for complete output.\n' \
+        "$(verification_evidence_max_lines)"
+    fi
   fi
   anchor_path=$(printf '%s' "$result" | jq -r '.trust_anchor.path // empty')
   if [ -n "$anchor_path" ]; then
@@ -1354,11 +2440,13 @@ snapshot_relation_to_head() {
   printf '%s\n' "$relation"
 }
 
-# effective_control_requirements_json [worktree|staged]
+# effective_control_requirements_json [worktree|staged] [resolved-contract]
 # Resolves Git-bound baseline plus current proposal without executing checks or
-# external verifiers. Git proves content/binding, not human authorship.
+# external verifiers. A caller that already resolved the effective verification
+# contract may pass it to avoid parsing the same baseline/proposal twice. Git
+# proves content/binding, not human authorship.
 effective_control_requirements_json() {
-  local scope="${1:-worktree}" control_path progress_path config
+  local scope="${1:-worktree}" resolved_contract="${2:-}" control_path progress_path config
   local baseline_source=none baseline_risk="" baseline_valid=true legacy=false
   local head_declared_risk="" parent_risk="" baseline_authority="git-bound"
   local proposal_control_risk="" proposal_progress_risk="" proposal_risk=""
@@ -1443,7 +2531,11 @@ effective_control_requirements_json() {
     results=$(printf '%s' "$results" | jq -c --argjson result "$result" '. + [$result]')
   fi
 
-  contract=$(effective_verification_contract_json "$scope")
+  if [ -n "$resolved_contract" ]; then
+    contract="$resolved_contract"
+  else
+    contract=$(effective_verification_contract_json "$scope")
+  fi
   policy_status=$(snapshot_relation_to_head "$config" "$scope")
   if [ "$(printf '%s' "$contract" | jq -r '.valid')" != true ]; then
     result=$(printf '%s' "$contract" | jq -c '.error')
@@ -1504,6 +2596,171 @@ effective_control_requirements_json() {
     '
 }
 
+# completion_budget_json <contract> <control> [host|standalone]
+#
+# Explicit totals are already merged conservatively by the contract resolver.
+# Legacy contracts with a per-check timeout retain the sum of every maximum
+# subprocess budget that can apply, plus deterministic core overhead. With no
+# finite per-check bound, standalone verification remains explicitly unbounded;
+# Stop uses the historical 300-second capacity as a documented compatibility
+# ceiling so the core can fail structurally before the host transport does.
+completion_budget_json() {
+  local contract="$1" control="$2" context="${3:-standalone}"
+  local explicit per_check stage_count overhead seconds source bounded=true
+  explicit=$(printf '%s' "$contract" | jq -r '.total_timeout_seconds // empty')
+  per_check=$(printf '%s' "$contract" | jq -r '.timeout_seconds // empty')
+  stage_count=$(jq -cn --argjson contract "$contract" --argjson control "$control" '
+    ($control.effective.risk // null) as $risk
+    | ([ $contract.checks[] |
+          select(.name != "independent" and .name != "approval" and .origin != "not configured")
+       ] | length) as $ordinary
+    | ([ $contract.checks[] |
+          select(.name == "independent" and .origin == "configured" and
+                 ($risk == "high" or $risk == "critical"))
+       ] | length) as $independent
+    | ([ $contract.checks[] |
+          select(.name == "approval" and .origin == "configured" and
+                 ($risk == "critical" or
+                  ($control.risk_downgrade == "pending" and $control.downgrade_authority == "approval")))
+       ] | length) as $approval
+    | ($ordinary + $independent + $approval)
+  ')
+
+  if [ -n "$explicit" ]; then
+    seconds="$explicit"
+    source=explicit
+  elif [ -n "$per_check" ]; then
+    overhead=$(completion_legacy_overhead_seconds)
+    seconds=$((stage_count * per_check + overhead))
+    source="legacy-derived"
+  elif [ "$context" = host ]; then
+    seconds=$(completion_legacy_stop_budget_seconds)
+    source="legacy-stop-compatibility"
+  else
+    seconds=null
+    source="legacy-unbounded"
+    bounded=false
+  fi
+
+  jq -cn --arg source "$source" --argjson bounded "$bounded" \
+    --arg seconds "$seconds" --arg per_check "$per_check" \
+    --argjson stage_count "$stage_count" '
+      {
+        valid:true,
+        source:$source,
+        bounded:$bounded,
+        seconds:(if $seconds == "null" then null else ($seconds | tonumber) end),
+        per_check_seconds:(if $per_check == "" then null else ($per_check | tonumber) end),
+        potential_subprocesses:$stage_count
+      }
+    '
+}
+
+completion_evaluation_context_json() {
+  local scope="${1:-worktree}" execution_context="${2:-standalone}"
+  local contract control budget
+  contract=$(effective_verification_contract_json "$scope") || return 1
+  control=$(effective_control_requirements_json "$scope" "$contract") || return 1
+  budget=$(completion_budget_json "$contract" "$control" "$execution_context") || return 1
+  jq -cn --arg scope "$scope" --arg context "$execution_context" \
+    --argjson contract "$contract" --argjson control "$control" --argjson budget "$budget" \
+    '{scope:$scope,execution_context:$context,contract:$contract,control:$control,budget:$budget}'
+}
+
+completion_total_timeout_result_json() {
+  local stage="$1" check="${2:-completion}" pending="${3:-[]}" base total
+  total=${AGENT_MD_COMPLETION_TOTAL_SECONDS:-0}
+  base=$(policy_result_json fail error VERIFY_TOTAL_TIMEOUT \
+    "Completion verification exhausted its ${total}-second total budget while evaluating '${stage}'." \
+    "Make verification faster, or human-review and establish a larger total budget as a new Git baseline; synchronize host hooks and rerun the complete evaluation.")
+  jq -cn --argjson base "$base" --arg stage "$stage" --arg check "$check" \
+    --argjson total "$total" --argjson pending "$pending" '
+      $base + {
+        check:$check,
+        requirement:"required",
+        origin:"completion-deadline",
+        command:"",
+        total_timeout_seconds:$total,
+        timeout_stage:$stage,
+        unchecked_checks:$pending
+      }
+    '
+}
+
+completion_host_timeout_seconds() {
+  local host="$1" root="${2:-$(git rev-parse --show-toplevel 2>/dev/null || pwd)}"
+  local config needle
+  case "$host" in
+    claude)
+      config="$root/.claude/settings.json"
+      needle='.claude/hooks/stop-verify.sh'
+      ;;
+    codex)
+      config="$root/.codex/hooks.json"
+      needle='.codex/hooks/stop.sh'
+      ;;
+    *) return 1 ;;
+  esac
+  [ -f "$config" ] || return 1
+  jq -er --arg needle "$needle" '
+    [.hooks.Stop[]?.hooks[]? |
+      select((.command // "") | contains($needle)) |
+      .timeout] | unique |
+    if length == 1 and (.[0] | type) == "number" and .[0] > 0 and (.[0] | floor) == .[0]
+    then .[0] else empty end
+  ' "$config" 2>/dev/null
+}
+
+completion_host_reservation_seconds() {
+  local host="$1" reserve
+  reserve=$(completion_transport_margin_seconds)
+  if [ "$host" = codex ]; then
+    reserve=$((reserve + $(completion_state_handler_budget_seconds) + $(completion_sensory_handler_budget_seconds)))
+  fi
+  printf '%s\n' "$reserve"
+}
+
+# completion_host_preflight_json <budget-json> <claude|codex> <handler-timeout>
+# Returns a structured blocking result before checks when the finite host
+# transport cannot honor the core evaluation budget.
+completion_host_preflight_json() {
+  local budget="$1" host="$2" handler_timeout="${3:-}" reserve capacity base
+  reserve=$(completion_host_reservation_seconds "$host")
+  if [ -z "$handler_timeout" ]; then
+    base=$(policy_result_json fail error VERIFY_HOST_TIMEOUT_INCOMPATIBLE \
+      "The ${host} Stop handler timeout could not be resolved, so its transport envelope cannot be verified." \
+      "Reinstall or synchronize the coding-agent-control ${host} hook configuration before completion.")
+    jq -cn --argjson result "$base" --arg host "$host" \
+      '{valid:false,host:$host,result:$result}'
+    return 0
+  fi
+  capacity=$((handler_timeout - reserve))
+  if [ "$(printf '%s' "$budget" | jq -r '.bounded')" != true ]; then
+    base=$(policy_result_json fail error VERIFY_HOST_TIMEOUT_INCOMPATIBLE \
+      "The effective completion budget is legacy-unbounded, but the ${host} Stop handler has a finite ${handler_timeout}-second envelope." \
+      "Declare verify.policy.total_timeout_seconds and rerun the installer to synchronize the ${host} hook.")
+    jq -cn --argjson result "$base" --arg host "$host" \
+      --argjson handler "$handler_timeout" --argjson reserve "$reserve" \
+      '{valid:false,host:$host,handler_timeout_seconds:$handler,reserved_seconds:$reserve,result:$result}'
+    return 0
+  fi
+  if [ "$capacity" -lt "$(printf '%s' "$budget" | jq -r '.seconds')" ]; then
+    base=$(policy_result_json fail error VERIFY_HOST_TIMEOUT_INCOMPATIBLE \
+      "The ${host} Stop handler allows ${handler_timeout} seconds, but the core completion budget plus reserved transport time requires more." \
+      "Rerun the coding-agent-control installer after changing timeout policy, or synchronize the owned ${host} Stop handler timeout.")
+    jq -cn --argjson result "$base" --arg host "$host" \
+      --argjson handler "$handler_timeout" --argjson reserve "$reserve" \
+      --argjson required "$(printf '%s' "$budget" | jq '.seconds')" \
+      '{valid:false,host:$host,handler_timeout_seconds:$handler,reserved_seconds:$reserve,
+        completion_budget_seconds:$required,result:$result}'
+    return 0
+  fi
+  jq -cn --arg host "$host" --argjson handler "$handler_timeout" \
+    --argjson reserve "$reserve" --argjson budget "$(printf '%s' "$budget" | jq '.seconds')" \
+    '{valid:true,host:$host,handler_timeout_seconds:$handler,reserved_seconds:$reserve,
+      completion_budget_seconds:$budget}'
+}
+
 risk_result_json() {
   local result_status="$1" severity="$2" code="$3" message="$4"
   local suggestion="$5" risk="$6" current_status="$7" signals="${8:-}"
@@ -1551,6 +2808,10 @@ risk_signals_for_files() {
   local files="$1" scope="${2:-worktree}" file lower signals=""
   while IFS= read -r file; do
     [ -n "$file" ] || continue
+    # Large path sets must yield to the same completion deadline as checks.
+    if [ "$(completion_deadline_remaining_seconds 2>/dev/null || true)" = 0 ]; then
+      return 124
+    fi
     lower=$(printf '%s' "$file" | tr '[:upper:]' '[:lower:]')
     if printf '%s\n' "$lower" | grep -Eq '(^|[/_.-])(auth|authentication|authorization)([/_.-]|$)'; then
       signals="${signals}\nauth"
@@ -1862,7 +3123,7 @@ attestation_current_target_json() {
 
 attestation_execution_json() {
   local anchor="$1" timeout_seconds="${2:-}" path stdout_file stderr_file exit_code
-  local timeout_command="" stdout stderr stdout_lines stderr_lines truncated=false
+  local stdout stderr stdout_lines stderr_lines truncated=false
   path=$(printf '%s' "$anchor" | jq -r '.path')
   stdout_file=$(mktemp "${TMPDIR:-/tmp}/agent-md-attestation-out.XXXXXX") || return 1
   stderr_file=$(mktemp "${TMPDIR:-/tmp}/agent-md-attestation-err.XXXXXX") || {
@@ -1870,16 +3131,12 @@ attestation_execution_json() {
     return 1
   }
   if [ -n "$timeout_seconds" ]; then
-    if command -v timeout >/dev/null 2>&1; then
-      timeout_command=timeout
-    elif command -v gtimeout >/dev/null 2>&1; then
-      timeout_command=gtimeout
-    else
+    if ! completion_timeout_utility_available; then
       rm -f "$stdout_file" "$stderr_file"
       jq -cn '{exit_code:127, stdout:"", stderr:"timeout utility unavailable", truncated:false}'
       return 0
     fi
-    if "$timeout_command" "${timeout_seconds}s" "$path" >"$stdout_file" 2>"$stderr_file"; then
+    if completion_execute_bounded_command "$timeout_seconds" "$path" >"$stdout_file" 2>"$stderr_file"; then
       exit_code=0
     else
       exit_code=$?
@@ -1921,6 +3178,33 @@ attestation_risk_result_json() {
           exit_code:$execution.exit_code,
           evidence:([$execution.stdout, $execution.stderr] | map(select(length > 0)) | join("\n")),
           truncated:$execution.truncated
+        } end
+    '
+}
+
+completion_risk_total_timeout_result_json() {
+  local stage="$1" check="$2" risk="$3" current_status="$4" signals="$5"
+  local pending="${6:-[]}" execution="${7:-null}" base total
+  total=${AGENT_MD_COMPLETION_TOTAL_SECONDS:-0}
+  base=$(risk_result_json fail error VERIFY_TOTAL_TIMEOUT \
+    "Completion verification exhausted its ${total}-second total budget while evaluating '${stage}'." \
+    "Make verification faster, or human-review and establish a larger total budget as a new Git baseline; synchronize host hooks and rerun the complete evaluation." \
+    "$risk" "$current_status" "$signals" "" "$check")
+  jq -cn --argjson base "$base" --arg stage "$stage" --arg check "$check" \
+    --argjson total "$total" --argjson pending "$pending" --argjson execution "$execution" '
+      $base + {
+        check:$check,
+        requirement:"required",
+        origin:"completion-deadline",
+        command:"",
+        total_timeout_seconds:$total,
+        timeout_stage:$stage,
+        unchecked_checks:$pending
+      }
+      + if $execution == null then {} else {
+          exit_code:($execution.exit_code // 124),
+          evidence:([$execution.stdout, $execution.stderr] | map(select(length > 0)) | join("\n")),
+          truncated:($execution.truncated // false)
         } end
     '
 }
@@ -1984,7 +3268,8 @@ risk_attestation_integrity_warning() {
 
 risk_evidence_result() {
   local contract="$1" check="$2" code="$3" risk="$4" current_status="$5"
-  local signals="$6" config="$7" scope="${8:-worktree}" spec origin timeout_seconds
+  local signals="$6" config="$7" scope="${8:-worktree}" pending="${9:-[]}" spec origin timeout_seconds
+  local timeout_info effective_timeout limited_by_total remaining
   local message suggestion anchor anchor_after target execution attestation value expected_commit missing label
   if [ "$check" = independent ]; then label="Independent verification"; else label="Human approval"; fi
   spec=$(printf '%s' "$contract" | jq -c --arg check "$check" '.checks[] | select(.name == $check)')
@@ -2025,13 +3310,33 @@ risk_evidence_result() {
   fi
 
   timeout_seconds=$(printf '%s' "$contract" | jq -r '.timeout_seconds // empty')
-  execution=$(attestation_execution_json "$anchor" "$timeout_seconds") || {
+  timeout_info=$(completion_effective_timeout_json "$timeout_seconds")
+  if [ "$(printf '%s' "$timeout_info" | jq -r '.available')" != true ]; then
+    completion_risk_total_timeout_result_json "provider:${check}" "$check" \
+      "$risk" "$current_status" "$signals" "$pending"
+    return 0
+  fi
+  effective_timeout=$(printf '%s' "$timeout_info" | jq -r '.seconds // empty')
+  limited_by_total=$(printf '%s' "$timeout_info" | jq -r '.limited_by_total')
+  execution=$(attestation_execution_json "$anchor" "$effective_timeout") || {
     message="The '${check}' attestation verifier could not create diagnostic output storage."
     suggestion="Check temporary-directory permissions and rerun verification."
     attestation_risk_result_json fail error RISK_ATTESTATION_INVALID "$message" "$suggestion" \
       "$risk" "$current_status" "$signals" "$check" "$anchor" "$target"
     return 0
   }
+  if [ "$limited_by_total" = true ] \
+    && [ "$(printf '%s' "$execution" | jq -r '.exit_code')" -eq 124 ]; then
+    completion_risk_total_timeout_result_json "provider:${check}" "$check" \
+      "$risk" "$current_status" "$signals" "$pending" "$execution"
+    return 0
+  fi
+  remaining=$(completion_deadline_remaining_seconds 2>/dev/null || true)
+  if [ "$remaining" = 0 ]; then
+    completion_risk_total_timeout_result_json "provider:${check}" "$check" \
+      "$risk" "$current_status" "$signals" "$pending" "$execution"
+    return 0
+  fi
   anchor_after=$(attestation_trust_anchor_json "$config" "$check")
   if [ "$(printf '%s' "$anchor_after" | jq -r '.eligible')" != true ]; then
     message="The verify.${check} trust anchor changed while its attestation was being evaluated."
@@ -2116,14 +3421,15 @@ risk_summary_json() {
     '
 }
 
-# run_risk_contract <verification-summary> [worktree|staged] [completion|advisory]
+# run_risk_contract <verification-summary> [worktree|staged] [completion|advisory] [resolved-control]
 # Risk changes required evidence; it never claims that the implementation is
 # safe. Final requirements apply only to Status: done at a completion boundary.
 run_risk_contract() {
   local verification_summary="$1" scope="${2:-worktree}" boundary="${3:-completion}"
   local progress_content progress_error current_status=absent risk="" relevant_files relevant_status
   local signals="" underrated="" results='[]' result contract config runtime_configured runtime_passed
-  local control control_source control_valid downgrade downgrade_authority control_result
+  local control="${4:-}" control_source control_valid downgrade downgrade_authority control_result
+  local remaining pending_providers signals_status
 
   progress_content=$(state_file_snapshot memory/progress.md "$scope")
   if [ -n "$progress_content" ]; then
@@ -2137,12 +3443,20 @@ run_risk_contract() {
     current_status=$(progress_status_from_content "$progress_content")
   fi
 
-  control=$(effective_control_requirements_json "$scope")
+  [ -n "$control" ] || control=$(effective_control_requirements_json "$scope")
   control_source=$(printf '%s' "$control" | jq -r '.source')
   control_valid=$(printf '%s' "$control" | jq -r '.valid')
   risk=$(printf '%s' "$control" | jq -r '.effective.risk // empty')
   downgrade=$(printf '%s' "$control" | jq -r '.risk_downgrade')
   downgrade_authority=$(printf '%s' "$control" | jq -r '.downgrade_authority')
+
+  remaining=$(completion_deadline_remaining_seconds 2>/dev/null || true)
+  if [ "$remaining" = 0 ]; then
+    result=$(completion_risk_total_timeout_result_json risk risk "$risk" "$current_status" "" '[]')
+    results=$(printf '%s' "$results" | jq -c --argjson result "$result" '. + [$result]')
+    risk_summary_json "$results" "$risk" "$current_status" ""
+    return 0
+  fi
   while IFS= read -r control_result; do
     [ -n "$control_result" ] || continue
     # Verification-contract errors are already present in the verification
@@ -2164,6 +3478,21 @@ run_risk_contract() {
     fi
   fi
   signals=$(risk_signals_for_files "$relevant_files" "$scope")
+  signals_status=$?
+  if [ "$signals_status" -eq 124 ]; then
+    result=$(completion_risk_total_timeout_result_json risk risk "$risk" "$current_status" "" '[]')
+    results=$(printf '%s' "$results" | jq -c --argjson result "$result" '. + [$result]')
+    risk_summary_json "$results" "$risk" "$current_status" ""
+    return 0
+  fi
+
+  remaining=$(completion_deadline_remaining_seconds 2>/dev/null || true)
+  if [ "$remaining" = 0 ]; then
+    result=$(completion_risk_total_timeout_result_json risk risk "$risk" "$current_status" "$signals" '[]')
+    results=$(printf '%s' "$results" | jq -c --argjson result "$result" '. + [$result]')
+    risk_summary_json "$results" "$risk" "$current_status" "$signals"
+    return 0
+  fi
 
   if [ -z "$risk" ]; then
     if [ "$current_status" = "done" ]; then
@@ -2208,7 +3537,7 @@ run_risk_contract() {
       contract=$(printf '%s' "$verification_summary" | jq -c '.contract')
       config=$(toml_path)
       result=$(risk_evidence_result "$contract" approval \
-        CONTROL_RISK_DOWNGRADE_PENDING "$risk" "$current_status" "$signals" "$config" "$scope")
+        CONTROL_RISK_DOWNGRADE_PENDING "$risk" "$current_status" "$signals" "$config" "$scope" '[]')
       results=$(printf '%s' "$results" | jq -c --argjson result "$result" '. + [$result]')
       if [ "$(printf '%s' "$result" | jq -r '.status')" = pass ]; then
         risk=$(printf '%s' "$control" | jq -r '.proposal.risk')
@@ -2323,15 +3652,20 @@ run_risk_contract() {
 
   case "$risk" in
     high|critical)
+      if [ "$risk" = critical ]; then pending_providers='["approval"]'; else pending_providers='[]'; fi
       result=$(risk_evidence_result "$contract" independent \
-        RISK_INDEPENDENT_VERIFICATION_REQUIRED "$risk" "$current_status" "$signals" "$config" "$scope")
+        RISK_INDEPENDENT_VERIFICATION_REQUIRED "$risk" "$current_status" "$signals" "$config" "$scope" "$pending_providers")
       results=$(printf '%s' "$results" | jq -c --argjson result "$result" '. + [$result]')
+      if [ "$(printf '%s' "$result" | jq -r '.code')" = VERIFY_TOTAL_TIMEOUT ]; then
+        risk_summary_json "$results" "$risk" "$current_status" "$signals"
+        return 0
+      fi
       ;;
   esac
 
   if [ "$risk" = critical ]; then
     result=$(risk_evidence_result "$contract" approval \
-      RISK_HUMAN_APPROVAL_REQUIRED "$risk" "$current_status" "$signals" "$config" "$scope")
+      RISK_HUMAN_APPROVAL_REQUIRED "$risk" "$current_status" "$signals" "$config" "$scope" '[]')
     results=$(printf '%s' "$results" | jq -c --argjson result "$result" '. + [$result]')
   fi
 

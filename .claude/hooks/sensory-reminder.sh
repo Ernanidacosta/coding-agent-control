@@ -17,15 +17,18 @@
 #                                            is NOT a verification claim
 #                                            — the prose is the claim.
 #
-# No stop_hook_active bypass. A retry does not manufacture evidence.
-# The only way out is to produce the artifact or establish a reviewed policy
-# baseline that no longer requires it. A same-change flip cannot weaken it.
+# No stop_hook_active bypass for blocks. A retry does not manufacture
+# evidence. The only way out is to produce the artifact or establish a
+# reviewed policy baseline that no longer requires it. A same-change flip
+# cannot weaken it. The flag bounds advisory context only: the reminder and
+# the evidence-found note carry no decision to satisfy, so they are said
+# once per stop cycle rather than on every retry. See the stop-hook input
+# contract in _lib.sh.
 
 # shellcheck source=.claude/hooks/_lib.sh
 . "$(dirname "$0")/_lib.sh"
 
-# Read and discard stdin.
-cat > /dev/null
+HOOK_INPUT=$(cat)
 
 git rev-parse --is-inside-work-tree &>/dev/null || exit 0
 
@@ -49,7 +52,7 @@ if [ "$(printf '%s' "$VISUAL_CONTRACT" | jq -r '.valid')" != true ]; then
     "$(printf '%s' "$VISUAL_CONTRACT" | jq -r '.error')" \
     "Fix the visual policy before claiming completion.")
   REASON=$(policy_human_message "$RESULT")
-  jq -n --arg r "$REASON" '{decision: "block", reason: $r}'
+  emit_stop_block "$REASON"
   exit 0
 fi
 REQUIRED=$(printf '%s' "$VISUAL_CONTRACT" | jq -r '.required')
@@ -59,7 +62,7 @@ FRESH=$(printf '%s' "$VISUAL_CONTRACT" | jq -r '.freshness_seconds')
 if [ "$REQUIRED" = "true" ]; then
   if visual_evidence_ok "$ART_DIR" "$FRESH"; then
     MSG="Visual validation: structured evidence found in ${ART_DIR} (markdown note + referenced image, both fresh). Confirm to the user which UI diff the evidence validates."
-    jq -n --arg m "$MSG" '{hookSpecificOutput: {hookEventName: "Stop", additionalContext: $m}}'
+    emit_stop_advisory "$HOOK_INPUT" "$MSG"
     exit 0
   fi
 
@@ -68,7 +71,7 @@ if [ "$REQUIRED" = "true" ]; then
     "Visual validation is required for ${UI_CHANGED} changed UI file(s), but structured evidence is missing from ${ART_DIR}." \
     "Capture a fresh screenshot and add a fresh markdown note with Changed files, Route or URL, Viewport, Artifact, and Observed result; a screenshot alone is not verification.")
   REASON=$(policy_human_message "$RESULT")
-  jq -n --arg r "$REASON" '{decision: "block", reason: $r}'
+  emit_stop_block "$REASON"
   exit 0
 fi
 
@@ -78,5 +81,5 @@ RESULT=$(policy_result_json \
   "UI files changed (${UI_CHANGED}) without required visual evidence." \
   "Build and render the change, capture a screenshot, and record Changed files, Route or URL, Viewport, Artifact, and Observed result in a markdown note. Set [visual] required = true to make this blocking.")
 MSG=$(policy_human_message "$RESULT")
-jq -n --arg m "$MSG" '{hookSpecificOutput: {hookEventName: "Stop", additionalContext: $m}}'
+emit_stop_advisory "$HOOK_INPUT" "$MSG"
 exit 0

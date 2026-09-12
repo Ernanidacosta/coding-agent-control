@@ -93,8 +93,22 @@ EOF
   echo "$out" | jq -e 'has("decision") | not' > /dev/null
 }
 
-@test "still runs when stop_hook_active=true — no retry escape" {
+@test "still blocks when stop_hook_active=true — no retry escape" {
+  cat > agent-md.toml <<EOF
+[visual]
+required = true
+artifacts_dir = ".agent/visual"
+freshness_seconds = 3600
+EOF
   echo "<div/>" > App.tsx
   out=$(run_hook sensory-reminder.sh '{"stop_hook_active":true}')
-  echo "$out" | jq -e '.hookSpecificOutput.additionalContext' > /dev/null
+  echo "$out" | jq -e '.decision == "block"' > /dev/null
+}
+
+@test "advisory reminder goes quiet when stop_hook_active=true" {
+  # A retry cannot act on a reminder it already received, so repeating it
+  # would only restart the agent. See tests/stop-hook-active.bats.
+  echo "<div/>" > App.tsx
+  out=$(run_hook sensory-reminder.sh '{"stop_hook_active":true}')
+  [ -z "$out" ]
 }

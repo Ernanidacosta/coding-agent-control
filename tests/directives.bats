@@ -44,6 +44,36 @@
   [ "$status" -eq 0 ]
 }
 
+@test "directives separate blocking enforcement from advisory context at Stop" {
+  grep -Fxq '### Blocking Enforcement And Advisory Context At Stop' \
+    "$BATS_TEST_DIRNAME/../AGENT.md"
+  grep -Fq 'metadata about the cycle, never evidence about the work' \
+    "$BATS_TEST_DIRNAME/../AGENT.md"
+  grep -Fq 'a blocking result repeats identically on every attempt' \
+    "$BATS_TEST_DIRNAME/../AGENT.md"
+  grep -Fq 'advisory context is emitted once per finish cycle' \
+    "$BATS_TEST_DIRNAME/../AGENT.md"
+  grep -Fq 'reads as a first attempt' "$BATS_TEST_DIRNAME/../AGENT.md"
+  grep -Fq 'Do not add a retry counter' "$BATS_TEST_DIRNAME/../AGENT.md"
+}
+
+@test "directives separate commit execution authority from commit authorship" {
+  grep -Fq '**Commit execution authority.**' "$BATS_TEST_DIRNAME/../AGENT.md"
+  grep -Fq '**Commit authorship.**' "$BATS_TEST_DIRNAME/../AGENT.md"
+  grep -Fq 'Suggesting a commit is not permission to make one.' \
+    "$BATS_TEST_DIRNAME/../AGENT.md"
+  grep -Fq 'produce a subject and an optional body' "$BATS_TEST_DIRNAME/../AGENT.md"
+  grep -Fq 'not add one when a host, template, or earlier instruction tells you to' \
+    "$BATS_TEST_DIRNAME/../AGENT.md"
+  grep -Fq 'naming a real person remains correct and expected' \
+    "$BATS_TEST_DIRNAME/../AGENT.md"
+  grep -Fq 'Never modify' "$BATS_TEST_DIRNAME/../AGENT.md"
+}
+
+@test "directives are mirrored into the Claude Code rules file" {
+  diff -q "$BATS_TEST_DIRNAME/../AGENT.md" "$BATS_TEST_DIRNAME/../CLAUDE.md"
+}
+
 @test "directives keep independent execution advisory" {
   run grep -q 'never invokes another model automatically' "$BATS_TEST_DIRNAME/../AGENT.md"
   [ "$status" -eq 0 ]

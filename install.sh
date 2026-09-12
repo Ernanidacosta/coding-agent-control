@@ -20,14 +20,18 @@
 #
 # Defaults (safe by design):
 #   --agent=all
-#   --no-overwrite OFF — we WILL replace AGENT.md etc., but always back
-#     up the old copy to *.bak first.
+#   --no-overwrite OFF — we WILL replace AGENT.md etc., backing up the old
+#     copy to *.bak first. A file that already matches is left untouched, so
+#     reinstalling does not pile up redundant backups.
+#   The source package is the directory of this script when it is run from a
+#     real file that carries the package markers; piped execution (curl|bash)
+#     always fetches the official archive instead of reusing the target.
 #   Claude and Codex hook configs are merged by default. Third-party
 #     handlers stay in place; coding-agent-control handlers are refreshed without
 #     duplication. Explicit skip and replace modes remain available.
 #   memory/ files are never overwritten (user state).
-#   .githooks/pre-commit is installed but NOT activated on curl|bash.
-#     You get a printed command to activate it manually.
+#   .githooks/ (pre-commit + commit-msg) is installed but NOT activated on
+#     curl|bash. You get a printed command to activate it manually.
 #   .agent/ is auto-added to .gitignore (hook scratch + visual evidence).
 
 set -e
@@ -81,26 +85,103 @@ for A in $(echo "$AGENT" | tr ',' ' '); do
   fi
 done
 
-# Locate source
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd 2>/dev/null)"
+# --- Locate source package ---
+# An already-installed project also carries AGENT.md, so the presence of
+# AGENT.md never proves a directory is the installer's source package. Identity
+# is decided by the files only the package ships, and the package directory is
+# adopted only when this script is running from a real file inside it. Piped
+# execution (curl | bash) has no source file, so it always fetches the archive
+# instead of mistaking the target project for the package.
+SOURCE_ARCHIVE_URL="${CODING_AGENT_CONTROL_SOURCE_URL:-https://github.com/Ernanidacosta/coding-agent-control/archive/main.tar.gz}"
+SOURCE_ARCHIVE_FILE="${CODING_AGENT_CONTROL_SOURCE_ARCHIVE:-}"
+PACKAGE_MARKERS="install.sh AGENT.md .claude/hooks/_lib.sh .agent-md/bin/doctor.sh agent-md.toml.example"
 
-if [ ! -f "$SCRIPT_DIR/AGENT.md" ]; then
-  # Running via curl pipe — download the package
-  echo "▸ Downloading coding-agent-control..."
-  TMP=$(mktemp -d)
-  curl -fsSL https://github.com/Ernanidacosta/coding-agent-control/archive/main.tar.gz | tar -xz -C "$TMP"
-  if [ -d "$TMP/coding-agent-control-main" ]; then
-    SCRIPT_DIR="$TMP/coding-agent-control-main"
+is_source_package() {
+  local dir="$1" marker
+  [ -n "$dir" ] && [ -d "$dir" ] || return 1
+  for marker in $PACKAGE_MARKERS; do
+    [ -f "$dir/$marker" ] || return 1
+  done
+  return 0
+}
+
+INSTALL_TMPDIR=""
+cleanup_install_tmpdir() {
+  # Only ever removes a directory this script created with mktemp -d, and
+  # leaves the caller's exit status untouched.
+  if [ -n "$INSTALL_TMPDIR" ] && [ -d "$INSTALL_TMPDIR" ]; then
+    rm -rf "$INSTALL_TMPDIR"
+  fi
+}
+trap cleanup_install_tmpdir EXIT
+
+fetch_source_package() {
+  # Assigns SCRIPT_DIR directly. Returning the path on stdout would mix it with
+  # the progress lines printed here.
+  local archive extracted dir
+  command -v tar >/dev/null 2>&1 || { echo "Error: tar is required to unpack the source package"; exit 1; }
+  INSTALL_TMPDIR=$(mktemp -d) || { echo "Error: cannot create a temporary directory for the source package"; exit 1; }
+  if [ -n "$SOURCE_ARCHIVE_FILE" ]; then
+    [ -f "$SOURCE_ARCHIVE_FILE" ] || { echo "Error: source archive not found: $SOURCE_ARCHIVE_FILE"; exit 1; }
+    echo "▸ Unpacking coding-agent-control source archive..."
+    archive="$SOURCE_ARCHIVE_FILE"
+  else
+    command -v curl >/dev/null 2>&1 || { echo "Error: curl is required to download the source package"; exit 1; }
+    echo "▸ Downloading coding-agent-control..."
+    archive="$INSTALL_TMPDIR/package.tar.gz"
+    # Download to a file rather than piping into tar: a piped curl failure is
+    # hidden behind tar's exit status.
+    curl -fsSL "$SOURCE_ARCHIVE_URL" -o "$archive" \
+      || { echo "Error: cannot download or unpack $SOURCE_ARCHIVE_URL"; exit 1; }
+  fi
+  tar -xzf "$archive" -C "$INSTALL_TMPDIR" \
+    || { echo "Error: cannot unpack the coding-agent-control source archive"; exit 1; }
+  extracted=""
+  if is_source_package "$INSTALL_TMPDIR"; then
+    extracted="$INSTALL_TMPDIR"
+  else
+    for dir in "$INSTALL_TMPDIR"/*; do
+      if is_source_package "$dir"; then extracted="$dir"; break; fi
+    done
+  fi
+  [ -n "$extracted" ] || { echo "Error: the fetched archive is not a complete coding-agent-control package"; exit 1; }
+  SCRIPT_DIR="$extracted"
+}
+
+SCRIPT_DIR=""
+INSTALL_SOURCE_MODE="package"
+if [ -n "${BASH_SOURCE[0]:-}" ] && [ -f "${BASH_SOURCE[0]}" ]; then
+  if SCRIPT_CANDIDATE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd 2>/dev/null)"; then
+    :
+  else
+    SCRIPT_CANDIDATE=""
+  fi
+  if is_source_package "$SCRIPT_CANDIDATE"; then
+    SCRIPT_DIR="$SCRIPT_CANDIDATE"
   fi
 fi
 
-if [ ! -f "$SCRIPT_DIR/AGENT.md" ]; then
-  echo "Error: cannot locate AGENT.md in $SCRIPT_DIR"
+if [ -z "$SCRIPT_DIR" ]; then
+  INSTALL_SOURCE_MODE="archive"
+  fetch_source_package
+fi
+
+if ! is_source_package "$SCRIPT_DIR"; then
+  echo "Error: cannot locate a complete coding-agent-control source package in $SCRIPT_DIR"
   exit 1
 fi
 
 if ! command -v jq &>/dev/null; then
   echo "  ! jq not found. Hooks require jq for JSON parsing; install jq before relying on enforcement."
+fi
+
+# Shared timing constants keep installer materialization aligned with runtime
+# preflight. Sourcing the library defines functions only; it performs no hook
+# or verification action.
+if [ -f "$SCRIPT_DIR/.claude/hooks/_lib.sh" ]; then
+  # shellcheck source=.claude/hooks/_lib.sh
+  # shellcheck disable=SC1091
+  . "$SCRIPT_DIR/.claude/hooks/_lib.sh"
 fi
 
 # Detect curl|bash (stdin not a tty). We use this to keep defaults safe.
@@ -115,6 +196,11 @@ else
 fi
 
 echo "▸ Installing coding-agent-control directives → $TARGET"
+if [ "$INSTALL_SOURCE_MODE" = archive ]; then
+  echo "▸ Source: fetched package archive"
+else
+  echo "▸ Source: $SCRIPT_DIR"
+fi
 echo "▸ Target agents: $AGENT_LIST"
 [ "$DRY_RUN" -eq 1 ] && echo "▸ DRY RUN — no files will be changed"
 echo ""
@@ -141,10 +227,35 @@ backup_if_exists() {
   fi
 }
 
+# Same-file guard. `-ef` compares device and inode, so it recognizes an
+# identical file reached through a different path, a symlink, or a hard link.
+# Backing up a destination that IS the source would move the source away and
+# leave nothing to copy, so every writer consults this first.
+same_file() {
+  [ -e "$1" ] && [ -e "$2" ] && [ "$1" -ef "$2" ]
+}
+
+report_same_file() {
+  echo "  · already current  $1 (source is the target file)"
+}
+
 copy_file() {
   # src, dst, label
   local src="$1" dst="$2" label="$3"
   skip_existing "$dst" && return 0
+  if same_file "$src" "$dst"; then
+    report_same_file "$label"
+    return 0
+  fi
+  if [ ! -f "$src" ]; then
+    echo "Error: installer source file is missing: $src"
+    exit 1
+  fi
+  # Reinstalling an unchanged file must not manufacture another backup.
+  if [ -f "$dst" ] && cmp -s "$src" "$dst"; then
+    echo "  · already current  $label"
+    return 0
+  fi
   if [ "$DRY_RUN" -eq 1 ]; then
     echo "  → would write     $label"
     return 0
@@ -156,18 +267,31 @@ copy_file() {
 
 copy_with_agent_body() {
   # dst, label, header
-  local dst="$1" label="$2" header="$3"
+  local dst="$1" label="$2" header="$3" body="$SCRIPT_DIR/AGENT.md" staged
   skip_existing "$dst" && return 0
+  if same_file "$body" "$dst"; then
+    report_same_file "$label"
+    return 0
+  fi
   if [ "$DRY_RUN" -eq 1 ]; then
     echo "  → would write     $label"
     return 0
   fi
   mkdir -p "$(dirname "$dst")"
-  backup_if_exists "$dst"
+  # Compose into a temporary file first: a redirection straight onto $dst would
+  # truncate it before AGENT.md is read if the two ever resolved to one file.
+  staged=$(mktemp)
   {
     printf '%s\n\n' "$header"
-    cat "$SCRIPT_DIR/AGENT.md"
-  } > "$dst"
+    cat "$body"
+  } > "$staged"
+  if [ -f "$dst" ] && cmp -s "$staged" "$dst"; then
+    rm -f "$staged"
+    echo "  · already current  $label"
+    return 0
+  fi
+  backup_if_exists "$dst"
+  mv "$staged" "$dst"
   echo "  ✓ $label"
 }
 
@@ -177,6 +301,11 @@ merge_hook_config() {
   # refreshed; every other top-level key, event, group, and handler is
   # preserved byte-for-byte at the JSON-value level.
   local src="$1" dst="$2" label="$3" mode="$4"
+
+  if same_file "$src" "$dst"; then
+    report_same_file "$label"
+    return 0
+  fi
 
   if [ ! -f "$dst" ]; then
     if [ "$DRY_RUN" -eq 1 ]; then
@@ -248,9 +377,14 @@ merge_hook_config() {
             )
           )
         ' "$dst" "$src" > "$merged" 2>/dev/null; then
-          backup_if_exists "$dst"
-          mv "$merged" "$dst"
-          echo "  ✓ $label (merged; third-party hooks preserved)"
+          if cmp -s "$merged" "$dst"; then
+            rm -f "$merged"
+            echo "  · already current  $label"
+          else
+            backup_if_exists "$dst"
+            mv "$merged" "$dst"
+            echo "  ✓ $label (merged; third-party hooks preserved)"
+          fi
         else
           rm -f "$merged"
           echo "  ! merge failed for $label — existing file left unchanged"
@@ -258,6 +392,58 @@ merge_hook_config() {
       fi
       ;;
   esac
+}
+
+INSTALL_COMPLETION_CONTEXT=""
+materialize_stop_timeout() {
+  # dst, host, mode. Resolve the target once with the same effective core
+  # resolver used at runtime, including legacy derived/compatibility budgets.
+  local dst="$1" host="$2" mode="$3" total reserve desired needle updated
+  [ "$mode" != skip ] || return 0
+  [ "$NO_OVERWRITE" -eq 0 ] || return 0
+  command -v jq >/dev/null 2>&1 || return 0
+  if ! command -v completion_evaluation_context_json >/dev/null 2>&1; then
+    echo "  ! shared budget resolver unavailable — ${host} Stop timeout left unchanged"
+    return 0
+  fi
+  if [ -z "$INSTALL_COMPLETION_CONTEXT" ]; then
+    INSTALL_COMPLETION_CONTEXT=$(
+      cd "$TARGET" || exit 1
+      AGENT_MD_TOML=agent-md.toml completion_evaluation_context_json worktree host
+    ) || return 0
+  fi
+  if ! printf '%s' "$INSTALL_COMPLETION_CONTEXT" | jq -e \
+    '.contract.valid and .control.valid and .budget.valid and .budget.bounded' >/dev/null; then
+    echo "  ! completion budget is invalid — runtime verification remains fail-closed"
+    return 0
+  fi
+  total=$(printf '%s' "$INSTALL_COMPLETION_CONTEXT" | jq -r '.budget.seconds')
+  reserve=$(completion_host_reservation_seconds "$host")
+  desired=$((total + reserve))
+  case "$host" in
+    claude) needle='.claude/hooks/stop-verify.sh' ;;
+    codex) needle='.codex/hooks/stop.sh' ;;
+    *) return 1 ;;
+  esac
+  if [ "$DRY_RUN" -eq 1 ]; then
+    echo "  → would set       ${host} Stop timeout to ${desired}s (${total}s core + ${reserve}s reserved)"
+    return 0
+  fi
+  [ -f "$dst" ] || return 0
+  updated=$(mktemp)
+  if jq --arg needle "$needle" --argjson desired "$desired" '
+    .hooks.Stop |= map(
+      .hooks |= map(
+        if ((.command // "") | contains($needle)) then .timeout = $desired else . end
+      )
+    )
+  ' "$dst" > "$updated"; then
+    mv "$updated" "$dst"
+    echo "  ✓ ${host} Stop timeout (${desired}s = ${total}s core + ${reserve}s reserved)"
+  else
+    rm -f "$updated"
+    echo "  ! could not materialize ${host} Stop timeout — runtime preflight will fail closed"
+  fi
 }
 
 # --- Master file ---
@@ -278,6 +464,7 @@ for TOOL in $AGENT_LIST; do
         mkdir -p "$TARGET/.codex/hooks" "$TARGET/.agents/skills"
       fi
       merge_hook_config "$SCRIPT_DIR/.codex/hooks.json" "$TARGET/.codex/hooks.json" ".codex/hooks.json" "$CODEX_HOOKS"
+      materialize_stop_timeout "$TARGET/.codex/hooks.json" codex "$CODEX_HOOKS"
       for H in "$SCRIPT_DIR/.codex/hooks/"*.sh; do
         [ -f "$H" ] || continue
         copy_file "$H" "$TARGET/.codex/hooks/$(basename "$H")" ".codex/hooks/$(basename "$H")"
@@ -329,6 +516,7 @@ if echo " $AGENT_LIST " | grep -q " claude "; then
   SETTINGS_DST="$TARGET/.claude/settings.json"
   if [ -f "$SETTINGS_SRC" ]; then
     merge_hook_config "$SETTINGS_SRC" "$SETTINGS_DST" ".claude/settings.json" "$CLAUDE_SETTINGS"
+    materialize_stop_timeout "$SETTINGS_DST" claude "$CLAUDE_SETTINGS"
   fi
 
   if [ "$DRY_RUN" -eq 0 ]; then
@@ -354,7 +542,8 @@ fi
 if [ "$DRY_RUN" -eq 0 ]; then
   mkdir -p "$TARGET/memory"
   for F in agents.md plan.md progress.md verify.md gotchas.md; do
-    if [ ! -f "$TARGET/memory/$F" ] && [ -f "$MEMORY_TEMPLATE_DIR/$F" ]; then
+    if [ ! -f "$TARGET/memory/$F" ] && [ -f "$MEMORY_TEMPLATE_DIR/$F" ] \
+      && ! same_file "$MEMORY_TEMPLATE_DIR/$F" "$TARGET/memory/$F"; then
       cp "$MEMORY_TEMPLATE_DIR/$F" "$TARGET/memory/$F"
     fi
   done
@@ -405,8 +594,12 @@ if [ -f "$SCRIPT_DIR/agent-md.toml.example" ]; then
   if [ "$DRY_RUN" -eq 1 ]; then
     echo "  → would write     agent-md.toml.example"
   elif [ ! -f "$TARGET/agent-md.toml" ]; then
-    cp "$SCRIPT_DIR/agent-md.toml.example" "$TARGET/agent-md.toml.example"
-    echo "  ✓ agent-md.toml.example  (copy to agent-md.toml to declare verify commands)"
+    if same_file "$SCRIPT_DIR/agent-md.toml.example" "$TARGET/agent-md.toml.example"; then
+      report_same_file "agent-md.toml.example"
+    else
+      cp "$SCRIPT_DIR/agent-md.toml.example" "$TARGET/agent-md.toml.example"
+      echo "  ✓ agent-md.toml.example  (copy to agent-md.toml to declare verify commands)"
+    fi
   else
     echo "  · agent-md.toml already present — not touched"
   fi
@@ -456,16 +649,18 @@ if [ "$IN_GIT" -eq 1 ]; then
       chmod +x "$TARGET/.claude/hooks/_lib.sh"
     fi
     mkdir -p "$TARGET/.githooks"
-    copy_file "$SCRIPT_DIR/.githooks/pre-commit" "$TARGET/.githooks/pre-commit" ".githooks/pre-commit"
-    chmod +x "$TARGET/.githooks/pre-commit"
+    for H in pre-commit commit-msg; do
+      copy_file "$SCRIPT_DIR/.githooks/$H" "$TARGET/.githooks/$H" ".githooks/$H"
+      chmod +x "$TARGET/.githooks/$H"
+    done
   fi
 
   if [ "$GITHOOKS" = "ask" ]; then
     if [ "$NON_INTERACTIVE" -eq 1 ]; then
-      # Safe default for curl|bash: do NOT auto-activate a pre-commit hook.
+      # Safe default for curl|bash: do NOT auto-activate repository git hooks.
       GITHOOKS="no"
     else
-      printf "▸ Activate .githooks/pre-commit now (runs on every git commit)? [y/N] "
+      printf "▸ Activate .githooks/ now (pre-commit + commit-msg, run on every git commit)? [y/N] "
       read -r REPLY
       REPLY="${REPLY:-N}"
       case "$REPLY" in Y|y|yes|Yes) GITHOOKS="yes" ;; *) GITHOOKS="no" ;; esac
