@@ -187,6 +187,7 @@ test = "pytest"
 [verify.policy]
 required = ["lint", "test"]
 timeout_seconds = 300
+total_timeout_seconds = 420 # exemplo; escolha o budget de cada projeto
 ```
 
 Execute o contrato completo com:

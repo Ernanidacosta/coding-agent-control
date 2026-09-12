@@ -728,6 +728,7 @@ lint_file = "npx --no-install eslint {file}"
 [verify.policy]
 required = ["lint", "test", "smoke"]
 timeout_seconds = 300
+total_timeout_seconds = 600
 
 [verify.attestation]
 independent_files = ["scripts/ci-attestation.conf", ".github/workflows/ci.yml"]
@@ -745,6 +746,16 @@ ignore_globs = ["docs/**", ".ai-memory.toml", ".gitignore"]
 [integrations.icm]
 enabled = true
 ```
+
+`timeout_seconds` limits one check/provider. `total_timeout_seconds` is a
+project-specific core deadline for the complete completion evaluation,
+including policy/control resolution, ordinary checks, Risk, applicable
+independent/approval providers, and the structured decision. The example value
+is illustrative, not a universal default. The effective runner gives each
+subprocess the smaller of its per-check limit and the remaining total budget;
+total exhaustion blocks even during an optional check because the evaluation is
+incomplete. Rerun the installer after changing the total so Claude/Codex
+transport envelopes remain synchronized.
 
 Inside one established policy snapshot, configured state lists replace their
 respective defaults and ignore globs win over source globs. During a policy

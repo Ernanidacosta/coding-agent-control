@@ -118,6 +118,20 @@ EOF
   echo "$out" | jq -e '.reason | test("ERROR CONFIG_INVALID")' >/dev/null
 }
 
+@test "invalid total completion timeout is rejected fail-closed" {
+  cat > agent-md.toml <<'EOF'
+[verify]
+test = "true"
+
+[verify.policy]
+required = ["test"]
+total_timeout_seconds = 0
+EOF
+  out=$(run_hook stop-verify.sh '{"stop_hook_active":false}')
+  echo "$out" | jq -e '.decision == "block"' >/dev/null
+  echo "$out" | jq -e '.reason | test("CONFIG_INVALID") and test("total_timeout_seconds")' >/dev/null
+}
+
 @test "verification result codes and evidence fields are stable" {
   write_contract "printf evidence; exit 1" '"test"'
   summary=$(bash -c '. .claude/hooks/_lib.sh; run_verification_contract')

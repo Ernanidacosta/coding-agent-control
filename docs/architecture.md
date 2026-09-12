@@ -122,6 +122,36 @@ bind check results to canonical worktree/control/contract identity, but only an
 authority-separated issuer can prove that those checks executed. Until such an
 issuer is configured, Stop continues to run the complete contract.
 
+## Completion deadline and host envelopes
+
+Full fallback verification has an internal core deadline independent of host
+transport limits. `verify.policy.timeout_seconds` bounds one check/provider;
+`verify.policy.total_timeout_seconds` bounds the entire completion evaluation,
+starting before contract/control resolution and ending only after the structured
+decision exists. Each subprocess receives `min(per-check, remaining-total)`.
+Total exhaustion produces blocking `VERIFY_TOTAL_TIMEOUT`, records the stage and
+still-unchecked checks when available, and never converts an incomplete optional
+check into an advisory result.
+
+Bounded commands are forcibly terminated at the deadline, even if they ignore
+SIGTERM. The runner preserves canonical timeout status 124; commands must not
+depend on completing cleanup after their execution budget has expired.
+
+Baseline and proposal totals merge by taking the lower explicit value. Removing
+or increasing a reviewed total in the same proposal therefore cannot enlarge
+the effective completion window. A legacy per-check policy derives a total from
+all ordinary checks and Risk-applicable configured providers plus deterministic
+core overhead. A legacy standalone execution with no finite check limit remains
+explicitly unbounded; its Stop compatibility path retains the historical finite
+budget rather than depending on the host to kill it without a policy result.
+
+Claude gives verification its own handler envelope. Codex has one serial wrapper,
+so its envelope also reserves bounded state and sensory execution. Both adapters
+must leave finalization margin beyond the core budget and validate compatibility
+before checks start. Adapter limits never decide whether verification passes.
+They only ensure the host remains alive long enough for the core to return its
+decision. This budget model does not consume or trust Phase A receipts.
+
 ## Enforcement Vocabulary
 
 - **Enforced** — a deterministic mechanism can block the relevant action or

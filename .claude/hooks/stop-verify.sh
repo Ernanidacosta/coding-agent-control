@@ -34,9 +34,19 @@
 
 HOOK_INPUT=$(cat)
 
-VERIFY_SUMMARY=$(run_effective_verification_contract worktree)
-RISK_SUMMARY=$(run_risk_contract "$VERIFY_SUMMARY" worktree completion)
-SUMMARY=$(combine_policy_summaries "$VERIFY_SUMMARY" "$RISK_SUMMARY")
+completion_evaluation_begin
+CONTEXT=$(completion_evaluation_context_json worktree host)
+HOST=${CODING_AGENT_CONTROL_HOST:-claude}
+HOST_TIMEOUT=$(completion_host_timeout_seconds "$HOST" 2>/dev/null || true)
+HOST_PREFLIGHT=$(completion_host_preflight_json \
+  "$(printf '%s' "$CONTEXT" | jq -c '.budget')" "$HOST" "$HOST_TIMEOUT")
+if [ "$(printf '%s' "$HOST_PREFLIGHT" | jq -r '.valid')" != true ]; then
+  emit_stop_block "$(policy_human_message "$(printf '%s' "$HOST_PREFLIGHT" | jq -c '.result')")"
+  exit 0
+fi
+
+EVALUATION=$(run_completion_evaluation "$CONTEXT" completion)
+SUMMARY=$(printf '%s' "$EVALUATION" | jq -c '.summary')
 STATUS=$(printf '%s' "$SUMMARY" | jq -r '.status')
 
 if [ "$STATUS" = fail ]; then

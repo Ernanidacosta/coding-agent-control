@@ -49,9 +49,12 @@ else
 fi
 
 if [ "$SHARED_STATE_AVAILABLE" -eq 1 ]; then
-  BASE_VERIFY_SUMMARY=$(run_effective_verification_contract staged)
-  RISK_SUMMARY=$(run_risk_contract "$BASE_VERIFY_SUMMARY" staged advisory)
-  VERIFY_SUMMARY=$(combine_policy_summaries "$BASE_VERIFY_SUMMARY" "$RISK_SUMMARY")
+  completion_evaluation_begin
+  COMPLETION_CONTEXT=$(completion_evaluation_context_json staged standalone)
+  log "completion budget: $(printf '%s' "$COMPLETION_CONTEXT" | jq -r '.budget.seconds // "unbounded"') ($(printf '%s' "$COMPLETION_CONTEXT" | jq -r '.budget.source'))"
+  COMPLETION_EVALUATION=$(run_completion_evaluation "$COMPLETION_CONTEXT" advisory)
+  BASE_VERIFY_SUMMARY=$(printf '%s' "$COMPLETION_EVALUATION" | jq -c '.verification')
+  VERIFY_SUMMARY=$(printf '%s' "$COMPLETION_EVALUATION" | jq -c '.summary')
   VERIFY_STATUS=$(printf '%s' "$VERIFY_SUMMARY" | jq -r '.status')
   CHECKS=$(printf '%s' "$BASE_VERIFY_SUMMARY" | jq '[.results[] | select(.check != "contract")] | length')
   while IFS= read -r VERIFY_RESULT; do

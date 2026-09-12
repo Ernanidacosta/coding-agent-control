@@ -103,6 +103,14 @@ if ! command -v jq &>/dev/null; then
   echo "  ! jq not found. Hooks require jq for JSON parsing; install jq before relying on enforcement."
 fi
 
+# Shared timing constants keep installer materialization aligned with runtime
+# preflight. Sourcing the library defines functions only; it performs no hook
+# or verification action.
+if [ -f "$SCRIPT_DIR/.claude/hooks/_lib.sh" ]; then
+  # shellcheck source=.claude/hooks/_lib.sh
+  . "$SCRIPT_DIR/.claude/hooks/_lib.sh"
+fi
+
 # Detect curl|bash (stdin not a tty). We use this to keep defaults safe.
 NON_INTERACTIVE=0
 [ ! -t 0 ] && NON_INTERACTIVE=1
@@ -260,6 +268,54 @@ merge_hook_config() {
   esac
 }
 
+INSTALL_COMPLETION_CONTEXT=""
+materialize_stop_timeout() {
+  # dst, host, mode. Resolve the target once with the same effective core
+  # resolver used at runtime, including legacy derived/compatibility budgets.
+  local dst="$1" host="$2" mode="$3" total reserve desired needle updated
+  [ "$mode" != skip ] || return 0
+  [ "$NO_OVERWRITE" -eq 0 ] || return 0
+  command -v jq >/dev/null 2>&1 || return 0
+  if [ -z "$INSTALL_COMPLETION_CONTEXT" ]; then
+    INSTALL_COMPLETION_CONTEXT=$(
+      cd "$TARGET" || exit 1
+      AGENT_MD_TOML=agent-md.toml completion_evaluation_context_json worktree host
+    ) || return 0
+  fi
+  if ! printf '%s' "$INSTALL_COMPLETION_CONTEXT" | jq -e \
+    '.contract.valid and .control.valid and .budget.valid and .budget.bounded' >/dev/null; then
+    echo "  ! completion budget is invalid — runtime verification remains fail-closed"
+    return 0
+  fi
+  total=$(printf '%s' "$INSTALL_COMPLETION_CONTEXT" | jq -r '.budget.seconds')
+  reserve=$(completion_host_reservation_seconds "$host")
+  desired=$((total + reserve))
+  case "$host" in
+    claude) needle='.claude/hooks/stop-verify.sh' ;;
+    codex) needle='.codex/hooks/stop.sh' ;;
+    *) return 1 ;;
+  esac
+  if [ "$DRY_RUN" -eq 1 ]; then
+    echo "  → would set       ${host} Stop timeout to ${desired}s (${total}s core + ${reserve}s reserved)"
+    return 0
+  fi
+  [ -f "$dst" ] || return 0
+  updated=$(mktemp)
+  if jq --arg needle "$needle" --argjson desired "$desired" '
+    .hooks.Stop |= map(
+      .hooks |= map(
+        if ((.command // "") | contains($needle)) then .timeout = $desired else . end
+      )
+    )
+  ' "$dst" > "$updated"; then
+    mv "$updated" "$dst"
+    echo "  ✓ ${host} Stop timeout (${desired}s = ${total}s core + ${reserve}s reserved)"
+  else
+    rm -f "$updated"
+    echo "  ! could not materialize ${host} Stop timeout — runtime preflight will fail closed"
+  fi
+}
+
 # --- Master file ---
 copy_file "$SCRIPT_DIR/AGENT.md" "$TARGET/AGENT.md" "AGENT.md"
 
@@ -278,6 +334,7 @@ for TOOL in $AGENT_LIST; do
         mkdir -p "$TARGET/.codex/hooks" "$TARGET/.agents/skills"
       fi
       merge_hook_config "$SCRIPT_DIR/.codex/hooks.json" "$TARGET/.codex/hooks.json" ".codex/hooks.json" "$CODEX_HOOKS"
+      materialize_stop_timeout "$TARGET/.codex/hooks.json" codex "$CODEX_HOOKS"
       for H in "$SCRIPT_DIR/.codex/hooks/"*.sh; do
         [ -f "$H" ] || continue
         copy_file "$H" "$TARGET/.codex/hooks/$(basename "$H")" ".codex/hooks/$(basename "$H")"
@@ -329,6 +386,7 @@ if echo " $AGENT_LIST " | grep -q " claude "; then
   SETTINGS_DST="$TARGET/.claude/settings.json"
   if [ -f "$SETTINGS_SRC" ]; then
     merge_hook_config "$SETTINGS_SRC" "$SETTINGS_DST" ".claude/settings.json" "$CLAUDE_SETTINGS"
+    materialize_stop_timeout "$SETTINGS_DST" claude "$CLAUDE_SETTINGS"
   fi
 
   if [ "$DRY_RUN" -eq 0 ]; then

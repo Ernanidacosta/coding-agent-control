@@ -61,6 +61,56 @@ EOF
   [ "$(jq '[.hooks.Stop[]?.hooks[]? | select(.command | contains(".codex/hooks/stop.sh"))] | length' "$TARGET_DIR/.codex/hooks.json")" -eq 1 ]
 }
 
+@test "installer materializes coherent Claude and Codex transport envelopes" {
+  cat > "$TARGET_DIR/agent-md.toml" <<'EOF'
+[verify]
+test = "true"
+
+[verify.policy]
+required = ["test"]
+timeout_seconds = 3
+total_timeout_seconds = 7
+EOF
+
+  install_agent_md --agent=all >/dev/null
+  install_agent_md --agent=all >/dev/null
+
+  git -C "$TARGET_DIR" add agent-md.toml
+  git -C "$TARGET_DIR" -c user.name=Test -c user.email=test@example.com commit -qm baseline
+  sed -i 's/total_timeout_seconds = 7/total_timeout_seconds = 9/' "$TARGET_DIR/agent-md.toml"
+  install_agent_md --agent=all >/dev/null
+
+  claude_timeout=$(jq '[.hooks.Stop[]?.hooks[]? |
+    select(.command | contains("stop-verify.sh")) | .timeout] | unique | .[0]' \
+    "$TARGET_DIR/.claude/settings.json")
+  codex_timeout=$(jq '[.hooks.Stop[]?.hooks[]? |
+    select(.command | contains(".codex/hooks/stop.sh")) | .timeout] | unique | .[0]' \
+    "$TARGET_DIR/.codex/hooks.json")
+  [ "$claude_timeout" -eq 37 ]
+  [ "$codex_timeout" -eq 57 ]
+  [ "$(jq '[.hooks.Stop[]?.hooks[]? | select(.command | contains("stop-verify.sh"))] | length' \
+    "$TARGET_DIR/.claude/settings.json")" -eq 1 ]
+  [ "$(jq '[.hooks.Stop[]?.hooks[]? | select(.command | contains(".codex/hooks/stop.sh"))] | length' \
+    "$TARGET_DIR/.codex/hooks.json")" -eq 1 ]
+}
+
+@test "installer materializes the conservative legacy derived completion ceiling" {
+  cat > "$TARGET_DIR/agent-md.toml" <<'EOF'
+[verify]
+lint = "true"
+test = "true"
+[verify.policy]
+required = ["lint", "test"]
+timeout_seconds = 3
+EOF
+  install_agent_md --agent=all >/dev/null
+  install_agent_md --agent=all >/dev/null
+  [ "$(jq '[.hooks.Stop[]?.hooks[]? | select(.command | contains("stop-verify.sh")) | .timeout][0]' \
+    "$TARGET_DIR/.claude/settings.json")" -eq 66 ]
+  [ "$(jq '[.hooks.Stop[]?.hooks[]? | select(.command | contains(".codex/hooks/stop.sh")) | .timeout][0]' \
+    "$TARGET_DIR/.codex/hooks.json")" -eq 86 ]
+}
+
 @test "Codex-only install includes every shared hook dependency" {
   install_agent_md --agent=codex
   [ -x "$TARGET_DIR/.claude/hooks/_lib.sh" ]

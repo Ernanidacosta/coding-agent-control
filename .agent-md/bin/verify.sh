@@ -16,7 +16,10 @@ fi
 . "$LIB"
 cd "$ROOT" || exit 1
 
-CONTRACT=$(effective_verification_contract_json worktree)
+completion_evaluation_begin
+CONTEXT=$(completion_evaluation_context_json worktree standalone)
+CONTRACT=$(printf '%s' "$CONTEXT" | jq -c '.contract')
+BUDGET=$(printf '%s' "$CONTEXT" | jq -c '.budget')
 
 printf 'Verification:\n'
 if [ "$(printf '%s' "$CONTRACT" | jq -r '.valid')" != true ]; then
@@ -49,11 +52,13 @@ if [ "$ADVANCED_CONFIGURED" -gt 0 ]; then
 fi
 
 TIMEOUT=$(printf '%s' "$CONTRACT" | jq -r '.timeout_seconds // "not configured"')
-printf '  timeout: %s\n\n' "$TIMEOUT"
+TOTAL_TIMEOUT=$(printf '%s' "$BUDGET" | jq -r '.seconds // "unbounded"')
+TOTAL_SOURCE=$(printf '%s' "$BUDGET" | jq -r '.source')
+printf '  per-check timeout: %s\n' "$TIMEOUT"
+printf '  total completion timeout: %s (%s)\n\n' "$TOTAL_TIMEOUT" "$TOTAL_SOURCE"
 
-VERIFY_SUMMARY=$(run_resolved_verification_contract "$CONTRACT")
-RISK_SUMMARY=$(run_risk_contract "$VERIFY_SUMMARY" worktree completion)
-SUMMARY=$(combine_policy_summaries "$VERIFY_SUMMARY" "$RISK_SUMMARY")
+EVALUATION=$(run_completion_evaluation "$CONTEXT" completion)
+SUMMARY=$(printf '%s' "$EVALUATION" | jq -c '.summary')
 printf 'Completion:\n'
 printf '  declared risk: %s\n' "$(printf '%s' "$SUMMARY" | jq -r '.risk // "not declared"')"
 printf '  current status: %s\n' "$(printf '%s' "$SUMMARY" | jq -r '.current_status // "absent"')"

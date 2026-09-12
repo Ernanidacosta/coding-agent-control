@@ -532,6 +532,7 @@ test      = "pnpm test"
 [verify.policy]
 required = ["lint", "test"]
 timeout_seconds = 300
+total_timeout_seconds = 420 # example policy; measure and choose per project
 ```
 
 Runtime, smoke, visual, independent-verification, approval, and semantic-memory
@@ -584,11 +585,30 @@ runner-agnostic and recognizes the shapes real tools print, including TAP
 It is not a parser for any single runner and does not affect pass or fail,
 which remain decided by exit status alone.
 
-`timeout_seconds` is a simple per-check bound and requires `timeout` or
-`gtimeout`. If the utility is unavailable, a required bounded check fails
-closed and an optional one warns. If no timeout is declared,
-coding-agent-control reports
-that host limits are the only bound; it does not invent a scheduler.
+`timeout_seconds` is a per-check/provider bound. `total_timeout_seconds` is a
+separate core deadline covering contract/control resolution, every ordinary
+check, Risk evaluation, applicable independent/approval providers, and the
+structured completion decision. Before each subprocess the runner uses the
+smaller of the per-check limit and the remaining total budget. Exhausting the
+total is always blocking—even during an optional check—because completion was
+not fully evaluated. Both bounds require `timeout` or `gtimeout`.
+
+Claude and Codex timeouts are outer transport envelopes, not verification
+policy. The installer uses the same effective budget resolver, including legacy
+derived ceilings, to materialize them above the core total: Claude adds
+30 seconds for finalization; the serial Codex wrapper additionally reserves 10
+seconds each for state and sensory enforcement. Stop validates that relationship
+before starting an expensive check and fails closed with
+`VERIFY_HOST_TIMEOUT_INCOMPATIBLE` when an edited policy and installed adapter
+are out of sync. Rerun the installer after changing the total budget.
+
+Legacy configuration does not silently reinterpret 300 seconds per check as
+300 seconds total. When only a per-check timeout exists, the core derives a
+ceiling from every potentially executable ordinary/provider stage plus a
+30-second resolution/finalization reserve. With neither timeout, standalone
+`verify.sh`/pre-commit remain explicitly unbounded; Stop retains its historical
+300-second core budget inside the larger host envelope. New configurations
+should declare an intentional project-specific total.
 
 Verification evidence has distinct classes:
 
@@ -1170,8 +1190,9 @@ Use Codex skills with `$agent-md-verify` or `$visual-evidence`.
 - Command availability preflight is intentionally conservative. Doctor can
   prove a simple executable is present but may label compound shell commands
   “not preflighted”; actual exit status remains authoritative.
-- Per-check timeout depends on the portable environment providing `timeout`
-  or `gtimeout`. Without an explicit timeout, only host/process limits apply.
+- Per-check and total completion deadlines depend on the portable environment
+  providing `timeout` or `gtimeout`. Host timeouts are larger transport
+  envelopes and are validated before full Stop verification starts.
 - Risk signals are keyword/path/diff heuristics. They can flag possible
   underrating but cannot determine safety, intent, reversibility, or blast
   radius.

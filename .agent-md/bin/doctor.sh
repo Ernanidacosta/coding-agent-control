@@ -112,17 +112,19 @@ if [ -f "$SHARED_LIB" ]; then
       else
         bad "[ERROR VERIFY_UNAVAILABLE] timeout is configured but timeout/gtimeout is unavailable"
       fi
+    elif [ "$(printf '%s' "$CONTRACT" | jq -r '.total_timeout_seconds // empty')" != "" ]; then
+      ok "per-check timeout is not configured; the total completion deadline bounds each execution"
     elif [ "$(printf '%s' "$CONTRACT" | jq \
       '[.checks[] | select(.name != "independent" and .name != "approval" and .origin != "not configured")] | length')" -eq 0 ]; then
       ok "verification timeout is not applicable until a check is configured or inferred"
     else
-      warn "verification timeout is not configured; host limits remain the only bound"
+      warn "per-check timeout is not configured; the legacy completion budget is reported below"
     fi
   fi
 fi
 
 if [ -f "$SHARED_LIB" ]; then
-  CONTROL=$(effective_control_requirements_json worktree)
+  CONTROL=$(effective_control_requirements_json worktree "$CONTRACT")
   CONTROL_SOURCE=$(printf '%s' "$CONTROL" | jq -r '.source')
   CONTROL_BASELINE_RISK=$(printf '%s' "$CONTROL" | jq -r '.baseline.risk // "not established"')
   CONTROL_PROPOSED_RISK=$(printf '%s' "$CONTROL" | jq -r '.proposal.risk // "not declared"')
@@ -146,6 +148,33 @@ if [ -f "$SHARED_LIB" ]; then
   else
     printf '  Recovery: none.\n'
   fi
+
+  COMPLETION_BUDGET=$(completion_budget_json "$CONTRACT" "$CONTROL" host)
+  printf 'Completion timing:\n'
+  printf '  per-check timeout: %s\n' "$(printf '%s' "$CONTRACT" | jq -r '.timeout_seconds // "not configured"')"
+  printf '  total budget: %s\n' "$(printf '%s' "$COMPLETION_BUDGET" | jq -r '.seconds // "unbounded"')"
+  printf '  total budget source: %s\n' "$(printf '%s' "$COMPLETION_BUDGET" | jq -r '.source')"
+  if [ -z "${TIMEOUT:-}" ] \
+    && [ "$(printf '%s' "$COMPLETION_BUDGET" | jq -r '.bounded')" = true ] \
+    && ! completion_timeout_utility_available; then
+    bad "[ERROR VERIFY_UNAVAILABLE] The total completion deadline requires timeout/gtimeout. Recovery: install a compatible timeout utility."
+  fi
+  for COMPLETION_HOST in claude codex; do
+    COMPLETION_HOST_TIMEOUT=$(completion_host_timeout_seconds "$COMPLETION_HOST" 2>/dev/null || true)
+    if [ -z "$COMPLETION_HOST_TIMEOUT" ]; then
+      case "$COMPLETION_HOST" in
+        claude) [ -f .claude/settings.json ] || continue ;;
+        codex) [ -f .codex/hooks.json ] || continue ;;
+      esac
+    fi
+    COMPLETION_PREFLIGHT=$(completion_host_preflight_json \
+      "$COMPLETION_BUDGET" "$COMPLETION_HOST" "$COMPLETION_HOST_TIMEOUT")
+    if [ "$(printf '%s' "$COMPLETION_PREFLIGHT" | jq -r '.valid')" = true ]; then
+      printf '  %s envelope: %ss, compatible\n' "$COMPLETION_HOST" "$COMPLETION_HOST_TIMEOUT"
+    else
+      bad "$(policy_human_message "$(printf '%s' "$COMPLETION_PREFLIGHT" | jq -c '.result')")"
+    fi
+  done
 
   printf 'Working state:\n'
   if [ -f memory/progress.md ]; then
