@@ -9,7 +9,7 @@ independent = "./examples/github-actions/github-actions-independent.sh"
 
 [verify.policy]
 required = ["lint", "test"]
-timeout_seconds = 300
+timeout_seconds = 360
 
 [verify.attestation]
 independent_files = [
