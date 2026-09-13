@@ -8,10 +8,10 @@
 #   ./install.sh --agent=codex,cursor .             # multiple specific
 #   ./install.sh --no-githooks /path/to/project     # skip git-hooks fallback
 #   ./install.sh --dry-run .                        # show what would change
-#   ./install.sh --no-overwrite .                   # never replace existing files
+#   ./install.sh --no-overwrite .                   # create what is missing, never replace
 #   ./install.sh --claude-settings=merge .          # default: idempotent hook merge
 #   ./install.sh --claude-settings=replace .        # back up + overwrite
-#   ./install.sh --codex-hooks=skip .               # preserve existing .codex/hooks.json unchanged
+#   ./install.sh --codex-hooks=skip .               # leave an existing .codex/hooks.json unchanged
 #
 # Or via curl (from inside your project dir):
 #   curl -fsSL https://raw.githubusercontent.com/Ernanidacosta/coding-agent-control/main/install.sh | bash
@@ -29,6 +29,11 @@
 #   Claude and Codex hook configs are merged by default. Third-party
 #     handlers stay in place; coding-agent-control handlers are refreshed without
 #     duplication. Explicit skip and replace modes remain available.
+#   skip, replace and --no-overwrite all decide what happens to a host config
+#     that ALREADY EXISTS. On a target that has none, the file is created
+#     complete either way, carrying this project's effective Stop timeout.
+#     Whenever one of those choices stops the installer from writing, it says
+#     so and reports any Stop envelope it therefore could not synchronize.
 #   memory/ files are never overwritten (user state).
 #   .githooks/ (pre-commit + commit-msg) is installed but NOT activated on
 #     curl|bash. You get a printed command to activate it manually.
@@ -441,10 +446,29 @@ materialize_stop_timeout() {
   return 0
 }
 
+warn_unsynchronized_envelope() {
+  # host. Called when a user policy told the installer to leave an existing
+  # host config alone. Declining to write also means declining to synchronize
+  # the Stop envelope, and staying quiet would let the run read as "installed
+  # and compatible" when the installer never made it so. Only a real mismatch
+  # is reported; an envelope that already matches stays silent.
+  local host="$1" total reserve desired installed
+  command -v jq >/dev/null 2>&1 || return 0
+  total=$(install_completion_budget_seconds) || return 0
+  reserve=$(completion_host_reservation_seconds "$host")
+  desired=$((total + reserve))
+  installed=$(completion_host_timeout_seconds "$host" "$TARGET" 2>/dev/null) || installed=""
+  if [ -z "$installed" ]; then
+    echo "    ! ${host} Stop timeout not synchronized by your policy — this project needs ${desired}s and none is resolvable"
+  elif [ "$installed" -ne "$desired" ]; then
+    echo "    ! ${host} Stop timeout not synchronized by your policy — installed ${installed}s, this project needs ${desired}s"
+  fi
+}
+
 install_hook_config() {
   # src, dst, label, mode, host.
   local src="$1" dst="$2" label="$3" mode="$4" host="$5"
-  local candidate outcome mode_bits materialize=1
+  local candidate outcome mode_bits
 
   if same_file "$src" "$dst"; then
     report_same_file "$label"
@@ -466,19 +490,18 @@ install_hook_config() {
   fi
   INSTALL_HOOK_CANDIDATE="$candidate"
   if [ ! -f "$dst" ]; then
-    # Nothing installed yet: the package file is the candidate. Modes and
-    # --no-overwrite govern replacing an existing file, and a fresh target has
-    # none, so both leave the first write alone — including its envelope.
+    # Nothing installed yet, so there is nothing for skip or --no-overwrite to
+    # protect: both govern replacing a file that already exists. The package
+    # file is the candidate and it is finished like any other write, because a
+    # config created half-configured is not what either flag asks for.
     cp "$src" "$candidate"
     outcome=""
-    if [ "$mode" = skip ] || [ "$NO_OVERWRITE" -eq 1 ]; then
-      materialize=0
-    fi
   else
     if [ "$NO_OVERWRITE" -eq 1 ]; then
       rm -f "$candidate"
     INSTALL_HOOK_CANDIDATE=""
       echo "  · skip (exists)    $label"
+      warn_unsynchronized_envelope "$host"
       return 0
     fi
     case "$mode" in
@@ -486,6 +509,7 @@ install_hook_config() {
         rm -f "$candidate"
     INSTALL_HOOK_CANDIDATE=""
         echo "  · $label exists — not touched"
+        warn_unsynchronized_envelope "$host"
         return 0
         ;;
       replace)
@@ -510,9 +534,7 @@ install_hook_config() {
     esac
   fi
 
-  if [ "$materialize" -eq 1 ]; then
-    materialize_stop_timeout "$candidate" "$host"
-  fi
+  materialize_stop_timeout "$candidate" "$host"
 
   if hook_config_equivalent "$candidate" "$dst"; then
     rm -f "$candidate"

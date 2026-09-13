@@ -2747,7 +2747,7 @@ completion_host_preflight_json() {
   if [ "$capacity" -lt "$(printf '%s' "$budget" | jq -r '.seconds')" ]; then
     base=$(policy_result_json fail error VERIFY_HOST_TIMEOUT_INCOMPATIBLE \
       "The ${host} Stop handler allows ${handler_timeout} seconds, but the core completion budget plus reserved transport time requires more." \
-      "Rerun the coding-agent-control installer after changing timeout policy, or synchronize the owned ${host} Stop handler timeout.")
+      "Rerun the coding-agent-control installer after changing timeout policy, or synchronize the owned ${host} Stop handler timeout by hand. An installer run using skip or --no-overwrite for this host config leaves the envelope untouched and will not resolve this.")
     jq -cn --argjson result "$base" --arg host "$host" \
       --argjson handler "$handler_timeout" --argjson reserve "$reserve" \
       --argjson required "$(printf '%s' "$budget" | jq '.seconds')" \

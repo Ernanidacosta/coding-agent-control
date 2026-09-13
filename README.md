@@ -517,6 +517,23 @@ before anything is touched, so a reinstall that changes nothing writes nothing
 and leaves no backup, and a real change costs exactly one. `skip` and `replace`
 remain explicit options.
 
+`skip`, `replace` and `--no-overwrite` all answer the same question: what
+happens to a host config that **already exists**. On a target that has none
+there is nothing for them to protect, so the file is created complete under
+every mode, carrying the effective Stop timeout this project resolves to — a
+config created half-configured would not serve any of them. When one of those
+choices does stop the installer from writing, it says so, and reports any Stop
+envelope it could therefore not synchronize:
+
+```text
+· .claude/settings.json exists — not touched
+  ! claude Stop timeout not synchronized by your policy — installed 999s, this project needs 41s
+```
+
+An envelope that already matches stays silent. The installer never edits a file
+your flags told it to leave alone, and never lets the run read as though it had
+made the host compatible when it did not.
+
 ## Deterministic Verification
 
 The completion question is: **what evidence proves this task is complete?**
