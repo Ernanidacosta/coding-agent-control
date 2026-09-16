@@ -1,0 +1,169 @@
+# Local enrollment authority (slice C1)
+
+This directory holds the optional component that decides which projects may
+ever receive an authenticated verification receipt. It is not required to use
+coding-agent-control: with no authority installed, verification behaves exactly
+as it does today and completion runs the full contract.
+
+Slice C1 implements `install`, `enroll` and `show`. Issuing receipts, running
+checks, signing and sequence allocation are later slices and are deliberately
+absent.
+
+## Why the authority lives outside the repository
+
+The executing agent and the repository are inside the same untrusted boundary.
+Anything the agent can write, it can write in its own favour. So the record of
+what may be verified, which commands may run, and in which environment, is kept
+where the agent cannot reach it:
+
+```text
+repository config may REQUEST capability
+repository config cannot GRANT capability to itself
+```
+
+## Installation
+
+Real installation is a deliberate, privileged, human step. It is never
+performed by `install.sh`, and never by an agent:
+
+```bash
+sudo ./examples/local-issuer/agent-md-authority install
+```
+
+Inspect it first with `--dry-run`. Use `--root PREFIX` to build a staging tree
+under an alternate prefix; that mode creates no service account and is what the
+test suite uses.
+
+The layout it produces:
+
+| Path | Owner | Mode |
+|---|---|---|
+| `/usr/local/lib/agent-md/` | root | 0755 |
+| `/usr/local/lib/agent-md/agent-md-authority` | root | 0755 |
+| `/var/lib/agent-md/` | root | 0755 |
+| `/var/lib/agent-md/projects/` | agentmd | 0755 |
+| `/var/lib/agent-md/keys/` | agentmd | 0700 |
+
+Enrollment records are world-readable on purpose: a later slice validates
+receipts with the enrolled public key without needing any privileged call. That
+is also why an enrollment record must never contain secret material.
+
+No sudoers rule is installed yet. C1 has no runtime privilege boundary to
+cross — `enroll` is run by an administrator and `show` is read-only. The
+`dev -> agentmd` and `agentmd -> dev` rules arrive with the issuer in C3, where
+they can be reviewed against the code that actually uses them.
+
+## Enrolling a project
+
+```bash
+sudo ./examples/local-issuer/agent-md-authority enroll /path/to/repo
+```
+
+It prints exactly what is being approved — the commands, the mechanism digests,
+the execution environment and the PATH verdict — and writes nothing until a
+human confirms. `--yes` accepts non-interactively; it is a command-line flag on
+purpose, so no environment variable can silently approve an enrollment.
+
+Review it later with:
+
+```bash
+./examples/local-issuer/agent-md-authority show --workspace /path/to/repo
+```
+
+## The workspace is hostile input
+
+While enrolling, the authority may run as root against a repository an agent
+controls. It therefore never sources, imports or executes anything from the
+workspace, and never runs `git` inside it — a `.git/config` can declare hooks,
+aliases or `core.fsmonitor` that execute code. "Is this a Git repository?" is
+answered by stat-ing `.git`, not by asking git.
+
+The authority reads files as data, hashes them, and parses `agent-md.toml` with
+its own reader, installed outside the repository. The repository's own parser
+lives in the repository, so it cannot be trusted to describe the repository.
+
+## A developer-writable PATH is disqualifying
+
+If any entry of the approved execution PATH is writable by the execution user —
+`~/.local/bin`, an in-repo `.venv/bin`, anything group- or world-writable — the
+project is recorded as **ineligible**. This is a refusal, not a warning.
+
+The reason is concrete: the developer could replace a real tool with one that
+exits 0, collect an authenticated PASS, and restore the tool afterwards. The
+source fingerprint would not notice, because the directory sits outside the
+repository.
+
+Projects that depend on developer-writable toolchains keep working normally;
+they simply do not get accelerated receipts. Attesting such toolchains is a
+later problem and is not approximated here.
+
+## The execution environment is an allowlist
+
+The approved environment is small and explicit. It is not a snapshot of
+whatever happened to be exported when someone ran `enroll`:
+
+- `HOME`, derived from the execution user's passwd entry;
+- `PATH`, the approved value;
+- `LANG` and `LC_*` when present.
+
+Anything else requires `--env NAME=VALUE` and appears in the review output.
+Credential-shaped names (`*TOKEN*`, `*SECRET*`, `AWS_*`, `GITHUB_*`, `GH_*`,
+`OPENAI_*`, `ANTHROPIC_*`, and similar) are refused outright, as are loader
+variables (`LD_PRELOAD`, `LD_LIBRARY_PATH`, `BASH_ENV`, `PYTHONPATH`, …).
+`SSH_AUTH_SOCK` and `DOCKER_HOST` are refused too; if they are ever supported
+they will be explicit, separately approved capabilities rather than defaults.
+
+## Enrollment schema, version 1
+
+```jsonc
+{
+  "schema": 1,
+  "project_id": "<uuid generated by the authority>",
+  "workspace": "/canonical/path",
+  "execution": { "user": "dev", "uid": 1000 },
+  "approved_contract": { "checks": [...], "required": [...],
+                         "timeout_seconds": 360, "total_timeout_seconds": 540 },
+  "approved_contract_fingerprint": "<sha256>",
+  "approved_mechanism": [ { "path": "...", "algorithm": "sha256", "digest": "..." } ],
+  "approved_environment": [ { "name": "PATH", "value": "..." } ],
+  "path_eligibility": [ { "entry": "...", "resolved": "...", "status": "...", "reason": "..." } ],
+  "status": "eligible" | "ineligible",
+  "reasons": [ "..." ],
+  "metadata": { "created": "<iso8601>" }
+}
+```
+
+`project_id` is generated by the authority. It is not derived from the path or
+from anything in the repository, so creating a directory with a particular name
+inherits nothing. The workspace is a binding, not an identity: moving or cloning
+the repository does not carry the enrollment with it.
+
+Timestamps in `metadata` are descriptive. Freshness and ordering come from the
+sequence state, never from a clock.
+
+`approved_contract` covers the ordinary checks only. `independent` and
+`approval` are separate Risk requirements answered by their own authority, and a
+receipt issuer must never run them.
+
+## Blast radius
+
+Compromising the authority account is serious and should be stated accurately:
+
+```text
+agentmd compromise
+  -> receipt authority compromised
+  -> issuer state and signing key compromised
+  -> once C3 lands, the descending sudo rule also gives limited
+     execution as the developer user
+  -> NOT root
+```
+
+That is still materially better than a root supervisor, where the same
+compromise would yield the whole machine. It is the reason the supervisor is a
+dedicated service account rather than root.
+
+## What C1 deliberately does not do
+
+No key generation, no signing, no receipt issuance, no check execution, no
+sequence allocation, and no change to `verify.sh` or the Stop hook. An enrolled
+project behaves today exactly as an unenrolled one.
