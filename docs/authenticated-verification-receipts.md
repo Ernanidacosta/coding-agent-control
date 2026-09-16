@@ -160,6 +160,26 @@ on such inputs need a future explicit input contract or authority-specific
 environment binding. Gitlinks and special filesystem entries fail identity
 construction in protocol version 1 rather than being approximated.
 
+The manifest is built with batched Git and digest passes, so the number of
+processes it spawns is bounded by the number of stages rather than by the
+number of files. Blob contents are only re-read from the object database when
+Git cannot already prove the worktree file is byte-identical to the blob: the
+reuse requires no conversion attribute on any enumerated path, `core.autocrlf`
+disabled, the path unmodified between index and worktree, and a matching mode.
+Any doubt falls back to reading the blob, so the recorded digest is always a
+digest of blob content.
+
+One race behavior changed with that rewrite. The previous implementation
+enumerated the HEAD and index path sets separately and computed an entry per
+occurrence, so a path observed twice could be flagged with `path changed while
+the manifest was being built` when the two observations disagreed. The batched
+implementation collapses the union before reading state, and computes each path
+once. For every non-racing repository state the output is identical; what is
+lost is an incidental cross-check that only covered the window between two
+reads of the same path. It was never a general TOCTOU control, and the
+before/after bracket an issuer performs around the whole run remains the
+mechanism that makes execution and state agree.
+
 The digest uses SHA-256 through `sha256sum`, `shasum`, or `openssl`, whichever
 the host already supplies. Index object contents are rehashed rather than
 trusting a repository SHA-1 identifier as the only content identity. Absence of
