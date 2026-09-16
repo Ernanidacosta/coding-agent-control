@@ -34,7 +34,7 @@ install_immediate_timeout() {
 if [ "$1" = -s ]; then shift 2; fi
 printf '%s\n' "$1" >> "$FAKE_TIMEOUT_CALLS"
 if printf '%s\n' "$*" | grep -q -- "$FAKE_TIMEOUT_MATCH"; then
-  [ -z "${FAKE_TIMEOUT_TOUCH:-}" ] || touch "$FAKE_TIMEOUT_TOUCH"
+  [ -z "${FAKE_TIMEOUT_TOUCH:-}" ] || printf '%s\n' "$1" > "$FAKE_TIMEOUT_TOUCH"
   exit 124
 fi
 shift
@@ -63,14 +63,19 @@ total_timeout_seconds = 5'
 }
 
 @test "remaining total budget bounds an optional check and stops later checks" {
+  # The deadline expiring at smoke is forced by the injected timeout, not by a
+  # race between the real clock and contract resolution. timeout_seconds stays
+  # far above total_timeout_seconds so the bound is always the remaining total.
+  install_immediate_timeout
+  export FAKE_TIMEOUT_MATCH=smoke-finished
   write_policy '[verify]
 lint = "true"
-smoke = "trap : TERM; sleep 3; touch smoke-finished"
+smoke = "touch smoke-finished"
 test = "touch test-ran"
 [verify.policy]
 required = ["lint", "test"]
-timeout_seconds = 10
-total_timeout_seconds = 2'
+timeout_seconds = 120
+total_timeout_seconds = 20'
 
   run run_evaluation
   [ "$status" -eq 0 ]
@@ -80,11 +85,12 @@ total_timeout_seconds = 2'
       .code == "VERIFY_TOTAL_TIMEOUT" and
       .check == "smoke" and
       .timeout_stage == "check:smoke" and
-      .total_timeout_seconds == 2 and
+      .total_timeout_seconds == 20 and
       .unchecked_checks == ["test"])
   ' >/dev/null
   [ ! -e smoke-finished ]
   [ ! -e test-ran ]
+  ! grep -qx '120s' "$FAKE_TIMEOUT_CALLS"
 }
 
 @test "ordinary optional failure remains advisory when the total evaluation completes" {
@@ -145,17 +151,18 @@ total_timeout_seconds = 1'
   export FAKE_TIMEOUT_TOUCH="$PWD/independent-started"
   cat > independent.sh <<'SH'
 #!/bin/bash
-sleep 5
 printf '{"status":"pass","kind":"independent","origin":"trusted-local-verifier","target":{"commit":"%s"}}\n' "$(git rev-parse HEAD)"
 SH
   chmod +x independent.sh
+  # timeout_seconds stays far above total_timeout_seconds, so the bound handed
+  # to the provider can only come from the remaining total.
   write_policy '[verify]
 test = "true"
 independent = "./independent.sh"
 [verify.policy]
 required = ["test"]
-timeout_seconds = 10
-total_timeout_seconds = 3
+timeout_seconds = 120
+total_timeout_seconds = 20
 [verify.attestation]
 independent_files = []'
   git add .
@@ -164,7 +171,7 @@ independent_files = []'
   run run_evaluation
   [ "$status" -eq 0 ]
   [ -e independent-started ]
-  grep -Eq '^[1-3]s$' "$FAKE_TIMEOUT_CALLS"
+  grep -Eq '^([1-9]|1[0-9]|20)s$' independent-started
   echo "$output" | jq -e '
     .summary.status == "fail" and
     any(.summary.results[];
@@ -184,7 +191,6 @@ printf '{"status":"pass","kind":"independent","origin":"trusted-local-verifier",
 SH
   cat > approval.sh <<'SH'
 #!/bin/bash
-sleep 5
 printf '{"status":"pass","kind":"approval","origin":"human","target":{"commit":"%s"}}\n' "$(git rev-parse HEAD)"
 SH
   chmod +x independent.sh approval.sh
@@ -194,8 +200,8 @@ independent = "./independent.sh"
 approval = "./approval.sh"
 [verify.policy]
 required = ["test"]
-timeout_seconds = 10
-total_timeout_seconds = 4
+timeout_seconds = 120
+total_timeout_seconds = 20
 [verify.attestation]
 independent_files = []
 approval_files = []'
@@ -205,6 +211,7 @@ approval_files = []'
   run run_evaluation
   [ "$status" -eq 0 ]
   [ -e approval-started ]
+  grep -Eq '^([1-9]|1[0-9]|20)s$' approval-started
   echo "$output" | jq -e '
     .summary.status == "fail" and
     any(.summary.results[];
@@ -315,11 +322,13 @@ total_timeout_seconds = 2'
 }
 
 @test "Codex applies separate state and sensory reservations" {
+  # The handler reservations are fixed constants. Declaring a tiny total here
+  # only raced stop-verify into a VERIFY_TOTAL_TIMEOUT block, which made the
+  # wrapper exit before the handlers it is meant to exercise ever ran.
   write_policy '[verify]
 test = "true"
 [verify.policy]
-required = ["test"]
-total_timeout_seconds = 2'
+required = ["test"]'
   mkdir -p fake-bin
 cat > fake-bin/timeout <<'SH'
 #!/bin/bash
@@ -395,15 +404,18 @@ total_timeout_seconds = 5'
 }
 
 @test "short checks do not acquire an artificial delay" {
+  # The guarantee is that a fast check is not padded out to the declared
+  # budget. Asserting that against a large budget keeps the property exact
+  # while leaving the margin well clear of ordinary scheduling noise.
   write_policy '[verify]
 test = "true"
 [verify.policy]
 required = ["test"]
-total_timeout_seconds = 5'
+total_timeout_seconds = 60'
 
   started=$SECONDS
   run run_evaluation
   elapsed=$((SECONDS - started))
   [ "$status" -eq 0 ]
-  [ "$elapsed" -lt 3 ]
+  [ "$elapsed" -lt 30 ]
 }

@@ -289,11 +289,19 @@ EOF
 
 @test "the fetched archive temporary directory is removed on success and on failure" {
   archive=$(build_source_archive)
-  before=$(find "${TMPDIR:-/tmp}" -maxdepth 1 -name 'tmp.*' -type d 2>/dev/null | wc -l)
+  # The installer's own temporary directories have to be observed in
+  # isolation. A shared /tmp also carries every other concurrent test's
+  # scratch directories, so counting it measures unrelated activity instead
+  # of this guarantee. A private TMPDIR makes the expected count exact.
+  TMPDIR="$WORK/archive-tmp"
+  mkdir -p "$TMPDIR"
+  export TMPDIR
+  before=$(find "$TMPDIR" -maxdepth 1 -name 'tmp.*' -type d 2>/dev/null | wc -l)
   install_from_stdin "$archive" --agent=all "$TARGET_DIR"
   run install_from_stdin "/nonexistent/package.tar.gz" --agent=all "$TARGET_DIR"
   [ "$status" -ne 0 ]
   echo "$output" | grep -q "source archive not found"
-  after=$(find "${TMPDIR:-/tmp}" -maxdepth 1 -name 'tmp.*' -type d 2>/dev/null | wc -l)
-  [ "$after" -le "$before" ]
+  after=$(find "$TMPDIR" -maxdepth 1 -name 'tmp.*' -type d 2>/dev/null | wc -l)
+  [ "$before" -eq 0 ]
+  [ "$after" -eq 0 ]
 }

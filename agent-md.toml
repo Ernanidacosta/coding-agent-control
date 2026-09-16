@@ -3,7 +3,7 @@
 
 [verify]
 lint = "shellcheck .claude/hooks/*.sh .codex/hooks/*.sh .agent-md/bin/*.sh examples/github-actions/*.sh .githooks/pre-commit .githooks/commit-msg install.sh"
-test = "bats tests/"
+test = "bash tests/run.sh"
 smoke = "bash tests/smoke.sh"
 independent = "./examples/github-actions/github-actions-independent.sh"
 

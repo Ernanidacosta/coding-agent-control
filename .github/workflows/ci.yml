@@ -38,9 +38,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Install bats
-        run: sudo apt-get update && sudo apt-get install -y bats jq
+        run: |
+          sudo apt-get update && sudo apt-get install -y bats jq parallel
+          # GNU parallel refuses to run unattended until its citation notice is
+          # acknowledged; without this the suite runner can stall in CI.
+          mkdir -p ~/.parallel && touch ~/.parallel/will-cite
       - name: Run bats suite
-        run: bats tests/
+        run: bash tests/run.sh
 
   install-smoke:
     runs-on: ubuntu-latest

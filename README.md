@@ -1239,9 +1239,23 @@ Use Codex skills with `$agent-md-verify` or `$visual-evidence`.
 ## Development
 
 ```bash
-bats tests/
+bash tests/run.sh
 shellcheck .claude/hooks/*.sh .codex/hooks/*.sh .agent-md/bin/*.sh examples/github-actions/*.sh .githooks/pre-commit install.sh
 ```
+
+`tests/run.sh` is the required test runner. It runs the Bats suite in parallel
+and refuses to report success unless every collected test reported a result,
+because `bats --jobs` exits 0 after executing nothing when GNU parallel is
+missing. It defaults to four jobs; raise it per machine:
+
+```bash
+BATS_JOBS=8 bash tests/run.sh
+```
+
+GNU parallel is a development and CI dependency of this repository only. It is
+not a dependency of coding-agent-control itself, and the installer never
+installs it into a consuming project. `BATS_JOBS=1` runs the suite serially and
+needs no parallel at all.
 
 CI runs Bats, ShellCheck, JSON validation, alias-sync checks, and
 installer smoke tests.
