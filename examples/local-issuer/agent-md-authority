@@ -1,32 +1,25 @@
 #!/bin/bash
 # agent-md-authority — enrollment authority for verification receipts.
 #
-# This is the component that decides which projects may ever receive an
-# authenticated verification receipt, and exactly what a future issuer would be
-# allowed to execute on their behalf. It is deliberately separate from the
-# repository it approves: a repository can ask for capability, it can never
-# grant capability to itself.
+# Decides which projects may ever receive an authenticated verification
+# receipt, and records exactly what a future issuer would be allowed to run on
+# their behalf. A repository can request capability; it can never grant
+# capability to itself.
 #
-# C1 implements install, enroll and show. Issuing receipts, running checks,
-# signing and sequence allocation are later slices and are absent here on
-# purpose.
-#
-# Hostile-input rule: a workspace is untrusted content. This program never
-# sources, imports or executes anything from it, and never runs git inside it.
-# It only resolves paths, stats them, reads files as data, and hashes them. The
-# TOML reader below is authority-owned for that reason: the repository's own
-# parser lives in the repository.
+# install, enroll and show only. Issuing receipts, executing checks, signing
+# and sequence allocation live in later slices and are absent here on purpose.
 
+# PROGRAM and ROOT are consumed by authority-lib.sh. shellcheck only follows a
+# sourced file when invoked with -x, so these directives keep the program
+# clean under either invocation.
+# shellcheck disable=SC2034
 set -u
-
-AUTHORITY_SCHEMA=1
-DEFAULT_EXEC_PATH=/usr/local/bin:/usr/bin:/bin
-MECHANISM_FILES=".claude/hooks/_lib.sh .claude/hooks/stop-verify.sh .agent-md/bin/verify.sh"
-
 PROGRAM=${0##*/}
 
-die() { printf '%s: %s\n' "$PROGRAM" "$1" >&2; exit "${2:-1}"; }
-note() { printf '%s\n' "$1"; }
+AUTHORITY_SELF_DIR=$(cd "$(dirname "$(realpath "$0")")" && pwd)
+# shellcheck source=examples/local-issuer/authority-lib.sh
+# shellcheck disable=SC1091
+. "$AUTHORITY_SELF_DIR/authority-lib.sh"
 
 usage() {
   cat <<'USAGE'
@@ -40,88 +33,10 @@ Usage:
 Options:
   --root PREFIX   Operate under an alternate filesystem root. Intended for
                   tests and staging; the real installation uses /.
-  --yes           Accept the presented enrollment without prompting. This is an
-                  explicit flag on purpose; no environment variable enables it.
+  --yes           Accept the presented enrollment without prompting. This is a
+                  command-line flag on purpose; no environment variable
+                  approves an enrollment.
 USAGE
-}
-
-# --- Paths -------------------------------------------------------------------
-# ROOT is a prefix, not a chroot. With the default prefix the layout is the
-# documented /usr/local/lib and /var/lib one.
-ROOT=""
-
-lib_dir()      { printf '%s/usr/local/lib/agent-md' "$ROOT"; }
-state_dir()    { printf '%s/var/lib/agent-md' "$ROOT"; }
-projects_dir() { printf '%s/projects' "$(state_dir)"; }
-keys_dir()     { printf '%s/keys' "$(state_dir)"; }
-
-is_real_root_prefix() { [ -z "$ROOT" ]; }
-
-# --- Filesystem safety -------------------------------------------------------
-
-# A privileged path must never traverse a symlink: the developer could point a
-# component somewhere else between checks and writes.
-path_has_symlink() {
-  local p="$1"
-  while [ -n "$p" ] && [ "$p" != "/" ] && [ "$p" != "." ]; do
-    if [ -L "$p" ]; then return 0; fi
-    p=$(dirname "$p")
-  done
-  return 1
-}
-
-mode_of() { stat -c %a "$1" 2>/dev/null || stat -f %Lp "$1" 2>/dev/null; }
-owner_of() { stat -c %u "$1" 2>/dev/null || stat -f %u "$1" 2>/dev/null; }
-group_of() { stat -c %g "$1" 2>/dev/null || stat -f %g "$1" 2>/dev/null; }
-
-digit_has_write() { case "$1" in 2|3|6|7) return 0 ;; esac; return 1; }
-
-world_writable() {
-  local mode
-  mode=$(mode_of "$1") || return 1
-  digit_has_write "${mode: -1}"
-}
-
-# Refuses a privileged directory that is already unsafe when we find it.
-assert_safe_dir() {
-  local dir="$1"
-  [ -e "$dir" ] || return 0
-  if path_has_symlink "$dir"; then
-    die "refusing to use '$dir': a path component is a symlink"
-  fi
-  if [ ! -d "$dir" ]; then
-    die "refusing to use '$dir': it exists and is not a directory"
-  fi
-  if world_writable "$dir"; then
-    die "refusing to use '$dir': it is world-writable"
-  fi
-}
-
-# Writes stdin to a file through a temporary in the same directory, so a reader
-# never observes a partial record.
-atomic_write() {
-  local target="$1" mode="$2" dir tmp
-  dir=$(dirname "$target")
-  tmp=$(mktemp "$dir/.agent-md-authority.XXXXXX") || die "cannot create temporary file in $dir"
-  cat > "$tmp" || { rm -f "$tmp"; die "cannot write $target"; }
-  chmod "$mode" "$tmp" || { rm -f "$tmp"; die "cannot set mode on $target"; }
-  mv -f "$tmp" "$target" || { rm -f "$tmp"; die "cannot replace $target"; }
-}
-
-sha256_file() {
-  local out
-  if command -v sha256sum >/dev/null 2>&1; then
-    out=$(sha256sum < "$1") || return 1
-    printf '%s' "${out%% *}"
-  elif command -v shasum >/dev/null 2>&1; then
-    out=$(shasum -a 256 < "$1") || return 1
-    printf '%s' "${out%% *}"
-  elif command -v openssl >/dev/null 2>&1; then
-    out=$(openssl dgst -sha256 < "$1") || return 1
-    printf '%s' "${out##* }"
-  else
-    return 127
-  fi
 }
 
 new_uuid() {
@@ -136,155 +51,7 @@ new_uuid() {
   fi
 }
 
-# --- TOML, authority-owned ---------------------------------------------------
-# Deliberately minimal and deliberately not the repository's parser. It reads
-# values; it never evaluates them.
-
-toml_scalar() {
-  local file="$1" section="$2" key="$3"
-  awk -v section="$section" -v key="$key" '
-    function trim(s) { sub(/^[ \t]+/, "", s); sub(/[ \t]+$/, "", s); return s }
-    /^[ \t]*\[/ {
-      line = trim($0); sub(/^\[/, "", line); sub(/\].*$/, "", line)
-      current = line; next
-    }
-    current == section {
-      line = $0
-      pos = index(line, "=")
-      if (pos == 0) next
-      name = trim(substr(line, 1, pos - 1))
-      if (name != key) next
-      value = trim(substr(line, pos + 1))
-      if (value ~ /^".*"$/) { value = substr(value, 2, length(value) - 2) }
-      else if (value ~ /^'"'"'.*'"'"'$/) { value = substr(value, 2, length(value) - 2) }
-      print value; exit
-    }
-  ' "$file"
-}
-
-toml_array() {
-  local file="$1" section="$2" key="$3"
-  awk -v section="$section" -v key="$key" '
-    function trim(s) { sub(/^[ \t]+/, "", s); sub(/[ \t]+$/, "", s); return s }
-    /^[ \t]*\[[A-Za-z]/ {
-      line = trim($0); sub(/^\[/, "", line); sub(/\].*$/, "", line)
-      current = line; collecting = 0; next
-    }
-    {
-      if (collecting) { buffer = buffer $0; if (index($0, "]")) { collecting = 0; emit = 1 } }
-      else if (current == section) {
-        pos = index($0, "=")
-        if (pos > 0 && trim(substr($0, 1, pos - 1)) == key) {
-          buffer = substr($0, pos + 1)
-          if (index(buffer, "]")) { emit = 1 } else { collecting = 1 }
-        }
-      }
-      if (emit) {
-        sub(/^[^[]*\[/, "", buffer); sub(/\].*$/, "", buffer)
-        n = split(buffer, items, ",")
-        for (i = 1; i <= n; i++) {
-          v = trim(items[i])
-          if (v ~ /^".*"$/) { v = substr(v, 2, length(v) - 2) }
-          if (v != "") print v
-        }
-        exit
-      }
-    }
-  ' "$file"
-}
-
-# --- Identity of the execution user -----------------------------------------
-
-passwd_field() {
-  local user="$1" field="$2" line
-  line=$(getent passwd "$user" 2>/dev/null) || return 1
-  printf '%s' "$line" | cut -d: -f"$field"
-}
-
-uid_of_user() { passwd_field "$1" 3; }
-home_of_user() { passwd_field "$1" 6; }
-gids_of_user() { id -G "$1" 2>/dev/null; }
-
-# --- PATH eligibility --------------------------------------------------------
-# A PATH entry the execution user can write is a way to replace a real tool with
-# one that exits 0, collect an authenticated PASS and put the real tool back.
-# The source fingerprint would not notice, because the directory is outside the
-# repository. For the first provider this is disqualifying, not advisory.
-
-dir_writable_by_user() {
-  local dir="$1" uid="$2" gids="$3" owner group mode ugo gid
-  owner=$(owner_of "$dir") || return 2
-  group=$(group_of "$dir") || return 2
-  mode=$(mode_of "$dir") || return 2
-  ugo=${mode: -3}
-  if digit_has_write "${ugo:2:1}"; then return 0; fi
-  if [ "$owner" = "$uid" ] && digit_has_write "${ugo:0:1}"; then return 0; fi
-  if digit_has_write "${ugo:1:1}"; then
-    for gid in $gids; do
-      [ "$gid" = "$group" ] && return 0
-    done
-  fi
-  return 1
-}
-
-# Emits one JSON object per PATH entry describing why it is or is not eligible.
-path_entry_report() {
-  local entry="$1" uid="$2" gids="$3" resolved parent status reason
-  status=eligible; reason=""
-  if [ -z "$entry" ]; then
-    printf '{"entry":"","resolved":null,"status":"ineligible","reason":"empty PATH entry means the current directory"}'
-    return
-  fi
-  case "$entry" in
-    /*) ;;
-    *)
-      printf '{"entry":%s,"resolved":null,"status":"ineligible","reason":"relative PATH entry"}' "$(json_string "$entry")"
-      return
-      ;;
-  esac
-  resolved=$(realpath "$entry" 2>/dev/null) || {
-    printf '{"entry":%s,"resolved":null,"status":"ineligible","reason":"PATH entry does not resolve"}' "$(json_string "$entry")"
-    return
-  }
-  if [ ! -d "$resolved" ]; then
-    printf '{"entry":%s,"resolved":%s,"status":"ineligible","reason":"PATH entry is not a directory"}' \
-      "$(json_string "$entry")" "$(json_string "$resolved")"
-    return
-  fi
-  if dir_writable_by_user "$resolved" "$uid" "$gids"; then
-    status=ineligible; reason="writable by the execution user"
-  else
-    parent=$(dirname "$resolved")
-    if dir_writable_by_user "$parent" "$uid" "$gids"; then
-      status=ineligible; reason="parent directory is writable by the execution user"
-    fi
-  fi
-  printf '{"entry":%s,"resolved":%s,"status":%s,"reason":%s}' \
-    "$(json_string "$entry")" "$(json_string "$resolved")" \
-    "$(json_string "$status")" "$(json_string "$reason")"
-}
-
-# --- Environment allowlist ---------------------------------------------------
-# The execution environment is approved policy, not a snapshot of whatever the
-# caller happened to export. Nothing that looks like credential material is ever
-# captured, because enrollment records are world-readable.
-
-env_name_is_forbidden() {
-  case "$1" in
-    *TOKEN*|*SECRET*|*PASSWORD*|*PASSWD*|*CREDENTIAL*|*PRIVATE*|*SESSION*) return 0 ;;
-    *_KEY|*_KEYS|KEY|APIKEY|*APIKEY*|*ACCESS_KEY*) return 0 ;;
-    AWS_*|GITHUB_*|GH_*|OPENAI_*|ANTHROPIC_*|GOOGLE_*|AZURE_*|NPM_*|PYPI_*) return 0 ;;
-    SSH_AUTH_SOCK|DOCKER_HOST|SSH_AGENT_PID) return 0 ;;
-    LD_PRELOAD|LD_LIBRARY_PATH|BASH_ENV|ENV|PYTHONPATH|PYTHONHOME|PERL5LIB|NODE_OPTIONS) return 0 ;;
-  esac
-  return 1
-}
-
-json_string() {
-  printf '%s' "$1" | jq -Rs .
-}
-
-# --- install -----------------------------------------------------------------
+AUTHORITY_INSTALLED_FILES="authority-lib.sh agent-md-authority agent-md-issuer"
 
 cmd_install() {
   local user=agentmd dry_run=0
@@ -307,13 +74,16 @@ cmd_install() {
   assert_safe_dir "$lib"; assert_safe_dir "$state"
   assert_safe_dir "$projects"; assert_safe_dir "$keys"
 
+  local name
   if [ "$dry_run" -eq 1 ]; then
     note "would ensure service account: $user"
     note "would create $lib (root, 0755)"
     note "would create $state (root, 0755)"
     note "would create $projects ($user, 0755)"
     note "would create $keys ($user, 0700)"
-    note "would install $lib/agent-md-authority (root, 0755)"
+    for name in $AUTHORITY_INSTALLED_FILES; do
+      note "would install $lib/$name (root, 0755)"
+    done
     return 0
   fi
 
@@ -337,26 +107,27 @@ cmd_install() {
     chown "$user":"$user" "$projects" "$keys" || die "cannot set ownership"
   fi
 
-  local self target
-  self=$(realpath "$0") || die "cannot resolve own path"
-  target="$lib/agent-md-authority"
-  if [ -e "$target" ] && cmp -s "$self" "$target"; then
-    note "authority program already current"
-  else
-    atomic_write "$target" 0755 < "$self"
-    is_real_root_prefix && chown root:root "$target"
-    note "installed $target"
-  fi
+  local source target
+  for name in $AUTHORITY_INSTALLED_FILES; do
+    source="$AUTHORITY_SELF_DIR/$name"
+    [ -f "$source" ] || die "missing distribution file: $name"
+    target="$lib/$name"
+    if [ -e "$target" ] && cmp -s "$source" "$target"; then
+      note "$name already current"
+    else
+      atomic_write "$target" 0755 < "$source"
+      is_real_root_prefix && chown root:root "$target"
+      note "installed $target"
+    fi
+  done
 
   printf '%s\n' "$AUTHORITY_SCHEMA" | atomic_write "$state/schema" 0644
   note "authority ready under $state"
 }
 
-# --- enroll ------------------------------------------------------------------
-
 cmd_enroll() {
   local workspace="" exec_user="" exec_path="" assume_yes=0 dry_run=0
-  local extra_env=() name value
+  local extra_env=()
   while [ $# -gt 0 ]; do
     case "$1" in
       --root) ROOT=${2%/}; shift 2 ;;
@@ -372,17 +143,21 @@ cmd_enroll() {
   done
   [ -n "$workspace" ] || die "enroll requires a workspace path"
   [ -n "$exec_user" ] || exec_user=${SUDO_USER:-$(id -un)}
-  [ -n "$exec_path" ] || exec_path="$DEFAULT_EXEC_PATH"
+  [ -n "$exec_path" ] || exec_path="$AUTHORITY_DEFAULT_EXEC_PATH"
 
   local projects; projects=$(projects_dir)
   [ -d "$projects" ] || die "authority is not installed under $(state_dir); run install first"
   assert_safe_dir "$projects"
 
-  # The workspace is hostile content. Resolve it ourselves and only ever read it.
   local canonical; canonical=$(realpath "$workspace" 2>/dev/null) \
     || die "workspace does not resolve: $workspace"
   [ -d "$canonical" ] || die "workspace is not a directory: $canonical"
-  [ -e "$canonical/.git" ] || die "workspace is not a Git repository: $canonical"
+  local git_state; git_state=$(authority_git_state "$canonical")
+  case "$git_state" in
+    directory) ;;
+    file) die "workspace uses a linked worktree (.git is a file); this is not supported yet" ;;
+    *) die "workspace is not a Git repository: $canonical" ;;
+  esac
 
   local existing; existing=$(find_project_by_workspace "$canonical")
   [ -z "$existing" ] || die "workspace is already enrolled as $existing; revoke it before enrolling again"
@@ -392,27 +167,21 @@ cmd_enroll() {
   home=$(home_of_user "$exec_user") || die "cannot resolve home for $exec_user"
   gids=$(gids_of_user "$exec_user") || die "cannot resolve groups for $exec_user"
 
-  # --- contract, read strictly as data ---
-  local config="$canonical/agent-md.toml"
-  [ -f "$config" ] || die "no agent-md.toml in $canonical"
-  local contract; contract=$(read_contract "$config") || die "agent-md.toml could not be read as a verification contract"
+  local contract
+  contract=$(authority_read_contract "$canonical/agent-md.toml") \
+    || die "verification contract refused: $AUTHORITY_CONTRACT_ERROR"
   local contract_fp; contract_fp=$(printf '%s' "$contract" | jq -cS . | sha256_hex) \
     || die "cannot fingerprint the contract"
 
-  # --- mechanism identities ---
   local mechanism; mechanism=$(read_mechanism "$canonical") \
     || die "mechanism files are missing or unreadable in $canonical"
 
-  # --- environment allowlist ---
   local environment; environment=$(build_environment "$home" "$exec_path" "${extra_env[@]+"${extra_env[@]}"}") || exit 1
-
-  # --- PATH eligibility ---
   local path_report; path_report=$(build_path_report "$exec_path" "$uid" "$gids")
   local path_ok; path_ok=$(printf '%s' "$path_report" | jq 'all(.[]; .status == "eligible")')
 
   local status reasons
-  reasons='[]'
-  status=eligible
+  reasons='[]'; status=eligible
   if [ "$path_ok" != true ]; then
     status=ineligible
     reasons=$(printf '%s' "$path_report" | jq -c '[.[] | select(.status != "eligible")
@@ -453,8 +222,7 @@ cmd_enroll() {
   present_enrollment "$record"
 
   if [ "$dry_run" -eq 1 ]; then
-    note ""
-    note "dry run: nothing was written."
+    note ""; note "dry run: nothing was written."
     return 0
   fi
   if [ "$assume_yes" -ne 1 ]; then
@@ -474,105 +242,6 @@ cmd_enroll() {
   note "enrolled $canonical as $project_id ($status)"
 }
 
-sha256_hex() {
-  local tmp out
-  tmp=$(mktemp) || return 1
-  cat > "$tmp"
-  out=$(sha256_file "$tmp"); rm -f "$tmp"
-  printf '%s' "$out"
-}
-
-read_contract() {
-  local config="$1" check command required timeout total
-  local checks='[]'
-  for check in typecheck lint test integration smoke runtime; do
-    command=$(toml_scalar "$config" verify "$check")
-    [ -n "$command" ] || continue
-    checks=$(printf '%s' "$checks" | jq -c --arg name "$check" --arg command "$command" \
-      '. + [{name: $name, command: $command}]')
-  done
-  required=$(toml_array "$config" verify.policy required | jq -Rsc 'split("\n") | map(select(length > 0))')
-  timeout=$(toml_scalar "$config" verify.policy timeout_seconds)
-  total=$(toml_scalar "$config" verify.policy total_timeout_seconds)
-  if [ "$(printf '%s' "$checks" | jq 'length')" -eq 0 ]; then
-    return 1
-  fi
-  jq -nc --argjson checks "$checks" --argjson required "$required" \
-    --arg timeout "$timeout" --arg total "$total" \
-    '{
-      checks: $checks,
-      required: $required,
-      timeout_seconds: (if $timeout == "" then null else ($timeout | tonumber? // null) end),
-      total_timeout_seconds: (if $total == "" then null else ($total | tonumber? // null) end)
-    }'
-}
-
-read_mechanism() {
-  local workspace="$1" file digest entries='[]'
-  for file in $MECHANISM_FILES; do
-    [ -f "$workspace/$file" ] || return 1
-    [ -L "$workspace/$file" ] && return 1
-    digest=$(sha256_file "$workspace/$file") || return 1
-    entries=$(printf '%s' "$entries" | jq -c --arg path "$file" --arg digest "$digest" \
-      '. + [{path: $path, algorithm: "sha256", digest: $digest}]')
-  done
-  printf '%s' "$entries"
-}
-
-build_environment() {
-  local home="$1" path="$2"; shift 2
-  local pair name value entries
-  entries=$(jq -nc --arg home "$home" --arg path "$path" \
-    '[{name: "HOME", value: $home}, {name: "PATH", value: $path}]')
-  for name in LANG LC_ALL LC_CTYPE LC_NUMERIC LC_TIME LC_COLLATE LC_MESSAGES; do
-    value=$(printenv "$name" 2>/dev/null) || continue
-    [ -n "$value" ] || continue
-    entries=$(printf '%s' "$entries" | jq -c --arg name "$name" --arg value "$value" \
-      '. + [{name: $name, value: $value}]')
-  done
-  for pair in "$@"; do
-    case "$pair" in
-      *=*) ;;
-      *) die "--env expects NAME=VALUE, got: $pair" ;;
-    esac
-    name=${pair%%=*}; value=${pair#*=}
-    if env_name_is_forbidden "$name"; then
-      die "refusing to record '$name' in a world-readable enrollment; credential-like and loader variables are never captured"
-    fi
-    entries=$(printf '%s' "$entries" | jq -c --arg name "$name" --arg value "$value" \
-      '. + [{name: $name, value: $value}]')
-  done
-  printf '%s' "$entries" | jq -cS 'sort_by(.name)'
-}
-
-build_path_report() {
-  local path="$1" uid="$2" gids="$3" entry report='[]'
-  local saved_ifs="$IFS"
-  IFS=:
-  for entry in $path; do
-    IFS="$saved_ifs"
-    report=$(printf '%s' "$report" | jq -c --argjson item "$(path_entry_report "$entry" "$uid" "$gids")" '. + [$item]')
-    IFS=:
-  done
-  IFS="$saved_ifs"
-  printf '%s' "$report"
-}
-
-find_project_by_workspace() {
-  local canonical="$1" dir record
-  local projects; projects=$(projects_dir)
-  [ -d "$projects" ] || return 0
-  for dir in "$projects"/*/; do
-    [ -f "$dir/enrollment.json" ] || continue
-    record=$(jq -r '.workspace // empty' "$dir/enrollment.json" 2>/dev/null) || continue
-    if [ "$record" = "$canonical" ]; then
-      jq -r '.project_id' "$dir/enrollment.json"
-      return 0
-    fi
-  done
-  return 0
-}
-
 present_enrollment() {
   local record="$1"
   note "Enrollment for review"
@@ -582,8 +251,15 @@ present_enrollment() {
   note ""
   note "commands the issuer would be allowed to run:"
   printf '%s' "$record" | jq -r '.approved_contract.checks[] | "  \(.name): \(.command)"'
+  local excluded
+  excluded=$(printf '%s' "$record" | jq -r '.approved_contract.excluded_conditional | length')
+  if [ "$excluded" -gt 0 ]; then
+    note ""
+    note "configured but never run by the issuer (separate Risk authority):"
+    printf '%s' "$record" | jq -r '.approved_contract.excluded_conditional[] | "  \(.name): \(.command)"'
+  fi
   note ""
-  note "required checks: $(printf '%s' "$record" | jq -r '.approved_contract.required | join(", ")')"
+  note "required checks: $(printf '%s' "$record" | jq -r 'if (.approved_contract.required | length) == 0 then "(none declared)" else (.approved_contract.required | join(", ")) end')"
   note "contract fingerprint: $(printf '%s' "$record" | jq -r '.approved_contract_fingerprint')"
   note ""
   note "mechanism identities:"
@@ -598,8 +274,6 @@ present_enrollment() {
   note "status: $(printf '%s' "$record" | jq -r '.status')"
   printf '%s' "$record" | jq -r '.reasons[]? | "  reason: \(.)"'
 }
-
-# --- show --------------------------------------------------------------------
 
 cmd_show() {
   local project_id="" workspace=""
@@ -629,8 +303,6 @@ cmd_show() {
   note "project id:     $(printf '%s' "$record" | jq -r '.project_id')"
   present_enrollment "$record"
 }
-
-# --- dispatch ----------------------------------------------------------------
 
 [ $# -gt 0 ] || { usage; exit 1; }
 command -v jq >/dev/null 2>&1 || die "jq is required"

@@ -1,0 +1,318 @@
+#!/bin/bash
+# agent-md-issuer — runtime authority for verification receipts.
+#
+# Slice C2 answers exactly one question:
+#
+#   "does the authority still recognise this project, and would it be
+#    authorised to attempt verification in a later slice?"
+#
+# It cannot answer anything stronger. There is no path in this program that
+# executes an approved command, executes anything from the workspace, reads key
+# material, allocates a sequence number, signs, or writes a receipt. Those
+# arrive in later slices, and their absence here is deliberate.
+#
+# Protocol: one JSON object on stdin, one JSON object on stdout, human
+# diagnostics on stderr, and an exit code that stays meaningful on its own.
+
+# PROGRAM and ROOT are consumed by authority-lib.sh. shellcheck only follows a
+# sourced file when invoked with -x, so these directives keep the program
+# clean under either invocation.
+# shellcheck disable=SC2034
+set -u
+PROGRAM=${0##*/}
+
+AUTHORITY_SELF_DIR=$(cd "$(dirname "$(realpath "$0")")" && pwd)
+# shellcheck source=examples/local-issuer/authority-lib.sh
+# shellcheck disable=SC1091
+. "$AUTHORITY_SELF_DIR/authority-lib.sh"
+
+ISSUER_PROTOCOL=1
+
+# Exit codes are part of the contract: a caller that cannot parse JSON must
+# still be able to route on the outcome. Refusal is never exit 0.
+EX_ELIGIBLE=0
+EX_MALFORMED_REQUEST=2
+EX_UNSUPPORTED_PROTOCOL=3
+EX_UNSUPPORTED_SCOPE=4
+EX_NOT_ENROLLED=5
+EX_AMBIGUOUS_ENROLLMENT=6
+EX_CONTRACT_CHANGED=7
+EX_MECHANISM_CHANGED=8
+EX_ENV_CHANGED=9
+EX_ENROLLMENT_CORRUPT=10
+EX_AUTHORITY_STATE_UNSAFE=11
+EX_WORKSPACE_UNSUPPORTED=12
+EX_ENROLLMENT_INELIGIBLE=13
+EX_INTERNAL=20
+
+RESPONSE_PROJECT_ID=null
+RESPONSE_WORKSPACE=null
+RESPONSE_SCOPE=null
+RESPONSE_CONTRACT='"unknown"'
+RESPONSE_MECHANISM='"unknown"'
+RESPONSE_ENVIRONMENT='"unknown"'
+
+# Emits the single response object and leaves. Nothing prints to stdout except
+# through here, so stdout always holds exactly one JSON object.
+respond() {
+  local status="$1" code="$2" reason="$3" exit_code="$4"
+  jq -nc \
+    --argjson protocol "$ISSUER_PROTOCOL" \
+    --arg status "$status" \
+    --arg reason_code "$code" \
+    --arg reason "$reason" \
+    --argjson project_id "$RESPONSE_PROJECT_ID" \
+    --argjson workspace "$RESPONSE_WORKSPACE" \
+    --argjson scope "$RESPONSE_SCOPE" \
+    --argjson contract "$RESPONSE_CONTRACT" \
+    --argjson mechanism "$RESPONSE_MECHANISM" \
+    --argjson environment "$RESPONSE_ENVIRONMENT" \
+    '{
+      protocol: $protocol,
+      status: $status,
+      reason_code: $reason_code,
+      reason: $reason,
+      project_id: $project_id,
+      workspace: $workspace,
+      scope: $scope,
+      contract: {state: $contract},
+      mechanism: {state: $mechanism},
+      environment: {state: $environment}
+    }'
+  [ "$exit_code" -eq 0 ] || printf '%s: %s\n' "$PROGRAM" "$reason" >&2
+  exit "$exit_code"
+}
+
+refuse() { respond refused "$1" "$2" "$3"; }
+
+usage() {
+  cat <<'USAGE'
+Usage:
+  agent-md-issuer eligibility [--root PREFIX] < request.json
+
+Reads one JSON request object on stdin:
+
+  {"protocol": 1, "scope": "worktree", "workspace": "/absolute/path"}
+
+No other field is accepted. The caller never states what should be executed,
+verified or attested; the authority derives all of that from the enrollment.
+USAGE
+}
+
+cmd_eligibility() {
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --root) ROOT=${2%/}; shift 2 ;;
+      -h|--help) usage; return 0 ;;
+      *) refuse REFUSED_MALFORMED_REQUEST "unknown option: $1" "$EX_MALFORMED_REQUEST" ;;
+    esac
+  done
+
+  local raw; raw=$(cat)
+
+  # --- request shape ---------------------------------------------------------
+  # Exactly one object, exactly the three defined fields, strict types. Any
+  # extra field is a caller trying to widen the authority's surface and is
+  # rejected rather than ignored.
+  if ! printf '%s' "$raw" | jq -e 'type == "object"' >/dev/null 2>&1; then
+    refuse REFUSED_MALFORMED_REQUEST "request must be exactly one JSON object" "$EX_MALFORMED_REQUEST"
+  fi
+  local extra
+  extra=$(printf '%s' "$raw" | jq -r '[keys_unsorted[] | select(. != "protocol" and . != "scope" and . != "workspace")] | join(", ")')
+  if [ -n "$extra" ]; then
+    refuse REFUSED_MALFORMED_REQUEST "request carries fields the caller may not set: $extra" "$EX_MALFORMED_REQUEST"
+  fi
+  if ! printf '%s' "$raw" | jq -e '(.protocol | type) == "number"' >/dev/null 2>&1; then
+    refuse REFUSED_MALFORMED_REQUEST "protocol must be a number" "$EX_MALFORMED_REQUEST"
+  fi
+  if ! printf '%s' "$raw" | jq -e '(.scope | type) == "string" and (.workspace | type) == "string"' >/dev/null 2>&1; then
+    refuse REFUSED_MALFORMED_REQUEST "scope and workspace must be strings" "$EX_MALFORMED_REQUEST"
+  fi
+
+  local protocol scope workspace
+  protocol=$(printf '%s' "$raw" | jq -r '.protocol')
+  scope=$(printf '%s' "$raw" | jq -r '.scope')
+  workspace=$(printf '%s' "$raw" | jq -r '.workspace')
+
+  [ "$protocol" = "$ISSUER_PROTOCOL" ] || \
+    refuse REFUSED_UNSUPPORTED_PROTOCOL "unsupported protocol: $protocol" "$EX_UNSUPPORTED_PROTOCOL"
+
+  RESPONSE_SCOPE=$(json_string "$scope")
+  case "$scope" in
+    worktree) ;;
+    staged) refuse REFUSED_UNSUPPORTED_SCOPE "staged scope is not supported yet" "$EX_UNSUPPORTED_SCOPE" ;;
+    *) refuse REFUSED_UNSUPPORTED_SCOPE "unknown scope: $scope" "$EX_UNSUPPORTED_SCOPE" ;;
+  esac
+
+  case "$workspace" in
+    /*) ;;
+    *) refuse REFUSED_MALFORMED_REQUEST "workspace must be an absolute path" "$EX_MALFORMED_REQUEST" ;;
+  esac
+
+  # --- authority state -------------------------------------------------------
+  local projects safety
+  projects=$(projects_dir)
+  if ! safety=$(authority_dir_safety "$projects"); then
+    refuse REFUSED_AUTHORITY_STATE_UNSAFE "authority project store is unusable: $safety" "$EX_AUTHORITY_STATE_UNSAFE"
+  fi
+
+  # --- workspace -------------------------------------------------------------
+  local canonical
+  canonical=$(realpath "$workspace" 2>/dev/null) || \
+    refuse REFUSED_NOT_ENROLLED "workspace does not resolve" "$EX_NOT_ENROLLED"
+  RESPONSE_WORKSPACE=$(json_string "$canonical")
+  [ -d "$canonical" ] || \
+    refuse REFUSED_NOT_ENROLLED "workspace is not a directory" "$EX_NOT_ENROLLED"
+
+  case "$(authority_git_state "$canonical")" in
+    directory) ;;
+    file) refuse REFUSED_WORKSPACE_UNSUPPORTED "workspace uses a linked worktree (.git is a file), which is not supported yet" "$EX_WORKSPACE_UNSUPPORTED" ;;
+    *) refuse REFUSED_WORKSPACE_UNSUPPORTED "workspace is not a Git repository" "$EX_WORKSPACE_UNSUPPORTED" ;;
+  esac
+
+  # --- enrollment lookup -----------------------------------------------------
+  # The binding is authority-side. A clone with identical content at another
+  # path resolves to another canonical path and therefore has no enrollment.
+  local matches count project_id record file
+  matches=$(authority_find_projects "$canonical")
+  count=$(printf '%s\n' "$matches" | grep -c . || true)
+  if [ "$count" -eq 0 ]; then
+    refuse REFUSED_NOT_ENROLLED "no enrollment is bound to $canonical" "$EX_NOT_ENROLLED"
+  fi
+  if [ "$count" -gt 1 ]; then
+    refuse REFUSED_AMBIGUOUS_ENROLLMENT "$count enrollments are bound to $canonical" "$EX_AMBIGUOUS_ENROLLMENT"
+  fi
+  project_id=$(printf '%s\n' "$matches" | head -1)
+  case "$project_id" in */*|..|.|"") refuse REFUSED_ENROLLMENT_CORRUPT "enrollment has an invalid project id" "$EX_ENROLLMENT_CORRUPT" ;; esac
+  RESPONSE_PROJECT_ID=$(json_string "$project_id")
+
+  file="$projects/$project_id/enrollment.json"
+  if path_has_symlink "$file"; then
+    refuse REFUSED_ENROLLMENT_CORRUPT "enrollment path traverses a symlink" "$EX_ENROLLMENT_CORRUPT"
+  fi
+  record=$(cat "$file" 2>/dev/null) || \
+    refuse REFUSED_ENROLLMENT_CORRUPT "enrollment record is unreadable" "$EX_ENROLLMENT_CORRUPT"
+  if ! printf '%s' "$record" | jq -e '
+    type == "object" and (.schema | type) == "number" and
+    (.project_id | type) == "string" and (.workspace | type) == "string" and
+    (.execution.user | type) == "string" and (.execution.uid | type) == "number" and
+    (.approved_contract | type) == "object" and
+    (.approved_contract_fingerprint | type) == "string" and
+    (.approved_mechanism | type) == "array" and
+    (.approved_environment | type) == "array" and
+    (.path_eligibility | type) == "array" and
+    (.status | type) == "string"
+  ' >/dev/null 2>&1; then
+    refuse REFUSED_ENROLLMENT_CORRUPT "enrollment record does not match the authority schema" "$EX_ENROLLMENT_CORRUPT"
+  fi
+  if [ "$(printf '%s' "$record" | jq -r '.schema')" != "$AUTHORITY_SCHEMA" ]; then
+    refuse REFUSED_ENROLLMENT_CORRUPT "enrollment uses schema $(printf '%s' "$record" | jq -r '.schema'); re-enroll with this authority version" "$EX_ENROLLMENT_CORRUPT"
+  fi
+  if [ "$(printf '%s' "$record" | jq -r '.workspace')" != "$canonical" ]; then
+    refuse REFUSED_ENROLLMENT_CORRUPT "enrollment workspace does not match its own binding" "$EX_ENROLLMENT_CORRUPT"
+  fi
+  if [ "$(printf '%s' "$record" | jq -r '.status')" != eligible ]; then
+    refuse REFUSED_ENROLLMENT_INELIGIBLE "enrollment was approved as ineligible: $(printf '%s' "$record" | jq -r '.reasons | join("; ")')" "$EX_ENROLLMENT_INELIGIBLE"
+  fi
+
+  # --- contract revalidation -------------------------------------------------
+  local current_contract current_fp approved_fp
+  if ! current_contract=$(authority_read_contract "$canonical/agent-md.toml"); then
+    RESPONSE_CONTRACT='"unreadable"'
+    refuse REFUSED_CONTRACT_CHANGED "current verification contract is unusable: $AUTHORITY_CONTRACT_ERROR" "$EX_CONTRACT_CHANGED"
+  fi
+  current_fp=$(printf '%s' "$current_contract" | jq -cS . | sha256_hex) || \
+    respond refused REFUSED_CONTRACT_CHANGED "cannot fingerprint the current contract" "$EX_INTERNAL"
+  approved_fp=$(printf '%s' "$record" | jq -r '.approved_contract_fingerprint')
+  if [ "$current_fp" != "$approved_fp" ]; then
+    RESPONSE_CONTRACT='"changed"'
+    refuse REFUSED_CONTRACT_CHANGED "the verification contract changed since approval; re-approve it" "$EX_CONTRACT_CHANGED"
+  fi
+  RESPONSE_CONTRACT='"current"'
+
+  # --- mechanism revalidation ------------------------------------------------
+  # Compared against the authority-side approved identities, never against HEAD:
+  # HEAD lives inside the repository the executor controls.
+  local path digest approved
+  while IFS= read -r approved; do
+    [ -n "$approved" ] || continue
+    path=$(printf '%s' "$approved" | jq -r '.path')
+    case "$path" in /*|*..*) RESPONSE_MECHANISM='"unsupported"'; refuse REFUSED_MECHANISM_CHANGED "approved mechanism path is unsafe: $path" "$EX_MECHANISM_CHANGED" ;; esac
+    if [ -L "$canonical/$path" ]; then
+      RESPONSE_MECHANISM='"unsupported"'
+      refuse REFUSED_MECHANISM_CHANGED "mechanism file is a symlink: $path" "$EX_MECHANISM_CHANGED"
+    fi
+    if [ ! -f "$canonical/$path" ]; then
+      RESPONSE_MECHANISM='"missing"'
+      refuse REFUSED_MECHANISM_CHANGED "mechanism file is missing: $path" "$EX_MECHANISM_CHANGED"
+    fi
+    digest=$(sha256_file "$canonical/$path") || {
+      RESPONSE_MECHANISM='"unsupported"'
+      refuse REFUSED_MECHANISM_CHANGED "mechanism file cannot be hashed: $path" "$EX_MECHANISM_CHANGED"
+    }
+    if [ "$digest" != "$(printf '%s' "$approved" | jq -r '.digest')" ]; then
+      RESPONSE_MECHANISM='"changed"'
+      refuse REFUSED_MECHANISM_CHANGED "mechanism file changed since approval: $path" "$EX_MECHANISM_CHANGED"
+    fi
+  done <<EOF
+$(printf '%s' "$record" | jq -c '.approved_mechanism[]')
+EOF
+  RESPONSE_MECHANISM='"current"'
+
+  # --- environment revalidation ----------------------------------------------
+  local exec_user exec_uid gids approved_path name
+  exec_user=$(printf '%s' "$record" | jq -r '.execution.user')
+  exec_uid=$(printf '%s' "$record" | jq -r '.execution.uid')
+  gids=$(gids_of_user "$exec_user" 2>/dev/null) || {
+    RESPONSE_ENVIRONMENT='"unresolvable"'
+    refuse REFUSED_ENV_CHANGED "execution user $exec_user no longer resolves" "$EX_ENV_CHANGED"
+  }
+
+  while IFS= read -r name; do
+    [ -n "$name" ] || continue
+    if env_name_is_forbidden "$name"; then
+      RESPONSE_ENVIRONMENT='"forbidden"'
+      refuse REFUSED_ENV_CHANGED "approved environment contains a variable this authority would refuse today: $name" "$EX_ENV_CHANGED"
+    fi
+  done <<EOF
+$(printf '%s' "$record" | jq -r '.approved_environment[].name')
+EOF
+
+  approved_path=$(printf '%s' "$record" | jq -r '.approved_environment[] | select(.name == "PATH") | .value')
+  if [ -z "$approved_path" ]; then
+    RESPONSE_ENVIRONMENT='"incomplete"'
+    refuse REFUSED_ENV_CHANGED "approved environment declares no PATH" "$EX_ENV_CHANGED"
+  fi
+
+  local report ineligible
+  report=$(build_path_report "$approved_path" "$exec_uid" "$gids")
+  ineligible=$(printf '%s' "$report" | jq -r '[.[] | select(.status != "eligible") | "\(.entry): \(.reason)"] | join("; ")')
+  if [ -n "$ineligible" ]; then
+    RESPONSE_ENVIRONMENT='"changed"'
+    refuse REFUSED_ENV_CHANGED "approved PATH is no longer trustworthy: $ineligible" "$EX_ENV_CHANGED"
+  fi
+
+  # The approved PATH must still resolve to the same directories it did at
+  # approval time, so a replaced symlink cannot silently redirect a tool.
+  local drift
+  drift=$(jq -rn --argjson approved "$(printf '%s' "$record" | jq -c '.path_eligibility')" \
+    --argjson current "$report" '
+      ([$approved[] | {key: .entry, value: .resolved}] | from_entries) as $was
+      | [$current[] | select(($was[.entry] // null) != .resolved) | .entry] | join(", ")')
+  if [ -n "$drift" ]; then
+    RESPONSE_ENVIRONMENT='"changed"'
+    refuse REFUSED_ENV_CHANGED "approved PATH entries now resolve elsewhere: $drift" "$EX_ENV_CHANGED"
+  fi
+  RESPONSE_ENVIRONMENT='"current"'
+
+  respond eligible ELIGIBLE "the authority recognises this project and would be authorised to attempt verification" "$EX_ELIGIBLE"
+}
+
+[ $# -gt 0 ] || { usage; exit "$EX_MALFORMED_REQUEST"; }
+command -v jq >/dev/null 2>&1 || die "jq is required" "$EX_INTERNAL"
+subcommand="$1"; shift
+case "$subcommand" in
+  eligibility) cmd_eligibility "$@" ;;
+  -h|--help|help) usage ;;
+  *) die "unknown subcommand: $subcommand" "$EX_MALFORMED_REQUEST" ;;
+esac

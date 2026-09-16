@@ -1,13 +1,18 @@
-# Local enrollment authority (slice C1)
+# Local verification authority (slices C1-C2)
 
 This directory holds the optional component that decides which projects may
 ever receive an authenticated verification receipt. It is not required to use
 coding-agent-control: with no authority installed, verification behaves exactly
 as it does today and completion runs the full contract.
 
-Slice C1 implements `install`, `enroll` and `show`. Issuing receipts, running
-checks, signing and sequence allocation are later slices and are deliberately
-absent.
+| File | Role |
+|---|---|
+| `agent-md-authority` | administrator CLI: `install`, `enroll`, `show` |
+| `agent-md-issuer` | runtime: answers eligibility for a request |
+| `authority-lib.sh` | shared implementation both programs source |
+
+Executing checks, signing, sequence allocation and receipt persistence are
+later slices and are deliberately absent. Nothing here can produce a PASS.
 
 ## Why the authority lives outside the repository
 
@@ -162,8 +167,132 @@ That is still materially better than a root supervisor, where the same
 compromise would yield the whole machine. It is the reason the supervisor is a
 dedicated service account rather than root.
 
-## What C1 deliberately does not do
+## The issuer runtime
+
+`agent-md-issuer` answers exactly one question: does the authority still
+recognise this project, and would it be authorised to attempt verification in a
+later slice? `eligible` is not a verification result, and the vocabulary avoids
+`passed`, `verified` and `success` on purpose.
+
+Request — one JSON object on stdin, and no other field is accepted:
+
+```json
+{"protocol": 1, "scope": "worktree", "workspace": "/absolute/path"}
+```
+
+A request carrying `command`, `checks`, `fingerprints`, `project_id`, `status`,
+`sequence` or anything else is rejected rather than ignored. The caller never
+states what should be executed, verified or attested; all of that is derived
+from the enrollment.
+
+Response — one JSON object on stdout, diagnostics on stderr:
+
+```json
+{
+  "protocol": 1,
+  "status": "eligible",
+  "reason_code": "ELIGIBLE",
+  "reason": "...",
+  "project_id": "...",
+  "workspace": "/canonical/path",
+  "scope": "worktree",
+  "contract": {"state": "current"},
+  "mechanism": {"state": "current"},
+  "environment": {"state": "current"}
+}
+```
+
+Exit codes stay meaningful on their own, and refusal is never `0`:
+
+| Code | Meaning |
+|---|---|
+| 0 | eligible |
+| 2 | malformed request |
+| 3 | unsupported protocol |
+| 4 | unsupported scope |
+| 5 | not enrolled |
+| 6 | ambiguous enrollment |
+| 7 | contract changed |
+| 8 | mechanism changed |
+| 9 | environment changed |
+| 10 | enrollment corrupt |
+| 11 | authority state unsafe |
+| 12 | workspace unsupported |
+| 13 | enrollment approved as ineligible |
+| 20 | internal error |
+
+Every refusal means the same thing downstream: no receipt, and full
+verification.
+
+## Revalidation on every request
+
+- **Contract.** The current `agent-md.toml` is read as data, canonicalised with
+  the authority's own reader and compared to the approved fingerprint. A
+  difference is `REFUSED_CONTRACT_CHANGED`; the old approved contract is never
+  executed instead, and the enrollment is never updated automatically.
+- **Mechanism.** Files are compared against the authority-side approved
+  digests, never against HEAD — HEAD lives inside the repository the executor
+  controls. States are `current`, `changed`, `missing` and `unsupported`; only
+  `current` continues.
+- **Environment.** Every approved PATH entry must still exist, still resolve to
+  the same directory, and still be untouchable by the execution user. A PATH
+  entry that became writable is `REFUSED_ENV_CHANGED`, never a warning. The
+  approved variable names are re-checked against today's forbidden list, so an
+  enrollment that predates a rule cannot smuggle it in.
+
+## Git worktree policy
+
+`.git` as a directory is supported. `.git` as a file — a linked worktree — is
+refused as unsupported rather than followed; resolving `gitdir:` is a later
+decision. A missing `.git` is refused. Git is never invoked inside a workspace,
+here or during enrollment.
+
+## Parser strictness and the parity invariant
+
+The authority parses `agent-md.toml` with its own reader, installed outside the
+repository, so a privileged program never runs the repository's code. That
+creates a risk the two readers disagree, so the invariant is one-directional
+and pinned by golden tests:
+
+```text
+authority accepts  =>  the core accepts, and both describe the same contract
+authority refuses  =>  ineligible, and no receipt is ever possible
+```
+
+The authority may be stricter; it may never accept a contract the core reads
+differently. It deliberately refuses four constructs the core tolerates:
+
+| Construct | Core | Authority | Why |
+|---|---|---|---|
+| duplicate `verify.<check>` key | keeps the first | refuses | meaning would depend on reader order |
+| `#` inside a command value | truncates at the `#` | refuses | the core silently shortens the command |
+| single-quoted command | accepted | refuses | one unambiguous string form |
+| absent `verify.policy.required` | legacy inference | refuses | inference cannot be reproduced without guessing |
+
+One further divergence runs in the safe direction: a `required` name with no
+configured command leaves the core's contract valid and becomes a
+`VERIFY_UNAVAILABLE` failure when the check runs, while the authority refuses
+to approve a contract it could not fully execute. The project simply never
+accelerates.
+
+## Enrollment schema 2
+
+C2 changed the canonical contract representation, so the record carries
+`schema: 2`. A schema-1 enrollment written by C1 is refused with a clear
+instruction to re-enroll rather than being silently reinterpreted.
+
+`approved_contract` now records `excluded_conditional` — `independent` and
+`approval` commands that are configured but which the issuer must never run,
+because they answer separate Risk authority — and `required_declared`.
+
+## Read-only guarantee
+
+The issuer writes nothing. Not the repository, not the enrollment, not the
+authority state, not any sequence state. A test hashes the workspace and the
+whole authority tree before and after a request and requires them byte-identical.
+
+## What C1 and C2 deliberately do not do
 
 No key generation, no signing, no receipt issuance, no check execution, no
-sequence allocation, and no change to `verify.sh` or the Stop hook. An enrolled
-project behaves today exactly as an unenrolled one.
+sudo hop, no sequence allocation, and no change to `verify.sh` or the Stop
+hook. An enrolled project behaves today exactly as an unenrolled one.

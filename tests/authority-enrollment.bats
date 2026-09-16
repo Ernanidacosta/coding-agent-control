@@ -208,12 +208,15 @@ enrollment_file() {
   run_authority enroll "$WS" --root "$ROOT" --yes
   [ "$status" -eq 0 ]
   jq -e '
-    .schema == 1 and
+    .schema == 2 and
     (.project_id | length) > 0 and
     (.workspace | startswith("/")) and
     (.execution.user | length) > 0 and
     (.execution.uid | type) == "number" and
     (.approved_contract.checks | length) == 2 and
+    (.approved_contract.required | sort) == ["lint","test"] and
+    (.approved_contract.required_declared == true) and
+    (.approved_contract.excluded_conditional | type) == "array" and
     (.approved_contract_fingerprint | length) == 64 and
     (.approved_mechanism | length) == 3 and
     all(.approved_mechanism[]; (.digest | length) == 64) and
@@ -230,5 +233,5 @@ enrollment_file() {
   local id state
   id=$(bash "$AUTHORITY" show --workspace "$WS" --root "$ROOT" | awk '/^project id:/ { print $3 }')
   state="$ROOT/var/lib/agent-md/projects/$id/state.json"
-  jq -e '.schema == 1 and .last_terminal == null and .pending == null' "$state" >/dev/null
+  jq -e '.schema == 2 and .last_terminal == null and .pending == null' "$state" >/dev/null
 }
