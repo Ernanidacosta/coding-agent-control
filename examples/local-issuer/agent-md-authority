@@ -29,6 +29,9 @@ Usage:
                              [--exec-path VALUE] [--env NAME=VALUE]...
                              [--yes] [--dry-run]
   agent-md-authority show    (PROJECT_ID | --workspace PATH) [--root PREFIX]
+  agent-md-authority prepare-job PROJECT_ID --check NAME [--root PREFIX]
+  agent-md-authority sudoers PROJECT_ID [--root PREFIX] [--write]
+  agent-md-authority enumerate WORKSPACE
 
 Options:
   --root PREFIX   Operate under an alternate filesystem root. Intended for
@@ -51,7 +54,7 @@ new_uuid() {
   fi
 }
 
-AUTHORITY_INSTALLED_FILES="authority-lib.sh agent-md-authority agent-md-issuer"
+AUTHORITY_INSTALLED_FILES="authority-lib.sh agent-md-authority agent-md-issuer run-check"
 
 cmd_install() {
   local user=agentmd dry_run=0
@@ -121,6 +124,14 @@ cmd_install() {
     fi
   done
 
+  # The runner needs somewhere writable for temporary and build output that is
+  # outside the snapshot. It is wiped per run, so nothing has to survive.
+  mkdir -p "$ROOT$AUTHORITY_SCRATCH_ROOT" || die "cannot create the runner scratch root"
+  chmod 0700 "$ROOT$AUTHORITY_SCRATCH_ROOT"
+  if is_real_root_prefix && getent passwd "$AUTHORITY_RUNNER_USER" >/dev/null 2>&1; then
+    chown "$AUTHORITY_RUNNER_USER":"$AUTHORITY_RUNNER_USER" "$ROOT$AUTHORITY_SCRATCH_ROOT"
+  fi
+
   printf '%s\n' "$AUTHORITY_SCHEMA" | atomic_write "$state/schema" 0644
   note "authority ready under $state"
 }
@@ -167,14 +178,21 @@ cmd_enroll() {
   home=$(home_of_user "$exec_user") || die "cannot resolve home for $exec_user"
   gids=$(gids_of_user "$exec_user") || die "cannot resolve groups for $exec_user"
 
-  local contract
-  contract=$(authority_read_contract "$canonical/agent-md.toml") \
-    || die "verification contract refused: $AUTHORITY_CONTRACT_ERROR"
+  local contract contract_err
+  contract_err=$(mktemp "${TMPDIR:-/tmp}/agent-md-contract-err.XXXXXX") || die "cannot create a temporary file"
+  if ! contract=$(authority_read_contract "$canonical/agent-md.toml" 2>"$contract_err"); then
+    local reason; reason=$(cat "$contract_err"); rm -f "$contract_err"
+    die "verification contract refused: ${reason:-unknown}"
+  fi
+  rm -f "$contract_err"
   local contract_fp; contract_fp=$(printf '%s' "$contract" | jq -cS . | sha256_hex) \
     || die "cannot fingerprint the contract"
 
   local mechanism; mechanism=$(read_mechanism "$canonical") \
     || die "mechanism files are missing or unreadable in $canonical"
+
+  local tools; tools=$(authority_discover_tools "$uid" "$gids") \
+    || die "no trusted runtime tool set could be approved: $tools"
 
   local environment; environment=$(build_environment "$home" "$exec_path" "${extra_env[@]+"${extra_env[@]}"}") || exit 1
   local path_report; path_report=$(build_path_report "$exec_path" "$uid" "$gids")
@@ -201,6 +219,7 @@ cmd_enroll() {
     --argjson mechanism "$mechanism" \
     --argjson environment "$environment" \
     --argjson path_eligibility "$path_report" \
+    --argjson tools "$tools" \
     --arg status "$status" \
     --argjson reasons "$reasons" \
     --arg created "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
@@ -213,6 +232,7 @@ cmd_enroll() {
       approved_contract_fingerprint: $contract_fingerprint,
       approved_mechanism: $mechanism,
       approved_environment: $environment,
+      approved_tools: $tools,
       path_eligibility: $path_eligibility,
       status: $status,
       reasons: $reasons,
@@ -268,11 +288,191 @@ present_enrollment() {
   note "execution environment:"
   printf '%s' "$record" | jq -r '.approved_environment[] | "  \(.name)=\(.value)"'
   note ""
+  note "trusted runtime tools:"
+  printf '%s' "$record" | jq -r '.approved_tools[]? | "  \(.name) -> \(.path)"'
+  note ""
   note "PATH eligibility:"
   printf '%s' "$record" | jq -r '.path_eligibility[] | "  [\(.status)] \(.entry)\(if .reason == "" then "" else " — \(.reason)" end)"'
   note ""
   note "status: $(printf '%s' "$record" | jq -r '.status')"
   printf '%s' "$record" | jq -r '.reasons[]? | "  reason: \(.)"'
+}
+
+# prepare-job materialises the control plane for one approved check. It is the
+# only thing that decides what run-check will execute, and it lives where the
+# developer can read it but not change it.
+cmd_prepare_job() {
+  local project_id="" check=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --root) ROOT=${2%/}; shift 2 ;;
+      --check) check="$2"; shift 2 ;;
+      -h|--help) usage; return 0 ;;
+      -*) die "unknown prepare-job option: $1" ;;
+      *) project_id="$1"; shift ;;
+    esac
+  done
+  [ -n "$project_id" ] || die "prepare-job requires a project id"
+  [ -n "$check" ] || die "prepare-job requires --check NAME"
+  case "$project_id" in */*|..|.) die "invalid project id" ;; esac
+
+  local dir file record
+  dir="$(projects_dir)/$project_id"
+  file="$dir/enrollment.json"
+  [ -f "$file" ] || die "no enrollment for $project_id"
+  path_has_symlink "$file" && die "refusing to read $file: a path component is a symlink"
+  record=$(cat "$file")
+  [ "$(printf '%s' "$record" | jq -r '.schema')" = "$AUTHORITY_SCHEMA" ] \
+    || die "enrollment uses an unsupported schema; re-enroll"
+  [ "$(printf '%s' "$record" | jq -r '.status')" = eligible ] \
+    || die "enrollment is not eligible; refusing to prepare a job"
+
+  local command
+  command=$(printf '%s' "$record" | jq -r --arg c "$check" \
+    '.approved_contract.checks[] | select(.name == $c) | .command' | head -1)
+  [ -n "$command" ] || die "check '$check' is not part of the approved contract"
+
+  local timeout
+  timeout=$(printf '%s' "$record" | jq -r '.approved_contract.timeout_seconds // empty')
+  [ -n "$timeout" ] || die "the approved contract declares no per-check timeout"
+
+  local workspace snapshot paths reason manifest fingerprint
+  workspace=$(printf '%s' "$record" | jq -r '.workspace')
+  snapshot=$(authority_snapshot_dir "$project_id")
+
+  # Replacing a sealed snapshot needs the write bit back first.
+  if [ -e "$snapshot" ]; then
+    chmod -R u+w "$snapshot" 2>/dev/null || true
+    rm -rf "${snapshot:?}"
+  fi
+  mkdir -p "$(authority_snapshot_root)" || die "cannot create the snapshot root"
+
+  paths=$(mktemp "${TMPDIR:-/tmp}/agent-md-paths.XXXXXX") || die "cannot create a path list"
+  if ! authority_enumerate_for "$workspace" > "$paths"; then
+    rm -f "$paths"
+    die "could not enumerate the workspace"
+  fi
+
+  if ! reason=$(authority_materialize_snapshot "$workspace" "$paths" "$snapshot/src"); then
+    rm -f "$paths"
+    chmod -R u+w "$snapshot" 2>/dev/null || true
+    rm -rf "${snapshot:?}"
+    die "snapshot refused: $reason"
+  fi
+  rm -f "$paths"
+  authority_seal_snapshot "$snapshot/src"
+  manifest=$(authority_snapshot_manifest "$snapshot/src") || die "cannot fingerprint the snapshot"
+  fingerprint=$(printf '%s' "$manifest" | jq -cS . | sha256_hex) || die "cannot fingerprint the snapshot"
+  printf '%s\n' "$manifest" | atomic_write "$snapshot/manifest.json" 0444
+  chmod 0555 "$snapshot" 2>/dev/null || true
+
+  local runner
+  runner=$(authority_runner_identity) || die "cannot resolve the execution account: $runner"
+
+  local job
+  job=$(jq -n \
+    --argjson schema "$AUTHORITY_SCHEMA" \
+    --argjson runner "$runner" \
+    --arg project_id "$project_id" \
+    --arg workspace "$workspace" \
+    --arg snapshot "$snapshot/src" \
+    --arg snapshot_fingerprint "$fingerprint" \
+    --argjson execution "$(printf '%s' "$record" | jq -c '.execution')" \
+    --arg check "$check" \
+    --arg command "$command" \
+    --argjson environment "$(printf '%s' "$record" | jq -c '.approved_environment')" \
+    --argjson timeout_seconds "$timeout" \
+    --argjson tools "$(printf '%s' "$record" | jq -c '.approved_tools')" \
+    '{schema: $schema, project_id: $project_id, workspace: $workspace,
+      snapshot: $snapshot, snapshot_fingerprint: $snapshot_fingerprint,
+      execution: $runner, developer: $execution, check: $check, command: $command,
+      environment: $environment, timeout_seconds: $timeout_seconds, tools: $tools}')
+
+  # 0444: the developer may read the job, and nobody writes it in place. The
+  # authority replaces it by atomic rename, which needs the directory, not the
+  # file.
+  printf '%s\n' "$job" | atomic_write "$dir/job.json" 0444
+  note "prepared job for $check in $dir/job.json"
+  note "execution account: $(printf '%s' "$runner" | jq -r '.user') (uid $(printf '%s' "$runner" | jq -r '.uid'))"
+  note "snapshot sealed at $snapshot/src ($(printf '%s' "$manifest" | jq 'length') entries)"
+}
+
+# The descending sudo rule. It names one target user and one literal project id,
+# so an authority operating project A cannot reach project B's rule, and no rule
+# ever authorises root or a free-form command.
+# In production the enumeration crosses into the execution-only account, so a
+# repository that manages to execute code through its own Git configuration
+# reaches the runner and never the authority. A staging root has no such
+# account, and the skipped hop is announced rather than hidden.
+authority_enumerate_for() {
+  local workspace="$1"
+  if is_real_root_prefix && getent passwd "$AUTHORITY_RUNNER_USER" >/dev/null 2>&1; then
+    sudo -n -u "$AUTHORITY_RUNNER_USER" "$(lib_dir)/agent-md-authority" enumerate "$workspace"
+    return $?
+  fi
+  note "staging root: enumerating without the runner hop" >&2
+  authority_enumerate_paths "$workspace"
+}
+
+cmd_sudoers() {
+  local project_id="" write=0
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --root) ROOT=${2%/}; shift 2 ;;
+      --write) write=1; shift ;;
+      -h|--help) usage; return 0 ;;
+      -*) die "unknown sudoers option: $1" ;;
+      *) project_id="$1"; shift ;;
+    esac
+  done
+  [ -n "$project_id" ] || die "sudoers requires a project id"
+  case "$project_id" in */*|..|.) die "invalid project id" ;; esac
+  case "$project_id" in *[!a-zA-Z0-9-]*) die "invalid project id" ;; esac
+
+  local file record exec_user alias policy
+  file="$(projects_dir)/$project_id/enrollment.json"
+  [ -f "$file" ] || die "no enrollment for $project_id"
+  record=$(cat "$file")
+  exec_user=$(printf '%s' "$record" | jq -r '.execution.user')
+  [ -n "$exec_user" ] || die "enrollment declares no execution user"
+  case "$exec_user" in root) die "refusing to generate a rule targeting root" ;; esac
+
+  alias="AGENTMD_RUNCHECK_$(printf '%s' "$project_id" | tr -d - | tr '[:lower:]' '[:upper:]')"
+  policy=$(cat <<POLICY
+# coding-agent-control verification authority
+# Project $project_id, enrolled for developer $exec_user.
+#
+# The rule never targets the developer. Checks run as a dedicated
+# execution-only account so that the developer, who is untrusted, cannot
+# signal or ptrace the process observing the result, and cannot reach the
+# snapshot the checks read.
+#
+# The command is a literal path plus a literal project id: no wildcard, no
+# free-form argument, no arbitrary RunAs, and no rule that could target root.
+Defaults!$alias env_reset, secure_path="/usr/local/bin:/usr/bin:/bin"
+Cmnd_Alias $alias = $(lib_dir)/run-check $project_id, $(lib_dir)/agent-md-authority enumerate *
+$AUTHORITY_SERVICE_USER ALL=($AUTHORITY_RUNNER_USER) NOPASSWD: $alias
+POLICY
+)
+  if [ "$write" -eq 1 ]; then
+    local target="$ROOT/etc/sudoers.d"
+    mkdir -p "$target" || die "cannot create $target"
+    printf '%s\n' "$policy" | atomic_write "$target/agent-md-$project_id" 0440
+    note "wrote $target/agent-md-$project_id"
+  else
+    printf '%s\n' "$policy"
+  fi
+}
+
+# Emits the worktree path set. This is the only code path that reads a
+# repository's own Git configuration, so it is meant to be reached through the
+# descending sudo rule and to run as the execution-only account.
+cmd_enumerate() {
+  local workspace="$1"
+  [ -n "${workspace:-}" ] || die "enumerate requires a workspace"
+  case "$workspace" in /*) ;; *) die "workspace must be absolute" ;; esac
+  [ -d "$workspace" ] || die "workspace is not a directory"
+  authority_enumerate_paths "$workspace"
 }
 
 cmd_show() {
@@ -311,6 +511,9 @@ case "$subcommand" in
   install) cmd_install "$@" ;;
   enroll) cmd_enroll "$@" ;;
   show) cmd_show "$@" ;;
+  enumerate) cmd_enumerate "$@" ;;
+  prepare-job) cmd_prepare_job "$@" ;;
+  sudoers) cmd_sudoers "$@" ;;
   -h|--help|help) usage ;;
   *) die "unknown subcommand: $subcommand" ;;
 esac

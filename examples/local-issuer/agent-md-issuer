@@ -216,11 +216,15 @@ cmd_eligibility() {
   fi
 
   # --- contract revalidation -------------------------------------------------
-  local current_contract current_fp approved_fp
-  if ! current_contract=$(authority_read_contract "$canonical/agent-md.toml"); then
+  local current_contract current_fp approved_fp contract_err contract_reason
+  contract_err=$(mktemp "${TMPDIR:-/tmp}/agent-md-contract-err.XXXXXX") \
+    || respond refused REFUSED_CONTRACT_CHANGED "cannot create a temporary file" "$EX_INTERNAL"
+  if ! current_contract=$(authority_read_contract "$canonical/agent-md.toml" 2>"$contract_err"); then
+    contract_reason=$(cat "$contract_err"); rm -f "$contract_err"
     RESPONSE_CONTRACT='"unreadable"'
-    refuse REFUSED_CONTRACT_CHANGED "current verification contract is unusable: $AUTHORITY_CONTRACT_ERROR" "$EX_CONTRACT_CHANGED"
+    refuse REFUSED_CONTRACT_CHANGED "current verification contract is unusable: ${contract_reason:-unknown}" "$EX_CONTRACT_CHANGED"
   fi
+  rm -f "$contract_err"
   current_fp=$(printf '%s' "$current_contract" | jq -cS . | sha256_hex) || \
     respond refused REFUSED_CONTRACT_CHANGED "cannot fingerprint the current contract" "$EX_INTERNAL"
   approved_fp=$(printf '%s' "$record" | jq -r '.approved_contract_fingerprint')

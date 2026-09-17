@@ -9,7 +9,8 @@ as it does today and completion runs the full contract.
 |---|---|
 | `agent-md-authority` | administrator CLI: `install`, `enroll`, `show` |
 | `agent-md-issuer` | runtime: answers eligibility for a request |
-| `authority-lib.sh` | shared implementation both programs source |
+| `run-check` | executes one approved command as the enrolled developer |
+| `authority-lib.sh` | shared implementation all three programs source |
 
 Executing checks, signing, sequence allocation and receipt persistence are
 later slices and are deliberately absent. Nothing here can produce a PASS.
@@ -291,8 +292,166 @@ The issuer writes nothing. Not the repository, not the enrollment, not the
 authority state, not any sequence state. A test hashes the workspace and the
 whole authority tree before and after a request and requires them byte-identical.
 
-## What C1 and C2 deliberately do not do
+## The execution boundary
 
-No key generation, no signing, no receipt issuance, no check execution, no
-sudo hop, no sequence allocation, and no change to `verify.sh` or the Stop
-hook. An enrolled project behaves today exactly as an unenrolled one.
+Checks never run in the live worktree, and they never run as the developer.
+
+```text
+dev / executor        untrusted: repo, .git, HOME, its own processes
+      | request
+agentmd               authority: enrollment, state, key, snapshot preparation
+      | sudo, fixed RunAs
+agentmd-runner        execution only: no key, no state write, no snapshot write
+      |
+sealed snapshot       read-only source identity the checks observe
+```
+
+### Why the live worktree cannot be used
+
+A fingerprint taken before and after a run only samples two instants. The
+developer owns the worktree, so they can hold a failing tree X, swap in a
+passing tree Y for the duration of the checks, and restore X before the second
+sample. `BEFORE(X)` equals `AFTER(X)` while the checks observed Y.
+
+The identity is therefore the snapshot's, not the live tree's. The authority
+copies first and hashes the copy, so the manifest describes exactly the bytes
+the checks will see. A snapshot captured mid-mutation is internally consistent
+but will not match the live worktree when a gate later recomputes it, so
+transient substitution becomes a fallback rather than a forgery.
+
+### Snapshot
+
+`agent-md-authority prepare-job <id> --check <name>` materialises it:
+
+1. the worktree path set is enumerated — tracked plus untracked-not-ignored;
+2. every path is validated as relative and free of `..`;
+3. a symlinked directory component refuses the whole snapshot, because it would
+   let the developer redirect the copy at anything the authority can read;
+4. symlinks are copied as links and never followed; executable bits are kept;
+5. structural exclusions match the Phase A protocol: `.git`, the receipt cache
+   and the working-memory files;
+6. the tree is sealed — directories `0555`, files `0444` or `0555` — so a later
+   write needs a chmod on a directory neither the runner nor the developer owns;
+7. the manifest is taken from the sealed copy and fingerprinted.
+
+Enumeration is the one place a repository's own Git configuration is read, so
+it crosses into the execution-only account first. A repository that manages to
+execute code through `.git/config` reaches the runner, never the authority. A
+staging root has no such account and says so rather than hiding the gap.
+
+### What the child gets
+
+```text
+env -i
+  + the approved allowlist (PATH, LANG/LC_*, declared extras)
+  + HOME     = ephemeral, created per run, never the developer's
+  + TMPDIR   = scratch outside the snapshot
+  + PYTHONNOUSERSITE=1
+  + trusted absolute env, timeout and bash
+  + cwd      = the sealed snapshot, revalidated after chdir
+  + stdin    = /dev/null
+  + fd 3     closed
+```
+
+A check that needs to write source is incompatible with accelerated receipts
+and simply fails; the snapshot is not weakened to accommodate it. Legitimate
+build output belongs in `TMPDIR`.
+
+### Sudo rule
+
+```text
+Defaults!ALIAS env_reset, secure_path="/usr/local/bin:/usr/bin:/bin"
+Cmnd_Alias ALIAS = /usr/local/lib/agent-md/run-check <project-id>,
+                   /usr/local/lib/agent-md/agent-md-authority enumerate *
+agentmd ALL=(agentmd-runner) NOPASSWD: ALIAS
+```
+
+Fixed RunAs, literal project id, no wildcard command, no rule targeting root or
+any developer. The rule no longer varies per developer, because checks no
+longer run as one.
+
+### Nothing trusted runs after the command starts
+
+`run-check` validates the job, the snapshot, the tools and the environment,
+enters the snapshot, and then **execs** the command. It does not call the
+command and resume afterwards. After that line no code of ours is left running
+under the same uid as the project's own code, so there is nothing to tamper
+with and nothing to post-process a verdict.
+
+The status the supervisor observes is whatever the kernel reports back through
+sudo. The decision rule for this slice is deliberately blunt:
+
+```text
+exit 0       execution returned zero
+exit != 0    no candidate PASS
+```
+
+A refusal exits `125`, and a check may also legitimately exit `125`. That
+collision is accepted here because both are non-zero and both are fail-closed:
+neither can become an authenticated PASS. Carrying a separate infrastructure
+verdict over an inherited file descriptor was tried and rejected — sudo closes
+descriptors above stderr, and re-opening that path with `closefrom_override`
+would widen descriptor inheritance exactly at the privileged boundary for a
+diagnostics gain, not a trust one. The sudo policy is asserted to contain no
+such override.
+
+Check output on stdout and stderr is untrusted data: passed through, never
+parsed, unable to change the exit status.
+
+### Timeout
+
+The service account cannot signal a process belonging to another account, so
+the deadline is enforced inside the execution by a trusted absolute `timeout`
+rather than by widening the supervisor's privilege. It sends SIGTERM and
+escalates to SIGKILL after a grace period.
+
+GNU `timeout` reports `124` when the term was enough and `137` when it had to
+escalate. Both are non-zero and neither can become a PASS. The core collapses
+both to `124` by rewriting the status after the command returns, which is
+precisely the post-processing `exec` forbids here; a supervisor running as its
+own account can classify them later.
+
+### Toolchain limits
+
+`bash`, `timeout` and `env` are absolute paths recorded at enrollment and
+revalidated immediately before execution: not symlinks, executable, and not
+writable by the execution user. They are not content-pinned, because every
+distribution security update would otherwise invalidate every enrollment;
+permissions, not digests, are what stop a substitution.
+
+Transitive influence is bounded where a switch exists and documented where it
+does not. An interpreter reached through the approved PATH gets an ephemeral
+HOME and, for Python, `PYTHONNOUSERSITE=1`. Where an interpreter offers no such
+control, isolation is not proven, and the honest position is refusal rather
+than assumed safety.
+
+A project whose verification depends on a developer-writable `.venv`,
+`~/.local`, the Docker socket, an SSH agent or other mutable developer-owned
+resources is incompatible with accelerated receipts in this version. Full
+verification stays available and unchanged.
+
+## What C1-C3a deliberately do not do
+
+No key generation, no signing, no receipt issuance, no sequence allocation, no
+`dev -> agentmd` entry hop, and no change to `verify.sh` or the Stop hook. An
+exit status of 0 from `run-check` means the command exited 0 and nothing more:
+it is not a receipt, not an attestation and not a PASS.
+
+## Integration evidence
+
+The unit suite runs every role as one user, which cannot show that a developer
+is unable to reach the execution account, the authority state or the key. That
+evidence comes from a disposable container with three real principals:
+
+```bash
+bash tests/integration/local-issuer-boundary.bash
+```
+
+It creates `dev`, `agentmd` and `agentmd-runner` with distinct uids, installs
+the production layout, validates the generated policy with `visudo`, runs the
+boundary matrix and destroys everything on exit. It changes nothing on the
+host, and it is deliberately not part of `tests/run.sh`: it needs Docker and
+has its own runtime.
+
+A row only counts when the operation actually ran; a step that could not be
+exercised is reported as such rather than as a pass.

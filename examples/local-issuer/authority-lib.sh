@@ -15,11 +15,16 @@
 # file, so standalone linting cannot see their use sites.
 # shellcheck disable=SC2034,SC2329
 
-AUTHORITY_SCHEMA=2
+AUTHORITY_SCHEMA=5
 AUTHORITY_DEFAULT_EXEC_PATH=/usr/local/bin:/usr/bin:/bin
 AUTHORITY_MECHANISM_FILES=".claude/hooks/_lib.sh .claude/hooks/stop-verify.sh .agent-md/bin/verify.sh"
 AUTHORITY_ORDINARY_CHECKS="typecheck lint test integration smoke runtime"
 AUTHORITY_CONDITIONAL_CHECKS="independent approval"
+AUTHORITY_SERVICE_USER=agentmd
+AUTHORITY_RUNNER_USER=agentmd-runner
+AUTHORITY_REQUIRED_TOOLS="bash timeout env"
+AUTHORITY_SCRATCH_ROOT=/var/tmp/agent-md-runner
+AUTHORITY_TIMEOUT_GRACE_SECONDS=5
 
 ROOT=""
 
@@ -468,17 +473,23 @@ authority_read_contract() {
   local checks='[]' conditional='[]' required='[]' timeout=null total=null
   local required_seen=0
   AUTHORITY_CONTRACT_ERROR=""
+  # The reason is also written to stderr. Callers read this function through a
+  # command substitution, which runs in a subshell, so a variable alone would
+  # never reach them and every refusal would arrive blank.
   if [ ! -f "$file" ]; then
     AUTHORITY_CONTRACT_ERROR="agent-md.toml is absent"
+    printf '%s\n' "$AUTHORITY_CONTRACT_ERROR" >&2
     return 1
   fi
   if [ -L "$file" ]; then
     AUTHORITY_CONTRACT_ERROR="agent-md.toml is a symlink"
+    printf '%s\n' "$AUTHORITY_CONTRACT_ERROR" >&2
     return 1
   fi
   lines=$(authority_parse_contract_lines "$file") || true
   if printf '%s\n' "$lines" | grep -q '^ERROR:'; then
     AUTHORITY_CONTRACT_ERROR=$(printf '%s\n' "$lines" | sed -n 's/^ERROR://p' | head -1)
+    printf '%s\n' "$AUTHORITY_CONTRACT_ERROR" >&2
     return 1
   fi
 
@@ -517,12 +528,14 @@ EOF
       *" $entry "*) ;;
       *)
         AUTHORITY_CONTRACT_ERROR="verify.policy.required names an unknown check '$entry'"
-        return 1
+        printf '%s\n' "$AUTHORITY_CONTRACT_ERROR" >&2
+    return 1
         ;;
     esac
     if ! printf '%s\n' "$name_list" | grep -qxF "$entry"; then
       AUTHORITY_CONTRACT_ERROR="verify.policy.required names '$entry', which has no configured command"
-      return 1
+      printf '%s\n' "$AUTHORITY_CONTRACT_ERROR" >&2
+    return 1
     fi
   done <<EOF
 $(printf '%s' "$required" | jq -r '.[]')
@@ -530,10 +543,12 @@ EOF
 
   if [ "$(printf '%s' "$required" | jq 'length != (unique | length)')" = true ]; then
     AUTHORITY_CONTRACT_ERROR="verify.policy.required contains a duplicate"
+    printf '%s\n' "$AUTHORITY_CONTRACT_ERROR" >&2
     return 1
   fi
   if [ "$(printf '%s' "$checks" | jq 'length')" -eq 0 ]; then
     AUTHORITY_CONTRACT_ERROR="no ordinary verification command is configured"
+    printf '%s\n' "$AUTHORITY_CONTRACT_ERROR" >&2
     return 1
   fi
   # Without an explicit array the core falls back to legacy inference over
@@ -542,6 +557,7 @@ EOF
   # do, so it requires the array to be declared.
   if [ "$required_seen" -ne 1 ]; then
     AUTHORITY_CONTRACT_ERROR="verify.policy.required must be declared explicitly for an approved contract"
+    printf '%s\n' "$AUTHORITY_CONTRACT_ERROR" >&2
     return 1
   fi
 
@@ -599,4 +615,235 @@ authority_find_projects() {
       jq -r '.project_id // empty' "$dir/enrollment.json" 2>/dev/null
     fi
   done
+}
+
+# --- Trusted runtime tools ---------------------------------------------------
+#
+# The child must not reach its shell or its timeout through a PATH the
+# developer can influence. Both are recorded as absolute paths at enrollment
+# and revalidated immediately before execution.
+#
+# Trust here means "the execution user cannot replace this executable", not
+# "this executable has a pinned content digest". A digest would be stronger,
+# but every distribution security update to bash or coreutils would invalidate
+# every enrollment, and an authority nobody can keep enrolled protects nothing.
+# The ownership and permission checks are what actually stop a substitution.
+
+authority_tool_trust() {
+  local path="$1" uid="$2" gids="$3" resolved parent
+  case "$path" in
+    /*) ;;
+    *) printf 'not an absolute path'; return 1 ;;
+  esac
+  if [ -L "$path" ]; then printf 'is a symlink'; return 1; fi
+  resolved=$(realpath "$path" 2>/dev/null) || { printf 'does not resolve'; return 1; }
+  if [ "$resolved" != "$path" ]; then printf 'resolves elsewhere'; return 1; fi
+  if [ ! -f "$path" ] || [ ! -x "$path" ]; then printf 'is not an executable file'; return 1; fi
+  if path_has_symlink "$path"; then printf 'path component is a symlink'; return 1; fi
+  if dir_writable_by_user "$path" "$uid" "$gids" 2>/dev/null; then
+    printf 'is writable by the execution user'; return 1
+  fi
+  parent=$(dirname "$path")
+  if dir_writable_by_user "$parent" "$uid" "$gids"; then
+    printf 'sits in a directory the execution user can write'; return 1
+  fi
+  return 0
+}
+
+# authority_discover_tools <uid> <gids>
+# Emits the approved tool table, or fails with a reason on stdout.
+authority_discover_tools() {
+  local uid="$1" gids="$2" name path reason entries='[]'
+  for name in $AUTHORITY_REQUIRED_TOOLS; do
+    case "$name" in
+      bash) path=/bin/bash; [ -x "$path" ] || path=/usr/bin/bash ;;
+      timeout) path=/usr/bin/timeout; [ -x "$path" ] || path=/bin/timeout ;;
+      env) path=/usr/bin/env; [ -x "$path" ] || path=/bin/env ;;
+      *) printf 'unknown tool %s' "$name"; return 1 ;;
+    esac
+    path=$(realpath "$path" 2>/dev/null) || { printf 'cannot resolve %s' "$name"; return 1; }
+    if ! reason=$(authority_tool_trust "$path" "$uid" "$gids"); then
+      printf '%s at %s %s' "$name" "$path" "$reason"; return 1
+    fi
+    entries=$(printf '%s' "$entries" | jq -c --arg n "$name" --arg p "$path" '. + [{name:$n,path:$p}]')
+  done
+  printf '%s' "$entries" | jq -cS 'sort_by(.name)'
+}
+
+# authority_file_unwritable_by_effective_user <path>
+# The control-plane rule for anything the execution user may read but must not
+# influence. It is deliberately expressed as "this user cannot write it" rather
+# than "it is owned by X", because that is the property that actually matters
+# and the only one a fixture can reproduce without a real service account.
+authority_file_unwritable_by_effective_user() {
+  local path="$1"
+  [ -e "$path" ] || { printf 'is absent'; return 1; }
+  if [ -L "$path" ]; then printf 'is a symlink'; return 1; fi
+  if path_has_symlink "$path"; then printf 'path component is a symlink'; return 1; fi
+  if [ -w "$path" ]; then printf 'is writable by the execution user'; return 1; fi
+  if [ -w "$(dirname "$path")" ]; then printf 'sits in a directory the execution user can write'; return 1; fi
+  return 0
+}
+
+# --- Execution snapshot ------------------------------------------------------
+#
+# Checks never run in the live worktree. The developer owns that directory and
+# can swap it to a passing state, let the checks observe that, and restore the
+# original before and after any sampling the authority does. A before/after
+# fingerprint only samples two instants and cannot see the substitution.
+#
+# The identity is therefore the snapshot's, not the live tree's. The authority
+# copies first and hashes the copy, so the manifest describes exactly the bytes
+# the checks will see. A snapshot captured mid-mutation is internally
+# consistent but will simply never match the live worktree later, which makes
+# transient substitution useless rather than dangerous.
+
+authority_snapshot_root() { printf '%s/snapshots' "$(state_dir)"; }
+authority_snapshot_dir() { printf '%s/%s' "$(authority_snapshot_root)" "$1"; }
+
+# A path offered by the enumerator is data, not authority. It must stay inside
+# the workspace and must not climb out of it.
+authority_relative_path_is_safe() {
+  case "$1" in
+    ""|/*|.|..) return 1 ;;
+    */../*|../*|*/..) return 1 ;;
+    *$'\n'*) return 1 ;;
+  esac
+  return 0
+}
+
+# authority_enumerate_paths <workspace>
+#
+# Emits the NUL separated worktree path set: everything Git tracks plus
+# everything untracked that is not ignored. Git has to answer this, because
+# reproducing .gitignore semantics by hand would be a large and silently wrong
+# surface.
+#
+# This is the one place a repository's own Git configuration is read, so it is
+# meant to run as the execution-only account and never as the authority. The
+# hardening below removes the obvious execution vectors; containment by uid is
+# what actually bounds the damage.
+authority_enumerate_paths() {
+  local workspace="$1"
+  # The enumerator runs as the execution account while the repository belongs
+  # to the developer, so Git's dubious-ownership guard fires. The workspace is
+  # named explicitly and narrowly: it is the path the authority already
+  # canonicalised and approved, and the guard's purpose -- not trusting a
+  # stranger's repository configuration -- is what the containment hop and the
+  # hardening flags below are for.
+  GIT_CONFIG_NOSYSTEM=1 GIT_ATTR_NOSYSTEM=1 HOME=/nonexistent \
+  git -C "$workspace" --no-pager --no-optional-locks \
+    -c "safe.directory=$workspace" \
+    -c core.fsmonitor=false \
+    -c core.hooksPath=/dev/null \
+    -c core.pager=cat \
+    -c protocol.ext.allow=never \
+    ls-files -z --cached --others --exclude-standard
+}
+
+# authority_materialize_snapshot <workspace> <paths-file> <dest>
+#
+# Copies the enumerated paths into a tree the authority owns. Content is read
+# once and written once; the manifest is then taken from the copy, so what was
+# hashed is exactly what will execute.
+authority_materialize_snapshot() {
+  local workspace="$1" paths="$2" dest="$3" path target parent mode
+  mkdir -p "$dest" || { printf 'cannot create snapshot directory'; return 1; }
+  while IFS= read -r -d '' path; do
+    verification_receipt_path_is_structurally_excluded_stub "$path" && continue
+    if ! authority_relative_path_is_safe "$path"; then
+      printf 'enumerated path is unsafe: %s' "$path"; return 1
+    fi
+    # A symlinked directory component would let the developer redirect the copy
+    # at anything the authority can read, so the whole snapshot is refused.
+    parent=$(dirname "$path")
+    if [ "$parent" != "." ] && path_has_symlink "$workspace/$parent"; then
+      printf 'workspace path component is a symlink: %s' "$parent"; return 1
+    fi
+    target="$dest/$path"
+    mkdir -p "$(dirname "$target")" || { printf 'cannot create %s' "$(dirname "$target")"; return 1; }
+    if [ -L "$workspace/$path" ]; then
+      # Recorded as a link, never followed.
+      cp -P "$workspace/$path" "$target" || { printf 'cannot copy symlink %s' "$path"; return 1; }
+      continue
+    fi
+    if [ ! -f "$workspace/$path" ]; then
+      # Deleted between enumeration and copy: absence is a legitimate state and
+      # simply does not appear in the snapshot.
+      continue
+    fi
+    cat < "$workspace/$path" > "$target" || { printf 'cannot copy %s' "$path"; return 1; }
+    if [ -x "$workspace/$path" ]; then mode=0555; else mode=0444; fi
+    chmod "$mode" "$target" || { printf 'cannot set mode on %s' "$path"; return 1; }
+  done < "$paths"
+  return 0
+}
+
+# Structural exclusions mirror the Phase A receipt protocol. The authority keeps
+# its own copy rather than sourcing the repository's implementation.
+verification_receipt_path_is_structurally_excluded_stub() {
+  case "$1" in
+    .git|.git/*|.agent/verification|.agent/verification/*|\
+    memory/agents.md|memory/plan.md|memory/progress.md|memory/verify.md|memory/gotchas.md) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+# authority_seal_snapshot <dest>
+# Read and execute for everyone who can reach it, writable by nobody, including
+# the owner. A later write therefore needs an explicit chmod, which neither the
+# runner nor the developer can perform on a directory they do not own.
+authority_seal_snapshot() {
+  local dest="$1"
+  find "$dest" -type d -exec chmod 0555 {} + 2>/dev/null
+  find "$dest" -type f -perm -u+x -exec chmod 0555 {} + 2>/dev/null
+  find "$dest" -type f ! -perm -u+x -exec chmod 0444 {} + 2>/dev/null
+  chmod 0555 "$dest" 2>/dev/null
+  return 0
+}
+
+# authority_snapshot_manifest <dest>
+# The source identity, taken from the snapshot itself.
+authority_snapshot_manifest() {
+  local dest="$1" entries path kind digest mode
+  entries=$(mktemp "${TMPDIR:-/tmp}/agent-md-snap.XXXXXX") || return 1
+  : > "$entries"
+  while IFS= read -r -d '' path; do
+    path=${path#"$dest"/}
+    if [ -L "$dest/$path" ]; then
+      kind="symlink"; mode=120000
+      digest=$(readlink "$dest/$path" | sha256_hex) || { rm -f "$entries"; return 1; }
+    else
+      kind="file"
+      if [ -x "$dest/$path" ]; then mode=100755; else mode=100644; fi
+      digest=$(sha256_file "$dest/$path") || { rm -f "$entries"; return 1; }
+    fi
+    jq -nc --arg p "$path" --arg k "$kind" --arg m "$mode" --arg d "$digest" \
+      '{path:$p,kind:$k,mode:$m,digest:$d}' >> "$entries"
+  done < <(find "$dest" \( -type f -o -type l \) -print0 | sort -z)
+  jq -sc 'sort_by(.path)' "$entries"
+  rm -f "$entries"
+}
+
+# --- Execution identity ------------------------------------------------------
+#
+# The developer and the runner are different principals and were conflated
+# once already. The developer owns the repository and is untrusted: their write
+# access is what disqualifies a PATH entry, and they stay in the enrollment for
+# that. They are not the account a check runs as.
+#
+# A staging root has no service accounts, so it falls back to the current user
+# and says so. Production resolves the real runner and nothing else.
+authority_runner_identity() {
+  local user uid
+  if getent passwd "$AUTHORITY_RUNNER_USER" >/dev/null 2>&1; then
+    user="$AUTHORITY_RUNNER_USER"
+    uid=$(passwd_field "$user" 3) || return 1
+  elif is_real_root_prefix; then
+    printf 'the %s service account does not exist' "$AUTHORITY_RUNNER_USER"
+    return 1
+  else
+    user=$(id -un); uid=$(id -u)
+  fi
+  jq -nc --arg u "$user" --argjson i "$uid" '{user:$u,uid:$i}'
 }

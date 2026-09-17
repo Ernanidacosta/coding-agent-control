@@ -1,0 +1,239 @@
+#!/bin/bash
+# run-check — executes one authority-approved command as the enrolled developer.
+#
+# This is the descending half of the execution boundary. The authority runs as
+# its own service account and cannot become the developer on its own, so it
+# reaches this helper through a sudo rule that names both the target user and
+# one literal project id. Everything this program will do is therefore fixed
+# before it starts:
+#
+#   run-check <project-id>
+#
+# There is no argument for a command, a workspace or an environment. The job it
+# executes is read from a control-plane file the authority owns and the
+# developer cannot modify. The single argument only says which job.
+#
+# Every validation happens before any project code starts. The last thing this
+# program does is exec the approved command, so nothing trusted is left running
+# under the same uid as hostile code, and the status the supervisor observes is
+# the one the kernel reports through sudo.
+#
+# A refusal exits 125. A check may also legitimately exit 125, and in this
+# slice that collision is acceptable: both are non-zero, both are fail-closed,
+# and neither can become an authenticated PASS. Diagnostics can improve later
+# without being mixed into trust.
+
+set -u
+
+# This program's own PATH is pinned before anything else runs. In production
+# sudo's secure_path already does this; pinning here too means the helper
+# behaves identically when it is exercised directly.
+PATH=/usr/local/bin:/usr/bin:/bin
+export PATH
+
+# PROGRAM and ROOT are consumed by authority-lib.sh. shellcheck only follows a
+# sourced file when invoked with -x, so these directives keep the program clean
+# under either invocation.
+# shellcheck disable=SC2034
+PROGRAM=${0##*/}
+
+AUTHORITY_SELF_DIR=$(cd "$(dirname "$(realpath "$0")")" && pwd)
+# shellcheck source=examples/local-issuer/authority-lib.sh
+# shellcheck disable=SC1091
+. "$AUTHORITY_SELF_DIR/authority-lib.sh"
+
+EX_REFUSED=125
+
+refuse() {
+  printf 'run-check: refused: %s\n' "$1" >&2
+  exit "$EX_REFUSED"
+}
+
+PROJECT_ID=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    # The production sudo rule authorises a literal project id and nothing
+    # else, so this flag can never appear through that path.
+    --root) ROOT=${2%/}; shift 2 ;;
+    -*) refuse "unknown option: $1" ;;
+    *)
+      [ -z "$PROJECT_ID" ] || refuse "exactly one project id is accepted"
+      PROJECT_ID="$1"; shift
+      ;;
+  esac
+done
+[ -n "$PROJECT_ID" ] || refuse "a project id is required"
+case "$PROJECT_ID" in
+  *[!a-zA-Z0-9-]*|""|*--*) refuse "project id has an unexpected shape" ;;
+esac
+
+command -v jq >/dev/null 2>&1 || refuse "jq is required"
+
+JOB="$(projects_dir)/$PROJECT_ID/job.json"
+if ! reason=$(authority_file_unwritable_by_effective_user "$JOB"); then
+  refuse "job file $reason"
+fi
+
+JOB_JSON=$(cat "$JOB" 2>/dev/null) || refuse "job file is unreadable"
+
+# --- strict job schema -------------------------------------------------------
+if ! printf '%s' "$JOB_JSON" | jq -e '
+  type == "object" and
+  (.schema | type) == "number" and
+  (.project_id | type) == "string" and
+  (.workspace | type) == "string" and
+  (.snapshot | type) == "string" and
+  (.snapshot_fingerprint | type) == "string" and
+  (.execution | type) == "object" and
+  (.execution.user | type) == "string" and
+  (.execution.uid | type) == "number" and
+  (.developer | type) == "object" and
+  (.developer.user | type) == "string" and
+  (.developer.uid | type) == "number" and
+  (.check | type) == "string" and
+  (.command | type) == "string" and
+  (.environment | type) == "array" and
+  all(.environment[]; (.name | type) == "string" and (.value | type) == "string") and
+  (.timeout_seconds | type) == "number" and
+  (.tools | type) == "array" and
+  all(.tools[]; (.name | type) == "string" and (.path | type) == "string")
+' >/dev/null 2>&1; then
+  refuse "job does not match the control-plane schema"
+fi
+EXTRA=$(printf '%s' "$JOB_JSON" | jq -r '
+  ["schema","project_id","workspace","snapshot","snapshot_fingerprint",
+    "execution","developer","check","command","environment","timeout_seconds","tools"] as $allowed
+  | [keys_unsorted[] | select(IN($allowed[]) | not)] | join(", ")')
+[ -z "$EXTRA" ] || refuse "job carries unexpected fields: $EXTRA"
+
+[ "$(printf '%s' "$JOB_JSON" | jq -r '.schema')" = "$AUTHORITY_SCHEMA" ] \
+  || refuse "job uses an unsupported schema"
+[ "$(printf '%s' "$JOB_JSON" | jq -r '.project_id')" = "$PROJECT_ID" ] \
+  || refuse "job names a different project"
+
+# The job binds the execution account, which is the runner and never the
+# developer. A mismatch means the job was prepared for a different principal.
+JOB_UID=$(printf '%s' "$JOB_JSON" | jq -r '.execution.uid')
+[ "$JOB_UID" = "$(id -u)" ] \
+  || refuse "job is addressed to uid $JOB_UID but this process runs as $(id -u)"
+# The execution account must be distinct from the developer. A staging root has
+# no service accounts, so the two necessarily coincide there and the check is
+# announced instead of enforced; the container integration exercises the real
+# separation.
+DEV_UID=$(printf '%s' "$JOB_JSON" | jq -r '.developer.uid')
+if [ "$DEV_UID" = "$(id -u)" ]; then
+  if is_real_root_prefix; then
+    refuse "job would execute as the developer; the execution account must be distinct"
+  fi
+  printf 'run-check: staging root: developer and execution account coincide\n' >&2
+fi
+
+TIMEOUT_SECONDS=$(printf '%s' "$JOB_JSON" | jq -r '.timeout_seconds')
+case "$TIMEOUT_SECONDS" in
+  ''|*[!0-9]*|0) refuse "job timeout must be a positive integer" ;;
+esac
+
+# --- execution snapshot ------------------------------------------------------
+# The live worktree is never entered. The developer owns it and can substitute
+# a passing tree for the duration of a check, so the checks run against a tree
+# the authority captured and sealed instead.
+SNAPSHOT=$(printf '%s' "$JOB_JSON" | jq -r '.snapshot')
+case "$SNAPSHOT" in /*) ;; *) refuse "job snapshot is not absolute" ;; esac
+CANONICAL=$(realpath "$SNAPSHOT" 2>/dev/null) || refuse "job snapshot does not resolve"
+[ "$CANONICAL" = "$SNAPSHOT" ] || refuse "job snapshot is not canonical"
+[ -d "$CANONICAL" ] || refuse "job snapshot is not a directory"
+path_has_symlink "$CANONICAL" && refuse "snapshot path traverses a symlink"
+# Sealed means nobody can write it, owner included, so a later write needs a
+# chmod on a directory neither this account nor the developer owns.
+[ ! -w "$CANONICAL" ] || refuse "snapshot is writable by this account"
+
+# --- environment -------------------------------------------------------------
+# Built from nothing. No caller variable, no service-account variable and no
+# shell startup file contributes anything.
+GIDS=$(id -G) || refuse "cannot resolve group membership"
+ENV_PAIRS=()
+APPROVED_PATH=""
+while IFS= read -r NAME; do
+  [ -n "$NAME" ] || continue
+  if env_name_is_forbidden "$NAME"; then
+    refuse "job environment contains a variable the authority forbids: $NAME"
+  fi
+  # HOME never comes from the job. The developer's home is writable by the
+  # developer and full of things that change behaviour, so the child gets an
+  # ephemeral one this program creates instead.
+  [ "$NAME" != HOME ] || continue
+  VALUE=$(printf '%s' "$JOB_JSON" | jq -r --arg n "$NAME" '.environment[] | select(.name == $n) | .value' | head -1)
+  [ "$NAME" != PATH ] || APPROVED_PATH="$VALUE"
+  ENV_PAIRS+=("$NAME=$VALUE")
+done <<EOF
+$(printf '%s' "$JOB_JSON" | jq -r '.environment[].name')
+EOF
+[ -n "$APPROVED_PATH" ] || refuse "job environment declares no PATH"
+
+# Revalidated here, immediately before execution, not only at enrollment.
+PATH_REPORT=$(build_path_report "$APPROVED_PATH" "$(id -u)" "$GIDS")
+PATH_BAD=$(printf '%s' "$PATH_REPORT" | jq -r '[.[] | select(.status != "eligible") | "\(.entry): \(.reason)"] | join("; ")')
+[ -z "$PATH_BAD" ] || refuse "approved PATH is not trustworthy: $PATH_BAD"
+
+# --- trusted tools -----------------------------------------------------------
+tool_path() {
+  printf '%s' "$JOB_JSON" | jq -r --arg n "$1" '.tools[] | select(.name == $n) | .path' | head -1
+}
+BASH_PATH=$(tool_path bash)
+TIMEOUT_PATH=$(tool_path timeout)
+ENV_PATH=$(tool_path env)
+for tool_name in bash timeout env; do
+  case "$tool_name" in
+    bash) tool_value="$BASH_PATH" ;;
+    timeout) tool_value="$TIMEOUT_PATH" ;;
+    env) tool_value="$ENV_PATH" ;;
+  esac
+  [ -n "$tool_value" ] || refuse "job declares no $tool_name"
+  if ! reason=$(authority_tool_trust "$tool_value" "$(id -u)" "$GIDS"); then
+    refuse "$tool_name at $tool_value $reason"
+  fi
+done
+
+COMMAND=$(printf '%s' "$JOB_JSON" | jq -r '.command')
+[ -n "$COMMAND" ] || refuse "job declares an empty command"
+
+# --- scratch -----------------------------------------------------------------
+# Legitimate temporary and build output needs somewhere writable, outside the
+# snapshot so a check cannot alter what it is verifying. The directory is fixed
+# per project and wiped on entry: this program ends in exec, so no cleanup can
+# run afterwards and nothing may be left to accumulate.
+SCRATCH="$ROOT$AUTHORITY_SCRATCH_ROOT/$PROJECT_ID"
+rm -rf "$SCRATCH" 2>/dev/null
+mkdir -p "$SCRATCH/home" "$SCRATCH/tmp" || refuse "cannot prepare the scratch directory"
+chmod 0700 "$SCRATCH"
+ENV_PAIRS+=("HOME=$SCRATCH/home" "TMPDIR=$SCRATCH/tmp")
+# An interpreter reached through the approved PATH can still widen itself
+# through per-user package directories. The ephemeral HOME already moves those
+# out of reach; this states the intent explicitly for the interpreter that
+# offers a switch. Where an interpreter offers no such switch, isolation is not
+# proven and the limitation is documented rather than assumed away.
+ENV_PAIRS+=("PYTHONNOUSERSITE=1")
+
+# --- execute -----------------------------------------------------------------
+cd "$CANONICAL" || refuse "cannot enter the snapshot"
+[ "$(pwd -P)" = "$CANONICAL" ] || refuse "working directory changed while entering the snapshot"
+
+# The approved string is handed to the shell exactly as approved. It is never
+# tokenised and rebuilt, so quoting, pipelines and expansion behave as the core
+# runs them. stdin is closed: the control plane must never reach the command.
+# env -i discards everything this process inherited, so the child starts from
+# nothing and receives only the approved allowlist.
+#
+# exec, not a call: after this line no trusted code remains under the same uid
+# as the project's own code, and the status the supervisor observes is whatever
+# the kernel reports back through sudo.
+#
+# The deadline sends SIGTERM and escalates to SIGKILL after a grace period.
+# GNU timeout reports 124 when the term was enough and 137 when it had to
+# escalate; both are non-zero and neither can become a PASS. Collapsing them to
+# a single code would need work after the command finishes, which is exactly
+# what exec forbids here; a supervisor running as its own account can classify
+# them later.
+exec "$ENV_PATH" -i "${ENV_PAIRS[@]}" \
+  "$TIMEOUT_PATH" -k "${AUTHORITY_TIMEOUT_GRACE_SECONDS}s" "${TIMEOUT_SECONDS}s" \
+  "$BASH_PATH" -c "$COMMAND" </dev/null
