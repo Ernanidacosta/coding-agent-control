@@ -7,11 +7,12 @@
 # one literal project id. Everything this program will do is therefore fixed
 # before it starts:
 #
-#   run-check <project-id>
+#   run-check <project-id> <check>
 #
-# There is no argument for a command, a workspace or an environment. The job it
-# executes is read from a control-plane file the authority owns and the
-# developer cannot modify. The single argument only says which job.
+# There is no argument for a command, a workspace, an environment or a run.
+# Both arguments are literal in the sudo policy, so neither is a place a caller
+# can influence. Which evaluation run they refer to is resolved from
+# authority-owned state, never passed in.
 #
 # Every validation happens before any project code starts. The last thing this
 # program does is exec the approved command, so nothing trusted is left running
@@ -50,26 +51,45 @@ refuse() {
 }
 
 PROJECT_ID=""
+CHECK_NAME=""
 while [ $# -gt 0 ]; do
   case "$1" in
-    # The production sudo rule authorises a literal project id and nothing
-    # else, so this flag can never appear through that path.
+    # The production sudo rule authorises literal arguments and nothing else,
+    # so this flag can never appear through that path.
     --root) ROOT=${2%/}; shift 2 ;;
     -*) refuse "unknown option: $1" ;;
     *)
-      [ -z "$PROJECT_ID" ] || refuse "exactly one project id is accepted"
-      PROJECT_ID="$1"; shift
+      if [ -z "$PROJECT_ID" ]; then PROJECT_ID="$1"
+      elif [ -z "$CHECK_NAME" ]; then CHECK_NAME="$1"
+      else refuse "exactly one project id and one check are accepted"
+      fi
+      shift
       ;;
   esac
 done
 [ -n "$PROJECT_ID" ] || refuse "a project id is required"
+[ -n "$CHECK_NAME" ] || refuse "a check name is required"
 case "$PROJECT_ID" in
   *[!a-zA-Z0-9-]*|""|*--*) refuse "project id has an unexpected shape" ;;
+esac
+case " $AUTHORITY_ORDINARY_CHECKS " in
+  *" $CHECK_NAME "*) ;;
+  *) refuse "unknown check name: $CHECK_NAME" ;;
 esac
 
 command -v jq >/dev/null 2>&1 || refuse "jq is required"
 
-JOB="$(projects_dir)/$PROJECT_ID/job.json"
+# Which run is current is authority-owned state. The identifier is validated
+# before it is used to build a path, so a corrupted pointer cannot become a
+# traversal or an option.
+CURRENT="$(authority_current_run_file "$PROJECT_ID")"
+if ! reason=$(authority_file_unwritable_by_effective_user "$CURRENT"); then
+  refuse "current-run pointer $reason"
+fi
+RUN_ID=$(cat "$CURRENT" 2>/dev/null | head -1 | tr -d '\r\n')
+authority_run_id_is_safe "$RUN_ID" || refuse "current-run pointer is malformed"
+
+JOB="$(authority_run_dir "$PROJECT_ID" "$RUN_ID")/jobs/$CHECK_NAME.json"
 if ! reason=$(authority_file_unwritable_by_effective_user "$JOB"); then
   refuse "job file $reason"
 fi
@@ -81,6 +101,8 @@ if ! printf '%s' "$JOB_JSON" | jq -e '
   type == "object" and
   (.schema | type) == "number" and
   (.project_id | type) == "string" and
+  (.run_id | type) == "string" and
+  (.check | type) == "string" and
   (.workspace | type) == "string" and
   (.snapshot | type) == "string" and
   (.snapshot_fingerprint | type) == "string" and
@@ -101,7 +123,7 @@ if ! printf '%s' "$JOB_JSON" | jq -e '
   refuse "job does not match the control-plane schema"
 fi
 EXTRA=$(printf '%s' "$JOB_JSON" | jq -r '
-  ["schema","project_id","workspace","snapshot","snapshot_fingerprint",
+  ["schema","project_id","run_id","workspace","snapshot","snapshot_fingerprint",
     "execution","developer","check","command","environment","timeout_seconds","tools"] as $allowed
   | [keys_unsorted[] | select(IN($allowed[]) | not)] | join(", ")')
 [ -z "$EXTRA" ] || refuse "job carries unexpected fields: $EXTRA"
@@ -110,6 +132,10 @@ EXTRA=$(printf '%s' "$JOB_JSON" | jq -r '
   || refuse "job uses an unsupported schema"
 [ "$(printf '%s' "$JOB_JSON" | jq -r '.project_id')" = "$PROJECT_ID" ] \
   || refuse "job names a different project"
+[ "$(printf '%s' "$JOB_JSON" | jq -r '.run_id')" = "$RUN_ID" ] \
+  || refuse "job belongs to a different run"
+[ "$(printf '%s' "$JOB_JSON" | jq -r '.check')" = "$CHECK_NAME" ] \
+  || refuse "job carries a different check"
 
 # The job binds the execution account, which is the runner and never the
 # developer. A mismatch means the job was prepared for a different principal.
@@ -202,7 +228,7 @@ COMMAND=$(printf '%s' "$JOB_JSON" | jq -r '.command')
 # snapshot so a check cannot alter what it is verifying. The directory is fixed
 # per project and wiped on entry: this program ends in exec, so no cleanup can
 # run afterwards and nothing may be left to accumulate.
-SCRATCH="$ROOT$AUTHORITY_SCRATCH_ROOT/$PROJECT_ID"
+SCRATCH="$ROOT$AUTHORITY_SCRATCH_ROOT/$PROJECT_ID/$CHECK_NAME"
 rm -rf "$SCRATCH" 2>/dev/null
 mkdir -p "$SCRATCH/home" "$SCRATCH/tmp" || refuse "cannot prepare the scratch directory"
 chmod 0700 "$SCRATCH"

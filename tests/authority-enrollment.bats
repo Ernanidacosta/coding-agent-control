@@ -208,7 +208,7 @@ enrollment_file() {
   run_authority enroll "$WS" --root "$ROOT" --yes
   [ "$status" -eq 0 ]
   jq -e '
-    .schema == 5 and
+    .schema == 6 and
     (.project_id | length) > 0 and
     (.workspace | startswith("/")) and
     (.execution.user | length) > 0 and
@@ -237,5 +237,5 @@ enrollment_file() {
   local id state
   id=$(bash "$AUTHORITY" show --workspace "$WS" --root "$ROOT" | awk '/^project id:/ { print $3 }')
   state="$ROOT/var/lib/agent-md/projects/$id/state.json"
-  jq -e '.schema == 5 and .last_terminal == null and .pending == null' "$state" >/dev/null
+  jq -e '.schema == 6 and .last_terminal == null and .pending == null' "$state" >/dev/null
 }

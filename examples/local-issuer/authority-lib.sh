@@ -15,10 +15,18 @@
 # file, so standalone linting cannot see their use sites.
 # shellcheck disable=SC2034,SC2329
 
-AUTHORITY_SCHEMA=5
+AUTHORITY_SCHEMA=6
 AUTHORITY_DEFAULT_EXEC_PATH=/usr/local/bin:/usr/bin:/bin
 AUTHORITY_MECHANISM_FILES=".claude/hooks/_lib.sh .claude/hooks/stop-verify.sh .agent-md/bin/verify.sh"
 AUTHORITY_ORDINARY_CHECKS="typecheck lint test integration smoke runtime"
+# Execution order. This is verification_check_names order, which is what the
+# core produces from a single configuration. The core's completion path merges
+# a Git baseline with a worktree proposal and that merge reorders the result;
+# the authority has one approved contract and no merge, so it follows the
+# canonical order rather than reproducing a merge artefact. Order affects
+# diagnostics only: every applicable check runs.
+AUTHORITY_CHECK_ORDER="typecheck lint test integration smoke runtime"
+AUTHORITY_LEGACY_OVERHEAD_SECONDS=30
 AUTHORITY_CONDITIONAL_CHECKS="independent approval"
 AUTHORITY_SERVICE_USER=agentmd
 AUTHORITY_RUNNER_USER=agentmd-runner
@@ -846,4 +854,38 @@ authority_runner_identity() {
     user=$(id -un); uid=$(id -u)
   fi
   jq -nc --arg u "$user" --argjson i "$uid" '{user:$u,uid:$i}'
+}
+
+# --- Evaluation runs ---------------------------------------------------------
+#
+# A run is the unit of isolation. Preparing a snapshot used to replace a single
+# mutable directory, which would pull the ground out from under a check that
+# was still executing. Every evaluation now materialises its own run, and the
+# pointer to the current one is authority-owned so no caller can name a run.
+
+authority_runs_root() { printf '%s/%s/runs' "$(projects_dir)" "$1"; }
+authority_run_dir() { printf '%s/%s' "$(authority_runs_root "$1")" "$2"; }
+authority_current_run_file() { printf '%s/%s/current-run' "$(projects_dir)" "$1"; }
+authority_project_lock() { printf '%s/%s/.lock' "$(projects_dir)" "$1"; }
+
+# Run identifiers are generated here and never accepted from a request. The
+# charset is checked wherever one is read back, so a stored identifier can
+# never become a path traversal or an option.
+authority_run_id_is_safe() {
+  case "$1" in
+    ""|*[!a-f0-9-]*|-*|*-) return 1 ;;
+  esac
+  [ "${#1}" -eq 36 ]
+}
+
+# authority_derive_total_timeout <per-check> <stage-count> <declared-total>
+# Mirrors the core's legacy derivation when a contract declares no total, so a
+# project without one is still bounded rather than unbounded.
+authority_derive_total_timeout() {
+  local per_check="$1" stages="$2" declared="$3"
+  if [ -n "$declared" ] && [ "$declared" != null ]; then
+    printf '%s' "$declared"
+    return 0
+  fi
+  printf '%s' "$(( stages * per_check + AUTHORITY_LEGACY_OVERHEAD_SECONDS ))"
 }

@@ -47,28 +47,30 @@ approve() {
   PROJECT_ID=$(ls "$ROOT/var/lib/agent-md/projects" | head -1)
   export PROJECT_ID
   bash "$AUTHORITY" prepare-job "$PROJECT_ID" --check test --root "$ROOT" >/dev/null
-  chmod 0555 "$ROOT/var/lib/agent-md/projects/$PROJECT_ID"
 }
 
-job_file() { printf '%s/var/lib/agent-md/projects/%s/job.json' "$ROOT" "$PROJECT_ID"; }
+job_file() { printf '%s/jobs/test.json' "$(run_dir)"; }
 
 edit_job() {
-  local dir="$ROOT/var/lib/agent-md/projects/$PROJECT_ID"
-  chmod u+w "$dir"; chmod u+w "$dir/job.json"
-  jq "$@" "$dir/job.json" > "$dir/job.tmp" && mv "$dir/job.tmp" "$dir/job.json"
-  chmod 0444 "$dir/job.json"; chmod 0555 "$dir"
+  local jobs; jobs="$(run_dir)/jobs"
+  chmod u+w "$jobs" "$jobs/test.json"
+  jq "$@" "$jobs/test.json" > "$jobs/tmp" && mv "$jobs/tmp" "$jobs/test.json"
+  chmod 0444 "$jobs/test.json"; chmod 0555 "$jobs"
 }
 
 run_check_capture() {
   RC_OUT=$(mktemp); RC_ERR=$(mktemp)
   set +e
-  bash "$RUNCHECK" "$PROJECT_ID" --root "$ROOT" >"$RC_OUT" 2>"$RC_ERR"
+  bash "$RUNCHECK" "$PROJECT_ID" "${1:-test}" --root "$ROOT" >"$RC_OUT" 2>"$RC_ERR"
   RC_STATUS=$?
   set -e
   export RC_STATUS
 }
 
-snapshot_dir() { printf '%s/var/lib/agent-md/snapshots/%s/src' "$ROOT" "$PROJECT_ID"; }
+project_dir() { printf '%s/var/lib/agent-md/projects/%s' "$ROOT" "$PROJECT_ID"; }
+run_id() { cat "$(project_dir)/current-run"; }
+run_dir() { printf '%s/runs/%s' "$(project_dir)" "$(run_id)"; }
+snapshot_dir() { printf '%s/snapshot/src' "$(run_dir)"; }
 
 core_capture() {
   local command="$1" timeout="$2"
@@ -157,12 +159,12 @@ assert_parity() {
 @test "16 a symlinked job is refused" {
   write_contract 'echo hello'
   approve
-  local dir="$ROOT/var/lib/agent-md/projects/$PROJECT_ID"
+  local jobs; jobs="$(run_dir)/jobs"
   local elsewhere; elsewhere=$(mktemp)
-  chmod u+w "$dir"
-  cp "$dir/job.json" "$elsewhere"; rm -f "$dir/job.json"
-  ln -s "$elsewhere" "$dir/job.json"
-  chmod 0555 "$dir"
+  chmod u+w "$jobs"
+  cp "$jobs/test.json" "$elsewhere"; rm -f "$jobs/test.json"
+  ln -s "$elsewhere" "$jobs/test.json"
+  chmod 0555 "$jobs"
   run_check_capture
   [ "$RC_STATUS" -eq 125 ]
   grep -q "symlink" "$RC_ERR"
@@ -171,8 +173,8 @@ assert_parity() {
 @test "17 a developer-writable job is refused" {
   write_contract 'echo hello'
   approve
-  local dir="$ROOT/var/lib/agent-md/projects/$PROJECT_ID"
-  chmod u+w "$dir"; chmod 0644 "$dir/job.json"; chmod 0555 "$dir"
+  local jobs; jobs="$(run_dir)/jobs"
+  chmod u+w "$jobs"; chmod 0644 "$jobs/test.json"; chmod 0555 "$jobs"
   run_check_capture
   [ "$RC_STATUS" -eq 125 ]
   grep -q "writable" "$RC_ERR"
@@ -181,7 +183,7 @@ assert_parity() {
 @test "18 a job in a developer-writable directory is refused" {
   write_contract 'echo hello'
   approve
-  chmod 0755 "$ROOT/var/lib/agent-md/projects/$PROJECT_ID"
+  chmod 0755 "$(run_dir)/jobs"
   run_check_capture
   [ "$RC_STATUS" -eq 125 ]
   grep -q "directory the execution user can write" "$RC_ERR"
@@ -228,10 +230,10 @@ assert_parity() {
 @test "23 a malformed job is refused" {
   write_contract 'echo hello'
   approve
-  local dir="$ROOT/var/lib/agent-md/projects/$PROJECT_ID"
-  chmod u+w "$dir"; chmod u+w "$dir/job.json"
-  printf 'not json\n' > "$dir/job.json"
-  chmod 0444 "$dir/job.json"; chmod 0555 "$dir"
+  local jobs; jobs="$(run_dir)/jobs"
+  chmod u+w "$jobs" "$jobs/test.json"
+  printf 'not json\n' > "$jobs/test.json"
+  chmod 0444 "$jobs/test.json"; chmod 0555 "$jobs"
   run_check_capture
   [ "$RC_STATUS" -eq 125 ]
 }
@@ -268,7 +270,7 @@ assert_parity() {
   RC_OUT=$(mktemp); RC_ERR=$(mktemp)
   set +e
   LEAK_CANARY=leaked PYTHONPATH=/tmp/evil BASH_ENV=/tmp/evil.sh \
-    bash "$RUNCHECK" "$PROJECT_ID" --root "$ROOT" >"$RC_OUT" 2>"$RC_ERR"
+    bash "$RUNCHECK" "$PROJECT_ID" test --root "$ROOT" >"$RC_OUT" 2>"$RC_ERR"
   RC_STATUS=$?
   set -e
   [ "$RC_STATUS" -eq 0 ]
@@ -303,7 +305,7 @@ assert_parity() {
   approve
   RC_OUT=$(mktemp); RC_ERR=$(mktemp)
   set +e
-  printf '{"project_id":"secret"}\n' | bash "$RUNCHECK" "$PROJECT_ID" --root "$ROOT" >"$RC_OUT" 2>"$RC_ERR"
+  printf '{"project_id":"secret"}\n' | bash "$RUNCHECK" "$PROJECT_ID" test --root "$ROOT" >"$RC_OUT" 2>"$RC_ERR"
   RC_STATUS=$?
   set -e
   grep -q NOSTDIN "$RC_OUT"
@@ -313,11 +315,13 @@ assert_parity() {
 @test "30 run-check refuses anything but a single project id" {
   write_contract 'echo hello'
   approve
-  run bash "$RUNCHECK" "$PROJECT_ID" extra --root "$ROOT"
+  run bash "$RUNCHECK" "$PROJECT_ID" test extra --root "$ROOT"
   [ "$status" -eq 125 ]
   run bash "$RUNCHECK" --root "$ROOT"
   [ "$status" -eq 125 ]
-  run bash "$RUNCHECK" '../../etc/passwd' --root "$ROOT"
+  run bash "$RUNCHECK" '../../etc/passwd' test --root "$ROOT"
+  [ "$status" -eq 125 ]
+  run bash "$RUNCHECK" "$PROJECT_ID" nonsense --root "$ROOT"
   [ "$status" -eq 125 ]
 }
 

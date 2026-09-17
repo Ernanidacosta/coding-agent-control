@@ -43,8 +43,28 @@ EX_ENROLLMENT_CORRUPT=10
 EX_AUTHORITY_STATE_UNSAFE=11
 EX_WORKSPACE_UNSUPPORTED=12
 EX_ENROLLMENT_INELIGIBLE=13
+EX_CANDIDATE_FAIL=1
+EX_CALLER_UNBOUND=14
+EX_CALLER_MISMATCH=15
+EX_RUN_FAILED=16
+EX_BUDGET_EXHAUSTED=17
 EX_INTERNAL=20
 
+RESPONSE_MODE=eligibility
+ISSUER_PROJECTS=""
+ISSUER_CANONICAL=""
+ISSUER_RECORD=""
+ISSUER_PROJECT_ID=""
+ISSUER_RUN_ID=""
+ISSUER_SNAPSHOT_FP=""
+ISSUER_CALLER_UID=""
+ISSUER_CALLER_USER=""
+ISSUER_EXHAUSTED=false
+RESPONSE_RUN_ID=null
+RESPONSE_CALLER=null
+RESPONSE_SNAPSHOT=null
+RESPONSE_CHECKS='[]'
+RESPONSE_BUDGET=null
 RESPONSE_PROJECT_ID=null
 RESPONSE_WORKSPACE=null
 RESPONSE_SCOPE=null
@@ -56,6 +76,26 @@ RESPONSE_ENVIRONMENT='"unknown"'
 # through here, so stdout always holds exactly one JSON object.
 respond() {
   local status="$1" code="$2" reason="$3" exit_code="$4"
+  if [ "$RESPONSE_MODE" = evaluation ]; then
+    jq -nc \
+      --argjson protocol "$ISSUER_PROTOCOL" \
+      --arg status "$status" --arg reason_code "$code" --arg reason "$reason" \
+      --argjson project_id "$RESPONSE_PROJECT_ID" --argjson run_id "$RESPONSE_RUN_ID" \
+      --argjson workspace "$RESPONSE_WORKSPACE" --argjson scope "$RESPONSE_SCOPE" \
+      --argjson caller "$RESPONSE_CALLER" --argjson snapshot "$RESPONSE_SNAPSHOT" \
+      --argjson contract "$RESPONSE_CONTRACT" --argjson mechanism "$RESPONSE_MECHANISM" \
+      --argjson environment "$RESPONSE_ENVIRONMENT" --argjson checks "$RESPONSE_CHECKS" \
+      --argjson budget "$RESPONSE_BUDGET" '
+        {protocol: $protocol, schema: $protocol, status: $status,
+         reason_code: $reason_code, reason: $reason,
+         project_id: $project_id, run_id: $run_id, workspace: $workspace, scope: $scope,
+         caller: $caller, source: {snapshot: $snapshot},
+         contract: {state: $contract}, mechanism: {state: $mechanism},
+         environment: {state: $environment},
+         checks: $checks, budget: $budget}'
+    [ "$exit_code" -eq 0 ] || printf '%s: %s\n' "$PROGRAM" "$reason" >&2
+    exit "$exit_code"
+  fi
   jq -nc \
     --argjson protocol "$ISSUER_PROTOCOL" \
     --arg status "$status" \
@@ -89,6 +129,7 @@ usage() {
   cat <<'USAGE'
 Usage:
   agent-md-issuer eligibility [--root PREFIX] < request.json
+  agent-md-issuer evaluate    [--root PREFIX] < request.json
 
 Reads one JSON request object on stdin:
 
@@ -100,14 +141,23 @@ USAGE
 }
 
 cmd_eligibility() {
+  issuer_parse_options "$@"
+  issuer_resolve_request
+  issuer_check_eligibility
+  respond eligible ELIGIBLE "the authority recognises this project and would be authorised to attempt verification" "$EX_ELIGIBLE"
+}
+
+issuer_parse_options() {
   while [ $# -gt 0 ]; do
     case "$1" in
       --root) ROOT=${2%/}; shift 2 ;;
-      -h|--help) usage; return 0 ;;
+      -h|--help) usage; exit 0 ;;
       *) refuse REFUSED_MALFORMED_REQUEST "unknown option: $1" "$EX_MALFORMED_REQUEST" ;;
     esac
   done
+}
 
+issuer_resolve_request() {
   local raw; raw=$(cat)
 
   # --- request shape ---------------------------------------------------------
@@ -150,8 +200,9 @@ cmd_eligibility() {
   esac
 
   # --- authority state -------------------------------------------------------
-  local projects safety
-  projects=$(projects_dir)
+  local safety
+  ISSUER_PROJECTS=$(projects_dir)
+  projects="$ISSUER_PROJECTS"
   if ! safety=$(authority_dir_safety "$projects"); then
     refuse REFUSED_AUTHORITY_STATE_UNSAFE "authority project store is unusable: $safety" "$EX_AUTHORITY_STATE_UNSAFE"
   fi
@@ -160,6 +211,7 @@ cmd_eligibility() {
   local canonical
   canonical=$(realpath "$workspace" 2>/dev/null) || \
     refuse REFUSED_NOT_ENROLLED "workspace does not resolve" "$EX_NOT_ENROLLED"
+  ISSUER_CANONICAL="$canonical"
   RESPONSE_WORKSPACE=$(json_string "$canonical")
   [ -d "$canonical" ] || \
     refuse REFUSED_NOT_ENROLLED "workspace is not a directory" "$EX_NOT_ENROLLED"
@@ -170,6 +222,10 @@ cmd_eligibility() {
     *) refuse REFUSED_WORKSPACE_UNSUPPORTED "workspace is not a Git repository" "$EX_WORKSPACE_UNSUPPORTED" ;;
   esac
 
+}
+
+issuer_check_eligibility() {
+  local projects="$ISSUER_PROJECTS" canonical="$ISSUER_CANONICAL"
   # --- enrollment lookup -----------------------------------------------------
   # The binding is authority-side. A clone with identical content at another
   # path resolves to another canonical path and therefore has no enrollment.
@@ -184,6 +240,7 @@ cmd_eligibility() {
   fi
   project_id=$(printf '%s\n' "$matches" | head -1)
   case "$project_id" in */*|..|.|"") refuse REFUSED_ENROLLMENT_CORRUPT "enrollment has an invalid project id" "$EX_ENROLLMENT_CORRUPT" ;; esac
+  ISSUER_PROJECT_ID="$project_id"
   RESPONSE_PROJECT_ID=$(json_string "$project_id")
 
   file="$projects/$project_id/enrollment.json"
@@ -214,6 +271,12 @@ cmd_eligibility() {
   if [ "$(printf '%s' "$record" | jq -r '.status')" != eligible ]; then
     refuse REFUSED_ENROLLMENT_INELIGIBLE "enrollment was approved as ineligible: $(printf '%s' "$record" | jq -r '.reasons | join("; ")')" "$EX_ENROLLMENT_INELIGIBLE"
   fi
+
+  ISSUER_RECORD="$record"
+  # A caller who is not the enrolled developer is turned away here, before the
+  # authority spends any work on their behalf and before any later refusal can
+  # mask the real reason.
+  issuer_caller_gate
 
   # --- contract revalidation -------------------------------------------------
   local current_contract current_fp approved_fp contract_err contract_reason
@@ -308,8 +371,157 @@ EOF
     refuse REFUSED_ENV_CHANGED "approved PATH entries now resolve elsewhere: $drift" "$EX_ENV_CHANGED"
   fi
   RESPONSE_ENVIRONMENT='"current"'
+  ISSUER_RECORD="$record"
 
-  respond eligible ELIGIBLE "the authority recognises this project and would be authorised to attempt verification" "$EX_ELIGIBLE"
+  ISSUER_RECORD="$record"
+}
+
+# --- evaluate ----------------------------------------------------------------
+#
+# Runs the approved contract against one sealed snapshot and reports what
+# happened. It produces no signature, no sequence number and no receipt: the
+# result is structured output of this orchestration and nothing more, which is
+# why its vocabulary is candidate_pass and candidate_fail.
+
+# The caller's identity comes from the boundary that was actually crossed, not
+# from anything the caller said. sudo sets SUDO_UID after resetting the
+# environment, so a caller cannot supply it; and reaching this subcommand at
+# all requires already running as the authority account, which the developer
+# has no way to become except through the one rule that leads here.
+issuer_bind_caller() {
+  if is_real_root_prefix; then
+    [ "$(id -un)" = "$AUTHORITY_SERVICE_USER" ] || \
+      refuse REFUSED_CALLER_UNBOUND "evaluate runs as $(id -un); it must be reached as $AUTHORITY_SERVICE_USER through the authority boundary" "$EX_CALLER_UNBOUND"
+    [ -n "${SUDO_UID:-}" ] && [ -n "${SUDO_USER:-}" ] || \
+      refuse REFUSED_CALLER_UNBOUND "no caller identity was supplied by the boundary; direct invocation is not accepted" "$EX_CALLER_UNBOUND"
+  fi
+  ISSUER_CALLER_UID=${SUDO_UID:-$(id -u)}
+  ISSUER_CALLER_USER=${SUDO_USER:-$(id -un)}
+  case "$ISSUER_CALLER_UID" in ''|*[!0-9]*) refuse REFUSED_CALLER_UNBOUND "caller identity is malformed" "$EX_CALLER_UNBOUND" ;; esac
+  RESPONSE_CALLER=$(jq -nc --arg u "$ISSUER_CALLER_USER" --argjson i "$ISSUER_CALLER_UID" '{user:$u,uid:$i}')
+}
+
+# The enrolled developer is authority-side state. Nothing in the repository can
+# turn one developer into another.
+# A no-op for a plain eligibility question, which asks about a project rather
+# than on behalf of a caller.
+issuer_caller_gate() {
+  [ "$RESPONSE_MODE" = evaluation ] || return 0
+  issuer_assert_caller_matches_enrollment
+}
+
+issuer_assert_caller_matches_enrollment() {
+  local enrolled_uid enrolled_user
+  enrolled_uid=$(printf '%s' "$ISSUER_RECORD" | jq -r '.execution.uid')
+  enrolled_user=$(printf '%s' "$ISSUER_RECORD" | jq -r '.execution.user')
+  [ "$enrolled_uid" = "$ISSUER_CALLER_UID" ] || \
+    refuse REFUSED_CALLER_MISMATCH "this project is enrolled for $enrolled_user (uid $enrolled_uid); the caller is $ISSUER_CALLER_USER (uid $ISSUER_CALLER_UID)" "$EX_CALLER_MISMATCH"
+}
+
+issuer_prepare_run() {
+  local out
+  if ! out=$("$AUTHORITY_SELF_DIR/agent-md-authority" prepare-run "$ISSUER_PROJECT_ID" ${ROOT:+--root "$ROOT"} 2>&1); then
+    refuse REFUSED_RUN_FAILED "the evaluation run could not be prepared: $(printf '%s' "$out" | tail -1)" "$EX_RUN_FAILED"
+  fi
+  ISSUER_RUN_ID=$(printf '%s' "$out" | awk '/^run /{print $2; exit}')
+  authority_run_id_is_safe "$ISSUER_RUN_ID" || \
+    refuse REFUSED_RUN_FAILED "the prepared run has no usable identifier" "$EX_RUN_FAILED"
+  RESPONSE_RUN_ID=$(json_string "$ISSUER_RUN_ID")
+
+  local manifest_file
+  manifest_file="$(authority_run_dir "$ISSUER_PROJECT_ID" "$ISSUER_RUN_ID")/snapshot/manifest.json"
+  [ -f "$manifest_file" ] || refuse REFUSED_RUN_FAILED "the prepared run has no snapshot manifest" "$EX_RUN_FAILED"
+  ISSUER_SNAPSHOT_FP=$(jq -cS . "$manifest_file" | sha256_hex)
+  RESPONSE_SNAPSHOT=$(jq -nc --arg v "$ISSUER_SNAPSHOT_FP" '{algorithm:"sha256",value:$v}')
+}
+
+# One hop per check, always through the descending boundary in production. The
+# check's own output is untrusted and is kept away from stdout, which carries
+# exactly one response object.
+issuer_run_one_check() {
+  local check="$1"
+  if is_real_root_prefix; then
+    sudo -n -u "$AUTHORITY_RUNNER_USER" "$(lib_dir)/run-check" "$ISSUER_PROJECT_ID" "$check" >&2
+  else
+    "$AUTHORITY_SELF_DIR/run-check" "$ISSUER_PROJECT_ID" "$check" --root "$ROOT" >&2
+  fi
+}
+
+issuer_execute_checks() {
+  local run_dir jobs_dir per_check total declared stages
+  run_dir=$(authority_run_dir "$ISSUER_PROJECT_ID" "$ISSUER_RUN_ID")
+  jobs_dir="$run_dir/jobs"
+
+  local ordered=() name
+  for name in $AUTHORITY_CHECK_ORDER; do
+    [ -f "$jobs_dir/$name.json" ] && ordered+=("$name")
+  done
+  [ "${#ordered[@]}" -gt 0 ] || refuse REFUSED_RUN_FAILED "the prepared run carries no job" "$EX_RUN_FAILED"
+
+  per_check=$(printf '%s' "$ISSUER_RECORD" | jq -r '.approved_contract.timeout_seconds')
+  declared=$(printf '%s' "$ISSUER_RECORD" | jq -r '.approved_contract.total_timeout_seconds // empty')
+  stages=${#ordered[@]}
+  total=$(authority_derive_total_timeout "$per_check" "$stages" "$declared")
+
+  # Every applicable check runs while the budget allows, which is what the core
+  # does: a failing check does not hide the diagnosis of the ones after it.
+  local started elapsed remaining status exhausted=false required command identity job
+  started=$SECONDS
+  for name in "${ordered[@]}"; do
+    job="$jobs_dir/$name.json"
+    command=$(jq -r '.command' "$job")
+    identity=$(printf '%s' "$command" | sha256_hex)
+    required=$(printf '%s' "$ISSUER_RECORD" | jq -r --arg n "$name" \
+      'if (.approved_contract.required | index($n)) then "required" else "optional" end')
+    elapsed=$(( SECONDS - started ))
+    remaining=$(( total - elapsed ))
+    if [ "$remaining" -le 0 ]; then
+      exhausted=true
+      RESPONSE_CHECKS=$(printf '%s' "$RESPONSE_CHECKS" | jq -c \
+        --arg n "$name" --arg r "$required" --arg i "$identity" \
+        '. + [{name:$n,requirement:$r,origin:"configured",command_identity:$i,exit_code:null,execution:"not_run"}]')
+      continue
+    fi
+    if issuer_run_one_check "$name"; then status=0; else status=$?; fi
+    RESPONSE_CHECKS=$(printf '%s' "$RESPONSE_CHECKS" | jq -c \
+      --arg n "$name" --arg r "$required" --arg i "$identity" --argjson e "$status" \
+      '. + [{name:$n,requirement:$r,origin:"configured",command_identity:$i,exit_code:$e,execution:"completed"}]')
+  done
+  elapsed=$(( SECONDS - started ))
+  [ "$elapsed" -lt "$total" ] || exhausted=true
+  RESPONSE_BUDGET=$(jq -nc --argjson p "$per_check" --argjson t "$total" \
+    --argjson e "$elapsed" --argjson x "$exhausted" \
+    '{per_check_seconds:$p,total_seconds:$t,elapsed_seconds:$e,exhausted:$x}')
+  ISSUER_EXHAUSTED="$exhausted"
+}
+
+# Required checks decide the outcome; an optional failure is reported without
+# blocking, which is the core's semantics. Any non-zero required check, any
+# check that could not run, and an exhausted budget all make a candidate pass
+# impossible.
+issuer_conclude() {
+  local missing failed
+  failed=$(printf '%s' "$RESPONSE_CHECKS" | jq '[.[] | select(.requirement == "required" and (.exit_code != 0 or .execution != "completed"))] | length')
+  missing=$(printf '%s' "$RESPONSE_CHECKS" | jq '[.[] | select(.execution != "completed")] | length')
+
+  if [ "$ISSUER_EXHAUSTED" = true ] || [ "$missing" -gt 0 ]; then
+    respond refused REFUSED_BUDGET_EXHAUSTED "the evaluation did not complete within the approved budget" "$EX_BUDGET_EXHAUSTED"
+  fi
+  if [ "$failed" -gt 0 ]; then
+    respond candidate_fail CANDIDATE_FAIL "a required check did not return zero" "$EX_CANDIDATE_FAIL"
+  fi
+  respond candidate_pass CANDIDATE_PASS "every required check returned zero for this snapshot; this is orchestration output, not evidence" 0
+}
+
+cmd_evaluate() {
+  RESPONSE_MODE=evaluation
+  issuer_parse_options "$@"
+  issuer_bind_caller
+  issuer_resolve_request
+  issuer_check_eligibility
+  issuer_prepare_run
+  issuer_execute_checks
+  issuer_conclude
 }
 
 [ $# -gt 0 ] || { usage; exit "$EX_MALFORMED_REQUEST"; }
@@ -317,6 +529,7 @@ command -v jq >/dev/null 2>&1 || die "jq is required" "$EX_INTERNAL"
 subcommand="$1"; shift
 case "$subcommand" in
   eligibility) cmd_eligibility "$@" ;;
+  evaluate) cmd_evaluate "$@" ;;
   -h|--help|help) usage ;;
   *) die "unknown subcommand: $subcommand" "$EX_MALFORMED_REQUEST" ;;
 esac

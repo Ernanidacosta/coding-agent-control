@@ -29,9 +29,10 @@ Usage:
                              [--exec-path VALUE] [--env NAME=VALUE]...
                              [--yes] [--dry-run]
   agent-md-authority show    (PROJECT_ID | --workspace PATH) [--root PREFIX]
+  agent-md-authority prepare-run PROJECT_ID [--check NAME] [--root PREFIX]
   agent-md-authority prepare-job PROJECT_ID --check NAME [--root PREFIX]
   agent-md-authority sudoers PROJECT_ID [--root PREFIX] [--write]
-  agent-md-authority enumerate WORKSPACE
+  agent-md-authority enumerate PROJECT_ID
 
 Options:
   --root PREFIX   Operate under an alternate filesystem root. Intended for
@@ -298,103 +299,152 @@ present_enrollment() {
   printf '%s' "$record" | jq -r '.reasons[]? | "  reason: \(.)"'
 }
 
-# prepare-job materialises the control plane for one approved check. It is the
-# only thing that decides what run-check will execute, and it lives where the
-# developer can read it but not change it.
-cmd_prepare_job() {
-  local project_id="" check=""
+# Prepares one evaluation run: a fresh sealed snapshot plus one job per
+# approved check. A run is the unit of isolation. Replacing a single mutable
+# snapshot directory used to be able to delete the tree a check was still
+# executing in, so every evaluation now materialises its own run and the
+# pointer to the current one is authority-owned.
+#
+# Preparation is serialized per project. Two evaluations of the same project do
+# not interleave: the second waits briefly and is refused rather than racing.
+cmd_prepare_run() {
+  local project_id="" only_check=""
   while [ $# -gt 0 ]; do
     case "$1" in
       --root) ROOT=${2%/}; shift 2 ;;
-      --check) check="$2"; shift 2 ;;
+      --check) only_check="$2"; shift 2 ;;
       -h|--help) usage; return 0 ;;
-      -*) die "unknown prepare-job option: $1" ;;
+      -*) die "unknown prepare-run option: $1" ;;
       *) project_id="$1"; shift ;;
     esac
   done
-  [ -n "$project_id" ] || die "prepare-job requires a project id"
-  [ -n "$check" ] || die "prepare-job requires --check NAME"
-  case "$project_id" in */*|..|.) die "invalid project id" ;; esac
+  [ -n "$project_id" ] || die "prepare-run requires a project id"
+  case "$project_id" in */*|..|.|*[!a-zA-Z0-9-]*) die "invalid project id" ;; esac
+  command -v flock >/dev/null 2>&1 || die "flock is required to serialize evaluations"
 
   local dir file record
   dir="$(projects_dir)/$project_id"
   file="$dir/enrollment.json"
   [ -f "$file" ] || die "no enrollment for $project_id"
-  path_has_symlink "$file" && die "refusing to read $file: a path component is a symlink"
+  path_has_symlink "$file" && die "enrollment path traverses a symlink"
   record=$(cat "$file")
   [ "$(printf '%s' "$record" | jq -r '.schema')" = "$AUTHORITY_SCHEMA" ] \
     || die "enrollment uses an unsupported schema; re-enroll"
   [ "$(printf '%s' "$record" | jq -r '.status')" = eligible ] \
-    || die "enrollment is not eligible; refusing to prepare a job"
+    || die "enrollment is not eligible; refusing to prepare a run"
 
-  local command
-  command=$(printf '%s' "$record" | jq -r --arg c "$check" \
-    '.approved_contract.checks[] | select(.name == $c) | .command' | head -1)
-  [ -n "$command" ] || die "check '$check' is not part of the approved contract"
+  # The project directory is sealed between runs so nothing but the authority
+  # can introduce a file next to the pointer a check will trust. The authority
+  # owns it, so it unseals to publish and seals again.
+  chmod u+w "$dir" 2>/dev/null || true
+
+  local lock; lock=$(authority_project_lock "$project_id")
+  exec 9>"$lock" || die "cannot open the project lock"
+  flock -w 5 9 || die "another evaluation is already preparing this project"
 
   local timeout
   timeout=$(printf '%s' "$record" | jq -r '.approved_contract.timeout_seconds // empty')
   [ -n "$timeout" ] || die "the approved contract declares no per-check timeout"
 
-  local workspace snapshot paths reason manifest fingerprint
+  # Which checks this run will carry, in the core's canonical order.
+  local ordered=() name command
+  for name in $AUTHORITY_CHECK_ORDER; do
+    [ -z "$only_check" ] || [ "$name" = "$only_check" ] || continue
+    command=$(printf '%s' "$record" | jq -r --arg c "$name" \
+      '.approved_contract.checks[] | select(.name == $c) | .command' | head -1)
+    [ -n "$command" ] || continue
+    ordered+=("$name")
+  done
+  if [ "${#ordered[@]}" -eq 0 ]; then
+    if [ -n "$only_check" ]; then
+      die "check '$only_check' is not part of the approved contract"
+    fi
+    die "the approved contract carries no ordinary check"
+  fi
+
+  local run_id run_dir
+  run_id=$(new_uuid)
+  authority_run_id_is_safe "$run_id" || die "generated run id is malformed"
+  run_dir=$(authority_run_dir "$project_id" "$run_id")
+  mkdir -p "$run_dir/jobs" || die "cannot create the run directory"
+
+  local workspace paths reason manifest fingerprint
   workspace=$(printf '%s' "$record" | jq -r '.workspace')
-  snapshot=$(authority_snapshot_dir "$project_id")
-
-  # Replacing a sealed snapshot needs the write bit back first.
-  if [ -e "$snapshot" ]; then
-    chmod -R u+w "$snapshot" 2>/dev/null || true
-    rm -rf "${snapshot:?}"
-  fi
-  mkdir -p "$(authority_snapshot_root)" || die "cannot create the snapshot root"
-
   paths=$(mktemp "${TMPDIR:-/tmp}/agent-md-paths.XXXXXX") || die "cannot create a path list"
-  if ! authority_enumerate_for "$workspace" > "$paths"; then
-    rm -f "$paths"
-    die "could not enumerate the workspace"
+  if ! authority_enumerate_for "$workspace" "$project_id" > "$paths"; then
+    rm -f "$paths"; die "could not enumerate the workspace"
   fi
-
-  if ! reason=$(authority_materialize_snapshot "$workspace" "$paths" "$snapshot/src"); then
+  if ! reason=$(authority_materialize_snapshot "$workspace" "$paths" "$run_dir/snapshot/src"); then
     rm -f "$paths"
-    chmod -R u+w "$snapshot" 2>/dev/null || true
-    rm -rf "${snapshot:?}"
+    chmod -R u+w "$run_dir" 2>/dev/null || true
+    rm -rf "${run_dir:?}"
     die "snapshot refused: $reason"
   fi
   rm -f "$paths"
-  authority_seal_snapshot "$snapshot/src"
-  manifest=$(authority_snapshot_manifest "$snapshot/src") || die "cannot fingerprint the snapshot"
+  authority_seal_snapshot "$run_dir/snapshot/src"
+  manifest=$(authority_snapshot_manifest "$run_dir/snapshot/src") || die "cannot fingerprint the snapshot"
   fingerprint=$(printf '%s' "$manifest" | jq -cS . | sha256_hex) || die "cannot fingerprint the snapshot"
-  printf '%s\n' "$manifest" | atomic_write "$snapshot/manifest.json" 0444
-  chmod 0555 "$snapshot" 2>/dev/null || true
+  printf '%s\n' "$manifest" | atomic_write "$run_dir/snapshot/manifest.json" 0444
 
-  local runner
+  local runner total
   runner=$(authority_runner_identity) || die "cannot resolve the execution account: $runner"
+  total=$(authority_derive_total_timeout "$timeout" "${#ordered[@]}" \
+    "$(printf '%s' "$record" | jq -r '.approved_contract.total_timeout_seconds // empty')")
 
+  # Every check of this run reads the same sealed snapshot and the same
+  # approved environment. Nothing is recaptured between checks.
   local job
-  job=$(jq -n \
-    --argjson schema "$AUTHORITY_SCHEMA" \
-    --argjson runner "$runner" \
-    --arg project_id "$project_id" \
-    --arg workspace "$workspace" \
-    --arg snapshot "$snapshot/src" \
-    --arg snapshot_fingerprint "$fingerprint" \
-    --argjson execution "$(printf '%s' "$record" | jq -c '.execution')" \
-    --arg check "$check" \
-    --arg command "$command" \
-    --argjson environment "$(printf '%s' "$record" | jq -c '.approved_environment')" \
-    --argjson timeout_seconds "$timeout" \
-    --argjson tools "$(printf '%s' "$record" | jq -c '.approved_tools')" \
-    '{schema: $schema, project_id: $project_id, workspace: $workspace,
-      snapshot: $snapshot, snapshot_fingerprint: $snapshot_fingerprint,
-      execution: $runner, developer: $execution, check: $check, command: $command,
-      environment: $environment, timeout_seconds: $timeout_seconds, tools: $tools}')
+  for name in "${ordered[@]}"; do
+    command=$(printf '%s' "$record" | jq -r --arg c "$name" \
+      '.approved_contract.checks[] | select(.name == $c) | .command' | head -1)
+    job=$(jq -n \
+      --argjson schema "$AUTHORITY_SCHEMA" \
+      --arg project_id "$project_id" \
+      --arg run_id "$run_id" \
+      --arg workspace "$workspace" \
+      --arg snapshot "$run_dir/snapshot/src" \
+      --arg snapshot_fingerprint "$fingerprint" \
+      --argjson execution "$runner" \
+      --argjson developer "$(printf '%s' "$record" | jq -c '.execution')" \
+      --arg check "$name" \
+      --arg command "$command" \
+      --argjson environment "$(printf '%s' "$record" | jq -c '.approved_environment')" \
+      --argjson timeout_seconds "$timeout" \
+      --argjson tools "$(printf '%s' "$record" | jq -c '.approved_tools')" \
+      '{schema: $schema, project_id: $project_id, run_id: $run_id, workspace: $workspace,
+        snapshot: $snapshot, snapshot_fingerprint: $snapshot_fingerprint,
+        execution: $execution, developer: $developer, check: $check, command: $command,
+        environment: $environment, timeout_seconds: $timeout_seconds, tools: $tools}')
+    printf '%s\n' "$job" | atomic_write "$run_dir/jobs/$name.json" 0444
+  done
+  chmod 0555 "$run_dir/jobs" 2>/dev/null || true
 
-  # 0444: the developer may read the job, and nobody writes it in place. The
-  # authority replaces it by atomic rename, which needs the directory, not the
-  # file.
-  printf '%s\n' "$job" | atomic_write "$dir/job.json" 0444
-  note "prepared job for $check in $dir/job.json"
+  # The pointer is published only once the run is complete, so a reader never
+  # observes a half-built run.
+  printf '%s\n' "$run_id" | atomic_write "$(authority_current_run_file "$project_id")" 0444
+
+  # Older runs are removed now that nothing points at them. The current one is
+  # never a candidate, so a check executing in it cannot lose its ground.
+  local old
+  for old in "$(authority_runs_root "$project_id")"/*/; do
+    [ -d "$old" ] || continue
+    case "$old" in *"/$run_id/") continue ;; esac
+    chmod -R u+w "$old" 2>/dev/null || true
+    rm -rf "${old:?}"
+  done
+
+  chmod 0555 "$dir" 2>/dev/null || true
+
+  printf 'run %s\n' "$run_id"
   note "execution account: $(printf '%s' "$runner" | jq -r '.user') (uid $(printf '%s' "$runner" | jq -r '.uid'))"
-  note "snapshot sealed at $snapshot/src ($(printf '%s' "$manifest" | jq 'length') entries)"
+  note "snapshot sealed at $run_dir/snapshot/src ($(printf '%s' "$manifest" | jq 'length') entries)"
+  note "jobs: ${ordered[*]}"
+  note "per-check timeout ${timeout}s, total ${total}s"
+}
+
+# Compatibility entry point for a single check; a run is still created.
+cmd_prepare_job() {
+  cmd_prepare_run "$@"
 }
 
 # The descending sudo rule. It names one target user and one literal project id,
@@ -405,9 +455,9 @@ cmd_prepare_job() {
 # reaches the runner and never the authority. A staging root has no such
 # account, and the skipped hop is announced rather than hidden.
 authority_enumerate_for() {
-  local workspace="$1"
+  local workspace="$1" project_id="$2"
   if is_real_root_prefix && getent passwd "$AUTHORITY_RUNNER_USER" >/dev/null 2>&1; then
-    sudo -n -u "$AUTHORITY_RUNNER_USER" "$(lib_dir)/agent-md-authority" enumerate "$workspace"
+    sudo -n -u "$AUTHORITY_RUNNER_USER" "$(lib_dir)/agent-md-authority" enumerate "$project_id"
     return $?
   fi
   note "staging root: enumerating without the runner hop" >&2
@@ -437,21 +487,44 @@ cmd_sudoers() {
   [ -n "$exec_user" ] || die "enrollment declares no execution user"
   case "$exec_user" in root) die "refusing to generate a rule targeting root" ;; esac
 
-  alias="AGENTMD_RUNCHECK_$(printf '%s' "$project_id" | tr -d - | tr '[:lower:]' '[:upper:]')"
+  local checks entries name
+  checks=$(printf '%s' "$record" | jq -r '.approved_contract.checks[].name')
+  alias="AGENTMD_$(printf '%s' "$project_id" | tr -d - | tr '[:lower:]' '[:upper:]')"
+  entries=""
+  for name in $AUTHORITY_CHECK_ORDER; do
+    printf '%s\n' "$checks" | grep -qxF "$name" || continue
+    entries="${entries}    $(lib_dir)/run-check $project_id $name, \\"$'\n'
+  done
+  [ -n "$entries" ] || die "the approved contract carries no ordinary check"
+
   policy=$(cat <<POLICY
 # coding-agent-control verification authority
 # Project $project_id, enrolled for developer $exec_user.
 #
-# The rule never targets the developer. Checks run as a dedicated
-# execution-only account so that the developer, who is untrusted, cannot
-# signal or ptrace the process observing the result, and cannot reach the
-# snapshot the checks read.
+# Two hops, each as narrow as the interface allows.
 #
-# The command is a literal path plus a literal project id: no wildcard, no
-# free-form argument, no arbitrary RunAs, and no rule that could target root.
+# The inner rule never targets the developer. Checks run as a dedicated
+# execution-only account, so the developer, who is untrusted, cannot signal or
+# ptrace the process observing the result and cannot reach the snapshot.
+# Every command is a literal path with literal arguments: one project id and
+# one approved check name per entry. There is no wildcard anywhere, so no
+# argument a caller could influence is ever matched loosely, and the run
+# identifier is resolved from authority-owned state rather than passed in.
+#
+# The outer rule lets the enrolled developer ask for an evaluation and nothing
+# else. It reaches one subcommand of the issuer, never a shell, never the
+# administrative CLI, never run-check, never root, never another user. The
+# request travels on stdin, so the rule needs no argument at all.
+#
+# Neither rule grants SETENV: a caller cannot carry environment across either
+# boundary.
 Defaults!$alias env_reset, secure_path="/usr/local/bin:/usr/bin:/bin"
-Cmnd_Alias $alias = $(lib_dir)/run-check $project_id, $(lib_dir)/agent-md-authority enumerate *
+Defaults!${alias}_EVAL env_reset, secure_path="/usr/local/bin:/usr/bin:/bin"
+Cmnd_Alias $alias = \\
+${entries}    $(lib_dir)/agent-md-authority enumerate $project_id
+Cmnd_Alias ${alias}_EVAL = $(lib_dir)/agent-md-issuer evaluate
 $AUTHORITY_SERVICE_USER ALL=($AUTHORITY_RUNNER_USER) NOPASSWD: $alias
+$exec_user ALL=($AUTHORITY_SERVICE_USER) NOPASSWD: ${alias}_EVAL
 POLICY
 )
   if [ "$write" -eq 1 ]; then
@@ -468,10 +541,17 @@ POLICY
 # repository's own Git configuration, so it is meant to be reached through the
 # descending sudo rule and to run as the execution-only account.
 cmd_enumerate() {
-  local workspace="$1"
-  [ -n "${workspace:-}" ] || die "enumerate requires a workspace"
-  case "$workspace" in /*) ;; *) die "workspace must be absolute" ;; esac
-  [ -d "$workspace" ] || die "workspace is not a directory"
+  local project_id="${1:-}" root_prefix="${2:-}" file workspace
+  [ -n "$project_id" ] || die "enumerate requires a project id"
+  [ -z "$root_prefix" ] || ROOT=${root_prefix%/}
+  case "$project_id" in */*|..|.|*[!a-zA-Z0-9-]*) die "invalid project id" ;; esac
+  file="$(projects_dir)/$project_id/enrollment.json"
+  [ -f "$file" ] || die "no enrollment for $project_id"
+  path_has_symlink "$file" && die "enrollment path traverses a symlink"
+  workspace=$(jq -r '.workspace // empty' "$file")
+  [ -n "$workspace" ] || die "enrollment declares no workspace"
+  case "$workspace" in /*) ;; *) die "enrollment workspace is not absolute" ;; esac
+  [ -d "$workspace" ] || die "enrollment workspace is not a directory"
   authority_enumerate_paths "$workspace"
 }
 
@@ -512,6 +592,7 @@ case "$subcommand" in
   enroll) cmd_enroll "$@" ;;
   show) cmd_show "$@" ;;
   enumerate) cmd_enumerate "$@" ;;
+  prepare-run) cmd_prepare_run "$@" ;;
   prepare-job) cmd_prepare_job "$@" ;;
   sudoers) cmd_sudoers "$@" ;;
   -h|--help|help) usage ;;
