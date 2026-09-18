@@ -392,8 +392,9 @@ issuer_bind_caller() {
   if is_real_root_prefix; then
     [ "$(id -un)" = "$AUTHORITY_SERVICE_USER" ] || \
       refuse REFUSED_CALLER_UNBOUND "evaluate runs as $(id -un); it must be reached as $AUTHORITY_SERVICE_USER through the authority boundary" "$EX_CALLER_UNBOUND"
-    [ -n "${SUDO_UID:-}" ] && [ -n "${SUDO_USER:-}" ] || \
+    if [ -z "${SUDO_UID:-}" ] || [ -z "${SUDO_USER:-}" ]; then
       refuse REFUSED_CALLER_UNBOUND "no caller identity was supplied by the boundary; direct invocation is not accepted" "$EX_CALLER_UNBOUND"
+    fi
   fi
   ISSUER_CALLER_UID=${SUDO_UID:-$(id -u)}
   ISSUER_CALLER_USER=${SUDO_USER:-$(id -un)}

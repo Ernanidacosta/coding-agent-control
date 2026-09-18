@@ -5,6 +5,8 @@
 # here produces a receipt, a signature or a sequence number, and exit 0 still
 # means only "the command exited 0".
 
+load authority-helpers
+
 setup() {
   AUTHORITY="$BATS_TEST_DIRNAME/../examples/local-issuer/agent-md-authority"
   RUNCHECK="$BATS_TEST_DIRNAME/../examples/local-issuer/run-check"
@@ -22,12 +24,15 @@ setup() {
   export WORKSPACE
 
   bash "$AUTHORITY" install --root "$ROOT" >/dev/null
+  TOOLCHAIN="$(mktemp -d)"
+  EXEC_PATH="$(trusted_toolchain_path "$TOOLCHAIN")"
+  export TOOLCHAIN EXEC_PATH
 }
 
 teardown() {
   cd "$BATS_TEST_DIRNAME"
-  chmod -R u+w "$ROOT" 2>/dev/null || true
-  rm -rf "$ROOT" "$REPO_DIR"
+  chmod -R u+w "$ROOT" "$TOOLCHAIN" 2>/dev/null || true
+  rm -rf "$ROOT" "$REPO_DIR" "$TOOLCHAIN"
 }
 
 # printf, not a heredoc: an unquoted heredoc would expand the command under
@@ -43,9 +48,13 @@ approve() {
   chmod -R u+w "$ROOT/var/lib/agent-md/projects" 2>/dev/null || true
   rm -rf "${ROOT:?}/var/lib/agent-md/projects"
   mkdir -p "$ROOT/var/lib/agent-md/projects"
-  bash "$AUTHORITY" enroll "$WORKSPACE" --root "$ROOT" --yes >/dev/null
+  bash "$AUTHORITY" enroll "$WORKSPACE" --root "$ROOT" --exec-path "$EXEC_PATH" --yes >/dev/null
   PROJECT_ID=$(ls "$ROOT/var/lib/agent-md/projects" | head -1)
   export PROJECT_ID
+  if [ "$(jq -r .status "$(project_dir)/enrollment.json")" != eligible ]; then
+    enrollment_diagnosis "$(project_dir)/enrollment.json" >&2
+    return 1
+  fi
   bash "$AUTHORITY" prepare-job "$PROJECT_ID" --check test --root "$ROOT" >/dev/null
 }
 
@@ -276,7 +285,7 @@ assert_parity() {
   [ "$RC_STATUS" -eq 0 ]
   grep -q "LEAK=absent" "$RC_OUT"
   grep -q "PP=absent" "$RC_OUT"
-  grep -q "PATH=/usr/local/bin:/usr/bin:/bin" "$RC_OUT"
+  grep -q "PATH=$EXEC_PATH" "$RC_OUT"
 }
 
 @test "27 a hostile shell startup file is never sourced" {

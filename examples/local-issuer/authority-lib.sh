@@ -12,8 +12,10 @@
 # repository is the distribution source.
 
 # Constants and helpers below are consumed by the programs that source this
-# file, so standalone linting cannot see their use sites.
-# shellcheck disable=SC2034,SC2329
+# file, so standalone linting cannot see their use sites. Older shellcheck
+# reports the same situation as unreachable code (SC2317) and newer releases as
+# an uninvoked function (SC2329); both are the same false positive.
+# shellcheck disable=SC2034,SC2317,SC2329
 
 AUTHORITY_SCHEMA=6
 AUTHORITY_DEFAULT_EXEC_PATH=/usr/local/bin:/usr/bin:/bin

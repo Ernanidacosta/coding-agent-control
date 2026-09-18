@@ -4,6 +4,8 @@
 # sealed snapshot and report what happened. It still cannot turn that into
 # evidence: no signature, no sequence, no receipt.
 
+load authority-helpers
+
 setup() {
   AUTHORITY="$BATS_TEST_DIRNAME/../examples/local-issuer/agent-md-authority"
   ISSUER="$BATS_TEST_DIRNAME/../examples/local-issuer/agent-md-issuer"
@@ -19,11 +21,14 @@ setup() {
     printf '#!/bin/bash\n' > "$WS/$hook"
   done
   bash "$AUTHORITY" install --root "$ROOT" >/dev/null
+  TOOLCHAIN="$(mktemp -d)"
+  EXEC_PATH="$(trusted_toolchain_path "$TOOLCHAIN")"
+  export TOOLCHAIN EXEC_PATH
 }
 
 teardown() {
-  chmod -R u+w "$ROOT" 2>/dev/null || true
-  rm -rf "$ROOT" "$WS"
+  chmod -R u+w "$ROOT" "$TOOLCHAIN" 2>/dev/null || true
+  rm -rf "$ROOT" "$WS" "$TOOLCHAIN"
 }
 
 contract() { printf '%s\n' "$1" > "$WS/agent-md.toml"; }
@@ -31,9 +36,14 @@ contract() { printf '%s\n' "$1" > "$WS/agent-md.toml"; }
 enroll() {
   chmod -R u+w "$ROOT/var/lib/agent-md/projects" 2>/dev/null || true
   rm -rf "${ROOT:?}/var/lib/agent-md/projects"; mkdir -p "$ROOT/var/lib/agent-md/projects"
-  bash "$AUTHORITY" enroll "$WS" --root "$ROOT" --yes >/dev/null
+  bash "$AUTHORITY" enroll "$WS" --root "$ROOT" --exec-path "$EXEC_PATH" --yes >/dev/null
   PROJECT_ID=$(ls "$ROOT/var/lib/agent-md/projects" | head -1)
   export PROJECT_ID
+  # A refusal further down is almost always an ineligible enrollment; say why.
+  if [ "$(jq -r .status "$(project_dir)/enrollment.json")" != eligible ]; then
+    enrollment_diagnosis "$(project_dir)/enrollment.json" >&2
+    return 1
+  fi
 }
 
 evaluate() {

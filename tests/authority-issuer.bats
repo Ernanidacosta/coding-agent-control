@@ -5,6 +5,8 @@
 # receipt. These tests pin the refusals, the read-only guarantee, and the
 # absence of those capabilities.
 
+load authority-helpers
+
 setup() {
   AUTHORITY="$BATS_TEST_DIRNAME/../examples/local-issuer/agent-md-authority"
   ISSUER="$BATS_TEST_DIRNAME/../examples/local-issuer/agent-md-issuer"
@@ -14,11 +16,14 @@ setup() {
   export AUTHORITY ISSUER ROOT WS MARKER
   build_workspace
   bash "$AUTHORITY" install --root "$ROOT" >/dev/null
+  TOOLCHAIN="$(mktemp -d)"
+  EXEC_PATH="$(trusted_toolchain_path "$TOOLCHAIN")"
+  export TOOLCHAIN EXEC_PATH
 }
 
 teardown() {
-  chmod -R u+w "$ROOT" 2>/dev/null || true
-  rm -rf "$ROOT" "$WS"
+  chmod -R u+w "$ROOT" "$TOOLCHAIN" 2>/dev/null || true
+  rm -rf "$ROOT" "$WS" "$TOOLCHAIN"
   rm -f "$MARKER"
 }
 
@@ -40,7 +45,11 @@ TOML
   done
 }
 
-enroll() { bash "$AUTHORITY" enroll "$WS" --root "$ROOT" --yes "$@" >/dev/null; }
+enroll() {
+  local extra=("$@")
+  if [ "${#extra[@]}" -eq 0 ]; then extra=(--exec-path "$EXEC_PATH"); fi
+  bash "$AUTHORITY" enroll "$WS" --root "$ROOT" --yes "${extra[@]}" >/dev/null
+}
 
 ask() {
   local body="${1:-}"

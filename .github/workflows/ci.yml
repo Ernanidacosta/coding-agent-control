@@ -13,14 +13,14 @@ jobs:
       - name: Install shellcheck
         run: sudo apt-get update && sudo apt-get install -y shellcheck
       - name: Run shellcheck
+        # The project already declares what it lints. Reading the contract here
+        # keeps CI from drifting away from it, which is how the local issuer
+        # ended up unlinted in CI while agent-md.toml covered it.
         run: |
-          shellcheck \
-            .claude/hooks/*.sh \
-            .codex/hooks/*.sh \
-            .agent-md/bin/*.sh \
-            examples/github-actions/*.sh \
-            .githooks/pre-commit \
-            install.sh
+          LINT=$(sed -n 's/^lint = "\(.*\)"$/\1/p' agent-md.toml)
+          test -n "$LINT"
+          echo "$LINT"
+          eval "$LINT"
 
   static:
     runs-on: ubuntu-latest
