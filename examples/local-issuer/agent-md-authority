@@ -20,6 +20,9 @@ AUTHORITY_SELF_DIR=$(cd "$(dirname "$(realpath "$0")")" && pwd)
 # shellcheck source=examples/local-issuer/authority-lib.sh
 # shellcheck disable=SC1091
 . "$AUTHORITY_SELF_DIR/authority-lib.sh"
+# shellcheck source=examples/local-issuer/phase-a-source.sh
+# shellcheck disable=SC1091
+. "$AUTHORITY_SELF_DIR/phase-a-source.sh"
 
 usage() {
   cat <<'USAGE'
@@ -33,6 +36,7 @@ Usage:
   agent-md-authority prepare-job PROJECT_ID --check NAME [--root PREFIX]
   agent-md-authority sudoers PROJECT_ID [--root PREFIX] [--write]
   agent-md-authority enumerate PROJECT_ID
+  agent-md-authority source-identity PROJECT_ID
 
 Options:
   --root PREFIX   Operate under an alternate filesystem root. Intended for
@@ -55,7 +59,7 @@ new_uuid() {
   fi
 }
 
-AUTHORITY_INSTALLED_FILES="authority-lib.sh agent-md-authority agent-md-issuer run-check"
+AUTHORITY_INSTALLED_FILES="authority-lib.sh phase-a-source.sh agent-md-authority agent-md-issuer run-check"
 
 cmd_install() {
   local user=agentmd dry_run=0
@@ -368,20 +372,55 @@ cmd_prepare_run() {
   run_dir=$(authority_run_dir "$project_id" "$run_id")
   mkdir -p "$run_dir/jobs" || die "cannot create the run directory"
 
-  local workspace paths reason manifest fingerprint
+  local workspace identity recheck reason manifest fingerprint source_fingerprint
   workspace=$(printf '%s' "$record" | jq -r '.workspace')
-  paths=$(mktemp "${TMPDIR:-/tmp}/agent-md-paths.XXXXXX") || die "cannot create a path list"
-  if ! authority_enumerate_for "$workspace" "$project_id" > "$paths"; then
-    rm -f "$paths"; die "could not enumerate the workspace"
-  fi
-  if ! reason=$(authority_materialize_snapshot "$workspace" "$paths" "$run_dir/snapshot/src"); then
-    rm -f "$paths"
+
+  abandon_run() {
     chmod -R u+w "$run_dir" 2>/dev/null || true
     rm -rf "${run_dir:?}"
-    die "snapshot refused: $reason"
+  }
+
+  # 1. The identity first, so the path set and the fingerprint come from one
+  #    source of truth instead of two enumerations that could disagree.
+  identity=$(mktemp "${TMPDIR:-/tmp}/agent-md-identity.XXXXXX") || die "cannot create a temporary file"
+  if ! authority_source_identity_for "$workspace" "$project_id" > "$identity"; then
+    rm -f "$identity"; abandon_run; die "could not compute the workspace source identity"
   fi
-  rm -f "$paths"
+  if ! jq -e '.valid == true' "$identity" >/dev/null 2>&1; then
+    reason=$(jq -r '[.entries[]? | select(.valid == false) | (.error // .index.error // .worktree.error // "unsupported entry")][0] // .error // "unknown"' "$identity")
+    rm -f "$identity"; abandon_run
+    die "the workspace source identity is not usable: $reason"
+  fi
+
+  # 2. Materialise exactly what that identity describes.
+  if ! reason=$(authority_materialize_from_manifest "$workspace" "$identity" "$run_dir/snapshot/src"); then
+    rm -f "$identity"; abandon_run; die "snapshot refused: $reason"
+  fi
+  # 3. Seal it.
   authority_seal_snapshot "$run_dir/snapshot/src"
+
+  # 4. Prove the sealed tree is the tree the identity describes. The authority
+  #    holds both sides, so a worktree that moved during the copy shows up here.
+  if ! reason=$(authority_snapshot_matches_identity "$identity" "$run_dir/snapshot/src"); then
+    rm -f "$identity"; abandon_run; die "capture refused: $reason"
+  fi
+
+  # 5. Recompute. The bijection above cannot see the index, and Phase A's
+  #    identity covers both halves, so the bracket closes that gap.
+  recheck=$(mktemp "${TMPDIR:-/tmp}/agent-md-identity2.XXXXXX") || die "cannot create a temporary file"
+  if ! authority_source_identity_for "$workspace" "$project_id" > "$recheck"; then
+    rm -f "$identity" "$recheck"; abandon_run; die "could not recompute the workspace source identity"
+  fi
+  if [ "$(jq -cS . "$identity")" != "$(jq -cS . "$recheck")" ]; then
+    rm -f "$identity" "$recheck"; abandon_run
+    die "the workspace changed while the run was being captured"
+  fi
+  rm -f "$recheck"
+
+  source_fingerprint=$(jq -cS . "$identity" | sha256_hex) || die "cannot fingerprint the source identity"
+  atomic_write "$run_dir/source-identity.json" 0444 < "$identity"
+  rm -f "$identity"
+
   manifest=$(authority_snapshot_manifest "$run_dir/snapshot/src") || die "cannot fingerprint the snapshot"
   fingerprint=$(printf '%s' "$manifest" | jq -cS . | sha256_hex) || die "cannot fingerprint the snapshot"
   printf '%s\n' "$manifest" | atomic_write "$run_dir/snapshot/manifest.json" 0444
@@ -438,6 +477,7 @@ cmd_prepare_run() {
   printf 'run %s\n' "$run_id"
   note "execution account: $(printf '%s' "$runner" | jq -r '.user') (uid $(printf '%s' "$runner" | jq -r '.uid'))"
   note "snapshot sealed at $run_dir/snapshot/src ($(printf '%s' "$manifest" | jq 'length') entries)"
+  note "source identity bound: $source_fingerprint"
   note "jobs: ${ordered[*]}"
   note "per-check timeout ${timeout}s, total ${total}s"
 }
@@ -454,6 +494,16 @@ cmd_prepare_job() {
 # repository that manages to execute code through its own Git configuration
 # reaches the runner and never the authority. A staging root has no such
 # account, and the skipped hop is announced rather than hidden.
+authority_source_identity_for() {
+  local workspace="$1" project_id="$2"
+  if is_real_root_prefix && getent passwd "$AUTHORITY_RUNNER_USER" >/dev/null 2>&1; then
+    sudo -n -u "$AUTHORITY_RUNNER_USER" "$(lib_dir)/agent-md-authority" source-identity "$project_id"
+    return $?
+  fi
+  note "staging root: computing the source identity without the runner hop" >&2
+  ( cd "$workspace" && authority_pa_source_manifest_json worktree )
+}
+
 authority_enumerate_for() {
   local workspace="$1" project_id="$2"
   if is_real_root_prefix && getent passwd "$AUTHORITY_RUNNER_USER" >/dev/null 2>&1; then
@@ -521,7 +571,8 @@ cmd_sudoers() {
 Defaults!$alias env_reset, secure_path="/usr/local/bin:/usr/bin:/bin"
 Defaults!${alias}_EVAL env_reset, secure_path="/usr/local/bin:/usr/bin:/bin"
 Cmnd_Alias $alias = \\
-${entries}    $(lib_dir)/agent-md-authority enumerate $project_id
+${entries}    $(lib_dir)/agent-md-authority enumerate $project_id, \\
+    $(lib_dir)/agent-md-authority source-identity $project_id
 Cmnd_Alias ${alias}_EVAL = $(lib_dir)/agent-md-issuer evaluate
 $AUTHORITY_SERVICE_USER ALL=($AUTHORITY_RUNNER_USER) NOPASSWD: $alias
 $exec_user ALL=($AUTHORITY_SERVICE_USER) NOPASSWD: ${alias}_EVAL
@@ -553,6 +604,24 @@ cmd_enumerate() {
   case "$workspace" in /*) ;; *) die "enrollment workspace is not absolute" ;; esac
   [ -d "$workspace" ] || die "enrollment workspace is not a directory"
   authority_enumerate_paths "$workspace"
+}
+
+# Emits the Phase A source identity for the enrolled workspace. Like enumerate,
+# this is a code path that reads a repository's own Git configuration, so it is
+# meant to be reached through the descending rule and to run as the
+# execution-only account.
+cmd_source_identity() {
+  local project_id="${1:-}" file workspace
+  [ -n "$project_id" ] || die "source-identity requires a project id"
+  case "$project_id" in */*|..|.|*[!a-zA-Z0-9-]*) die "invalid project id" ;; esac
+  file="$(projects_dir)/$project_id/enrollment.json"
+  [ -f "$file" ] || die "no enrollment for $project_id"
+  path_has_symlink "$file" && die "enrollment path traverses a symlink"
+  workspace=$(jq -r '.workspace // empty' "$file")
+  [ -n "$workspace" ] || die "enrollment declares no workspace"
+  [ -d "$workspace" ] || die "enrollment workspace is not a directory"
+  cd "$workspace" || die "cannot enter the enrollment workspace"
+  authority_pa_source_manifest_json worktree
 }
 
 cmd_show() {
@@ -592,6 +661,7 @@ case "$subcommand" in
   enroll) cmd_enroll "$@" ;;
   show) cmd_show "$@" ;;
   enumerate) cmd_enumerate "$@" ;;
+  source-identity) cmd_source_identity "$@" ;;
   prepare-run) cmd_prepare_run "$@" ;;
   prepare-job) cmd_prepare_job "$@" ;;
   sudoers) cmd_sudoers "$@" ;;

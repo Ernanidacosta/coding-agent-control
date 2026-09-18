@@ -17,7 +17,7 @@
 # an uninvoked function (SC2329); both are the same false positive.
 # shellcheck disable=SC2034,SC2317,SC2329
 
-AUTHORITY_SCHEMA=6
+AUTHORITY_SCHEMA=7
 AUTHORITY_DEFAULT_EXEC_PATH=/usr/local/bin:/usr/bin:/bin
 AUTHORITY_MECHANISM_FILES=".claude/hooks/_lib.sh .claude/hooks/stop-verify.sh .agent-md/bin/verify.sh"
 AUTHORITY_ORDINARY_CHECKS="typecheck lint test integration smoke runtime"
@@ -822,7 +822,10 @@ authority_snapshot_manifest() {
     path=${path#"$dest"/}
     if [ -L "$dest/$path" ]; then
       kind="symlink"; mode=120000
-      digest=$(readlink "$dest/$path" | sha256_hex) || { rm -f "$entries"; return 1; }
+      # Phase A hashes the raw target bytes without readlink's terminator, so
+      # the vendored primitive is used rather than a second, subtly different
+      # implementation.
+      digest=$(authority_pa_symlink_digest "$path") || { rm -f "$entries"; return 1; }
     else
       kind="file"
       if [ -x "$dest/$path" ]; then mode=100755; else mode=100644; fi
@@ -890,4 +893,69 @@ authority_derive_total_timeout() {
     return 0
   fi
   printf '%s' "$(( stages * per_check + AUTHORITY_LEGACY_OVERHEAD_SECONDS ))"
+}
+
+# --- Source identity bound to the executed snapshot -------------------------
+#
+# The snapshot and the Phase A identity have to describe the same instant, or a
+# receipt would claim that state X passed while the checks read state Y. The
+# order below makes that provable rather than assumed:
+#
+#   1. compute the Phase A identity
+#   2. materialise the snapshot from that identity's own path set
+#   3. seal it
+#   4. verify the sealed tree against the identity, entry by entry
+#   5. recompute the identity and require it to be unchanged
+#
+# Step 4 is the strong one: the authority holds both sides, so a worktree that
+# moved during the copy shows up as a mismatch. Step 5 additionally catches a
+# change on the index side, which the snapshot cannot witness. Either failure
+# refuses the run; neither can produce a candidate pass.
+
+# authority_materialize_from_manifest <workspace> <manifest-file> <dest>
+# Materialises exactly the paths the identity describes, so the tree and the
+# fingerprint cannot disagree about which files were in scope.
+authority_materialize_from_manifest() {
+  local workspace="$1" manifest="$2" dest="$3" path kind mode entry parent
+  mkdir -p "$dest" || { printf 'cannot create snapshot directory'; return 1; }
+  while IFS= read -r entry; do
+    [ -n "$entry" ] || continue
+    path=$(printf '%s' "$entry" | jq -r '.path')
+    kind=$(printf '%s' "$entry" | jq -r '.worktree.kind // ""')
+    mode=$(printf '%s' "$entry" | jq -r '.worktree.mode // ""')
+    if ! authority_relative_path_is_safe "$path"; then
+      printf 'enumerated path is unsafe: %s' "$path"; return 1
+    fi
+    parent=$(dirname "$path")
+    if [ "$parent" != "." ] && path_has_symlink "$workspace/$parent"; then
+      printf 'workspace path component is a symlink: %s' "$parent"; return 1
+    fi
+    mkdir -p "$(dirname "$dest/$path")" || { printf 'cannot create %s' "$(dirname "$path")"; return 1; }
+    if [ "$kind" = symlink ]; then
+      cp -P "$workspace/$path" "$dest/$path" || { printf 'cannot copy symlink %s' "$path"; return 1; }
+      continue
+    fi
+    cat < "$workspace/$path" > "$dest/$path" || { printf 'cannot copy %s' "$path"; return 1; }
+    if [ "$mode" = 100755 ]; then chmod 0555 "$dest/$path"; else chmod 0444 "$dest/$path"; fi
+  done <<EOF
+$(jq -c '.entries[] | select(.worktree.state == "present")' "$manifest")
+EOF
+  return 0
+}
+
+# authority_snapshot_matches_identity <manifest-file> <snapshot-dir>
+# A bijection check: every present path in the identity is in the sealed tree
+# with the same kind, mode and digest, and the tree holds nothing else.
+authority_snapshot_matches_identity() {
+  local manifest="$1" dest="$2" expected actual
+  expected=$(jq -cS '[.entries[] | select(.worktree.state == "present")
+    | {path: .path, kind: .worktree.kind, mode: .worktree.mode, digest: .worktree.digest}]
+    | sort_by(.path)' "$manifest") || { printf 'cannot project the identity'; return 1; }
+  actual=$(authority_snapshot_manifest "$dest" | jq -cS 'sort_by(.path)') \
+    || { printf 'cannot read the sealed snapshot'; return 1; }
+  if [ "$expected" != "$actual" ]; then
+    printf 'the sealed snapshot does not match the source identity'
+    return 1
+  fi
+  return 0
 }
