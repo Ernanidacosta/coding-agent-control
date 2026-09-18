@@ -88,7 +88,7 @@ cat > "$PAYLOAD/setup.sh" <<'SETUP'
 set -u
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -qq >/dev/null 2>&1
-apt-get install -y -qq jq sudo strace python3 git procps util-linux >/dev/null 2>&1 \
+apt-get install -y -qq jq sudo strace python3 git procps util-linux openssl >/dev/null 2>&1 \
   || { echo "SETUP-FAIL: packages"; exit 1; }
 
 useradd -m -s /bin/bash dev
@@ -109,9 +109,14 @@ install -d -o agentmd -g agentmd -m 0755 /var/lib/agent-md
 install -d -o agentmd -g agentmd -m 0755 /var/lib/agent-md/projects
 install -d -o agentmd -g agentmd -m 0700 /var/lib/agent-md/keys
 install -d -o agentmd-runner -g agentmd-runner -m 0700 /var/tmp/agent-md-runner
-printf 'FAKE-PRIVATE-KEY-SENTINEL\n' > /var/lib/agent-md/keys/issuer.key
-chown agentmd:agentmd /var/lib/agent-md/keys/issuer.key
-chmod 0600 /var/lib/agent-md/keys/issuer.key
+# A real issuer key, created the way an operator creates one. Earlier rounds
+# planted a sentinel file here; a sentinel proves the directory permissions but
+# not that the program that creates a key leaves it in the state it claims.
+/usr/local/lib/agent-md/agent-md-authority install-key >/dev/null
+KEY_ID=$(cat /var/lib/agent-md/keys/current)
+PRIV=/var/lib/agent-md/keys/issuer-$KEY_ID.key
+PUB=/var/lib/agent-md/keys/issuer-$KEY_ID.pub
+KEY_DIGEST=$(sha256sum "$PRIV" | cut -d' ' -f1)
 
 su dev -c 'mkdir -p ~/repo/.claude/hooks ~/repo/.agent-md/bin'
 su dev -c 'cd ~/repo && git init -q'
@@ -142,6 +147,13 @@ cat > "$PAYLOAD/matrix.sh" <<'MATRIX'
 set -u
 LIB=/usr/local/lib/agent-md
 PASS=0; FAIL=0; SKIP=0
+
+# The key setup.sh installed. Derived here rather than inherited: matrix.sh is
+# a separate process and an unbound variable would silently blank a row.
+KEY_ID=$(cat /var/lib/agent-md/keys/current)
+PRIV=/var/lib/agent-md/keys/issuer-$KEY_ID.key
+PUB=/var/lib/agent-md/keys/issuer-$KEY_ID.pub
+KEY_DIGEST=$(sha256sum "$PRIV" | cut -d' ' -f1)
 
 row() {
   local verdict="FAIL"
@@ -324,13 +336,38 @@ row issuer key "reads issuer.key" "source inspection" "$(grep -qE 'issuer\.key' 
 row issuer signing "openssl signing" "source inspection" "$(grep -qE 'openssl[[:space:]]+(pkeyutl|dgst[[:space:]]+-sign)' "$LIB/agent-md-issuer" && printf present || printf absent)" absent
 row issuer sequence "sequence allocation" "source inspection" "$(grep -qE 'last_terminal|allocate_sequence' "$LIB/agent-md-issuer" && printf present || printf absent)" absent
 row issuer receipt "writes a receipt" "source inspection" "$(grep -qE '\.agent/verification' "$LIB/agent-md-issuer" && printf present || printf absent)" absent
-row agentmd issuer.key "untouched by evaluation" "post-run check" "$([ "$(cat /var/lib/agent-md/keys/issuer.key)" = FAKE-PRIVATE-KEY-SENTINEL ] && printf intact || printf changed)" intact
+row agentmd "private key" "untouched by evaluation" "post-run check" "$([ "$(sha256sum "$PRIV" | cut -d' ' -f1)" = "$KEY_DIGEST" ] && printf intact || printf changed)" intact
 row issuer vocabulary "claims authenticity" "response text" "$(evaluate_as dev | jq -r '.status | test("authentic|attested|verified|signed|receipt")')" false
+
+header "8b. issuer key custody, real accounts"
+row dev "keys dir" "list" "DAC 0700 agentmd" "$(try sudo -u dev ls /var/lib/agent-md/keys)" denied
+row agentmd-runner "keys dir" "list" "DAC 0700 agentmd" "$(try sudo -u agentmd-runner ls /var/lib/agent-md/keys)" denied
+row dev "keys dir" "traverse to a known name" "DAC 0700 agentmd" "$(try sudo -u dev cat "$PUB")" denied
+row agentmd-runner "keys dir" "traverse to a known name" "DAC 0700 agentmd" "$(try sudo -u agentmd-runner cat "$PUB")" denied
+row dev "keys dir" "create a key" "DAC 0700 agentmd" "$(try sudo -u dev bash -c "echo x > /var/lib/agent-md/keys/issuer-evil.key")" denied
+row agentmd-runner "current" "repoint to another key" "DAC 0700 agentmd" "$(try sudo -u agentmd-runner bash -c "echo evil > /var/lib/agent-md/keys/current")" denied
+row dev "current" "repoint to another key" "DAC 0700 agentmd" "$(try sudo -u dev bash -c "echo evil > /var/lib/agent-md/keys/current")" denied
+row dev "install-key" "run it as the developer" "sudoers Cmnd_Alias" "$(try sudo -u dev sudo -n -u agentmd /usr/local/lib/agent-md/agent-md-authority install-key)" denied
+row root "private key" "mode on disk" "install-key" "$(stat -c %a "$PRIV")" 600
+row root "private key" "owner on disk" "install-key" "$(stat -c %U "$PRIV")" agentmd
+row root "keys dir" "mode on disk" "install" "$(stat -c %a /var/lib/agent-md/keys)" 700
+row root "key id" "full sha256 of DER SPKI" "install-key" "$(openssl pkey -pubin -in "$PUB" -outform DER | sha256sum | cut -d' ' -f1)" "$KEY_ID"
+row root "install-key" "repeat does not regenerate" "idempotence" "$(/usr/local/lib/agent-md/agent-md-authority install-key >/dev/null 2>&1; sha256sum "$PRIV" | cut -d' ' -f1)" "$KEY_DIGEST"
+row root "install-key" "repeat creates no second key" "idempotence" "$(ls /var/lib/agent-md/keys/issuer-*.key | wc -l)" 1
+row root "rotate-key" "rotates automatically" "explicit refusal" "$(/usr/local/lib/agent-md/agent-md-authority rotate-key >/dev/null 2>&1 && printf rotated || printf refused)" refused
+row root "current" "unchanged after rotate-key" "explicit refusal" "$(cat /var/lib/agent-md/keys/current)" "$KEY_ID"
+row runner-env "private key" "reachable from a check" "env isolation" "$(sudo -u agentmd-runner env | grep -ciE 'issuer.*key|PRIVATE' || true)" 0
+# The key must not have been copied into anything the runner can read. These
+# grep the real artefacts of the run that just executed, not the source.
+RUNDIR=/var/lib/agent-md/projects/$PID/runs/$(cat "/var/lib/agent-md/projects/$PID/current-run")
+row root "run artefacts" "contain key material" "custody" "$(grep -rlF "$(sed -n 2p "$PRIV")" "$RUNDIR" 2>/dev/null | wc -l)" 0
+row root "job files" "name the key directory" "custody" "$(grep -rlE 'keys/|issuer-.*\.key' "$RUNDIR/jobs" 2>/dev/null | wc -l)" 0
+row root "snapshot" "contains a PEM private key" "custody" "$(grep -rlF 'BEGIN PRIVATE KEY' "$RUNDIR/snapshot" 2>/dev/null | wc -l)" 0
 
 header "9. C3a boundaries still hold"
 P=/var/lib/agent-md/projects/$PID
-row agentmd-runner issuer.key read "DAC 0600 agentmd" "$(try sudo -u agentmd-runner cat /var/lib/agent-md/keys/issuer.key)" denied
-row dev issuer.key read "DAC 0700 dir" "$(try sudo -u dev cat /var/lib/agent-md/keys/issuer.key)" denied
+row agentmd-runner "private key" read "DAC 0600 agentmd" "$(try sudo -u agentmd-runner cat "$PRIV")" denied
+row dev "private key" read "DAC 0700 dir" "$(try sudo -u dev cat "$PRIV")" denied
 row agentmd-runner enrollment.json overwrite "DAC agentmd-owned" "$(try sudo -u agentmd-runner bash -c "echo x > $P/enrollment.json")" denied
 row dev enrollment.json overwrite "DAC agentmd-owned" "$(try sudo -u dev bash -c "echo x > $P/enrollment.json")" denied
 row dev run-check "replace script" "DAC root-owned" "$(try sudo -u dev bash -c "echo x > $LIB/run-check")" denied

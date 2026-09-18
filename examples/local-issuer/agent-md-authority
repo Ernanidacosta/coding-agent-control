@@ -28,6 +28,9 @@ usage() {
   cat <<'USAGE'
 Usage:
   agent-md-authority install [--root PREFIX] [--user NAME] [--dry-run]
+  agent-md-authority install-key [--root PREFIX] [--user NAME] [--dry-run]
+  agent-md-authority show-key [--root PREFIX]
+  agent-md-authority rotate-key [--root PREFIX]
   agent-md-authority enroll  WORKSPACE [--root PREFIX] [--exec-user NAME]
                              [--exec-path VALUE] [--env NAME=VALUE]...
                              [--yes] [--dry-run]
@@ -44,6 +47,11 @@ Options:
   --yes           Accept the presented enrollment without prompting. This is a
                   command-line flag on purpose; no environment variable
                   approves an enrollment.
+
+install-key is separate from install on purpose. Reinstalling the programs is
+routine; creating the key that authenticates every future receipt is not, and
+must never be a side effect. Running install-key again reports the existing key
+and generates nothing.
 USAGE
 }
 
@@ -697,11 +705,153 @@ cmd_show() {
   present_enrollment "$record"
 }
 
+# --- Key custody -------------------------------------------------------------
+#
+# Deliberately not part of `install`. Installing the programs is a routine,
+# repeatable operation an operator may run on every upgrade; creating the key
+# that authenticates every future receipt is a distinct, consequential act.
+# Folding it into `install` would mean an ordinary reinstall could quietly
+# introduce a second signing identity, and an operator who has never thought
+# about custody would already have a key.
+
+cmd_install_key() {
+  local user=agentmd dry_run=0
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --root) ROOT=${2%/}; shift 2 ;;
+      --user) user="$2"; shift 2 ;;
+      --dry-run) dry_run=1; shift ;;
+      -h|--help) usage; return 0 ;;
+      *) die "unknown install-key option: $1" ;;
+    esac
+  done
+
+  command -v openssl >/dev/null 2>&1 || die "openssl is required to create an issuer key"
+
+  local keys; keys=$(keys_dir)
+  assert_safe_dir "$keys"
+  [ -d "$keys" ] || die "key directory $keys does not exist; run install first"
+
+  local existing
+  if existing=$(authority_current_key_id); then
+    local reason
+    if ! reason=$(authority_key_custody_report "$existing"); then
+      die "the active key $existing is not in a usable state: $reason"
+    fi
+    note "issuer key already installed"
+    note "key id:  $existing"
+    note "public:  $(authority_public_key_path "$existing")"
+    note "no key was generated; installing a key is not how a key is replaced"
+    return 0
+  fi
+
+  if [ "$dry_run" -eq 1 ]; then
+    note "would generate an $AUTHORITY_KEY_ALGORITHM key in $keys"
+    note "would write issuer-<key_id>.key (0600) and issuer-<key_id>.pub (0644)"
+    note "would publish current naming the new key id"
+    return 0
+  fi
+
+  if is_real_root_prefix && [ "$(id -u)" != 0 ]; then
+    die "install-key must run as root; re-run with sudo, or pass --root PREFIX for a staging tree"
+  fi
+
+  local owner=""
+  if is_real_root_prefix; then
+    getent passwd "$user" >/dev/null 2>&1 || die "service account $user does not exist; run install first"
+    owner="$user"
+  fi
+
+  local staging; staging=$(mktemp -d "$keys/.agent-md-keygen.XXXXXX") \
+    || die "cannot create a staging directory in $keys"
+  chmod 0700 "$staging" || { rm -rf "$staging"; die "cannot restrict the staging directory"; }
+
+  local id reason
+  if ! id=$(authority_generate_key_into "$staging"); then
+    reason="$id"; rm -rf "$staging"; die "$reason"
+  fi
+  if [ -e "$(authority_private_key_path "$id")" ]; then
+    rm -rf "$staging"
+    die "a key with id $id already exists but is not current; refusing to disturb it"
+  fi
+  if ! reason=$(authority_publish_key "$staging" "$id" "$owner"); then
+    rm -rf "$staging"
+    die "$reason"
+  fi
+  rm -rf "$staging"
+
+  if ! reason=$(authority_key_custody_report "$id"); then
+    die "the published key failed its own custody check: $reason"
+  fi
+
+  note "installed issuer key"
+  note "key id:  $id"
+  note "public:  $(authority_public_key_path "$id")"
+}
+
+cmd_show_key() {
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --root) ROOT=${2%/}; shift 2 ;;
+      -h|--help) usage; return 0 ;;
+      *) die "unknown show-key option: $1" ;;
+    esac
+  done
+
+  local id
+  id=$(authority_current_key_id) || die "no issuer key is installed"
+  local reason
+  if ! reason=$(authority_key_custody_report "$id"); then
+    die "the active key $id is not in a usable state: $reason"
+  fi
+  note "key id:     $id"
+  note "algorithm:  $AUTHORITY_KEY_ALGORITHM"
+  note "public key: $(authority_public_key_path "$id")"
+  note "private key custody: 0600, $(keys_dir) is 0700"
+}
+
+# Rotation exists as an interface so that the layout, the pointer and the
+# receipt format are designed against it from the start. It does not rotate.
+#
+# A new key only matters once a validator can be told which keys are
+# acceptable and since when; rotating before that would invalidate every
+# receipt the moment the pointer moved, with no way for a validator to tell a
+# rotation apart from an attacker replacing the key. Nothing here rotates on a
+# schedule, on a threshold, or as a side effect of any other command.
+cmd_rotate_key() {
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --root) ROOT=${2%/}; shift 2 ;;
+      -h|--help) usage; return 0 ;;
+      *) die "unknown rotate-key option: $1" ;;
+    esac
+  done
+
+  local id=""
+  id=$(authority_current_key_id) || id=""
+  note "rotation is not implemented in this slice."
+  note ""
+  note "current key: ${id:-none}"
+  note ""
+  note "The intended model, for review before it is built:"
+  note "  1. generate and publish a second key, leaving the first intact"
+  note "  2. distribute the new public key to every project that must accept it"
+  note "  3. move current to the new key id; receipts already issued keep naming"
+  note "     the key that signed them and stay verifiable"
+  note "  4. retire the old private key only after no live receipt depends on it"
+  note ""
+  note "No key was created, moved or removed."
+  return 3
+}
+
 [ $# -gt 0 ] || { usage; exit 1; }
 command -v jq >/dev/null 2>&1 || die "jq is required"
 subcommand="$1"; shift
 case "$subcommand" in
   install) cmd_install "$@" ;;
+  install-key) cmd_install_key "$@" ;;
+  show-key) cmd_show_key "$@" ;;
+  rotate-key) cmd_rotate_key "$@" ;;
   enroll) cmd_enroll "$@" ;;
   show) cmd_show "$@" ;;
   enumerate) cmd_enumerate "$@" ;;

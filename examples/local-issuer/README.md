@@ -1,4 +1,4 @@
-# Local verification authority (slices C1-C2)
+# Local verification authority (slices C1-C4a)
 
 This directory holds the optional component that decides which projects may
 ever receive an authenticated verification receipt. It is not required to use
@@ -7,14 +7,15 @@ as it does today and completion runs the full contract.
 
 | File | Role |
 |---|---|
-| `agent-md-authority` | administrator CLI: `install`, `enroll`, `show` |
+| `agent-md-authority` | administrator CLI: install, key custody, enroll, run preparation |
 | `agent-md-issuer` | runtime: answers eligibility for a request |
 | `run-check` | executes one approved check inside a sealed run |
 | `authority-lib.sh` | shared implementation all three programs source |
 | `phase-a-source.sh` | vendored Phase A identity functions, used unmodified |
 
-Executing checks, signing, sequence allocation and receipt persistence are
-later slices and are deliberately absent. Nothing here can produce a PASS.
+Signing, sequence allocation and receipt persistence are later slices and are
+deliberately absent. There is an issuer key, and nothing uses it yet. Nothing
+here can produce a PASS.
 
 ## Why the authority lives outside the repository
 
@@ -54,6 +55,49 @@ The layout it produces:
 Enrollment records are world-readable on purpose: a later slice validates
 receipts with the enrolled public key without needing any privileged call. That
 is also why an enrollment record must never contain secret material.
+
+### The issuer key
+
+`install` creates the key *directory* and nothing inside it. Creating the key
+is a separate command:
+
+```bash
+sudo ./examples/local-issuer/agent-md-authority install-key
+```
+
+This is deliberate. Reinstalling the programs is routine and an operator may do
+it on every upgrade; introducing the key that will authenticate every future
+receipt is not, and must never happen as a side effect. Running `install-key`
+again reports the existing key and generates nothing.
+
+| Path | Owner | Mode | Contents |
+|---|---|---|---|
+| `issuer-<key_id>.key` | agentmd | 0600 | Ed25519 private key, PKCS#8 PEM |
+| `issuer-<key_id>.pub` | agentmd | 0644 | public key derived from it, SPKI PEM |
+| `current` | agentmd | 0644 | one line: the active `key_id` |
+
+`key_id` is the full SHA-256 of the DER SPKI encoding of the public key, which
+any validator can recompute from the public key alone. The full digest is used
+rather than a truncation: a short identifier selects which key validates a
+receipt, which makes it worth a collision search, and 64 characters cost
+nothing.
+
+`current` holds an identifier, never key material and never a symlink to a key
+file. A mutable `current.pem` would make the active key a property of a path
+somebody could relink; an identifier makes it a property of the key's own
+content.
+
+Publication is the rename of `current`. A key whose files exist but which no
+`current` names is not active, so a crash during creation can leave an
+unreferenced key but never a half-published one. The private key is written by
+`openssl` through its own `-out`: it is never an argument, never an environment
+value and never printed, so it cannot appear in a process listing or in
+captured output.
+
+`show-key` reports the active `key_id` and the public key path. `rotate-key`
+exists as an interface and refuses: rotation only becomes meaningful once a
+validator can be told which keys are acceptable and since when, and nothing
+rotates on a schedule, on a threshold, or as a side effect of another command.
 
 The sudoers rules a project needs are generated per enrollment by
 `agent-md-authority sudoers PROJECT_ID`, and are reviewed against the code that
@@ -431,12 +475,15 @@ A project whose verification depends on a developer-writable `.venv`,
 resources is incompatible with accelerated receipts in this version. Full
 verification stays available and unchanged.
 
-## What C1-C3a deliberately do not do
+## What these slices deliberately do not do
 
-No key generation, no signing, no receipt issuance, no sequence allocation, no
-`dev -> agentmd` entry hop, and no change to `verify.sh` or the Stop hook. An
-exit status of 0 from `run-check` means the command exited 0 and nothing more:
-it is not a receipt, not an attestation and not a PASS.
+There is a key, and nothing uses it. No signing, no receipt issuance, no
+sequence allocation, and no change to `verify.sh` or the Stop hook. An exit
+status of 0 from `run-check` means the command exited 0 and nothing more: it is
+not a receipt, not an attestation and not a PASS.
+
+The issuer and `run-check` do not read, name or open the key, and the test
+suite asserts that rather than trusting the comments that say so.
 
 ## Evaluating a project
 

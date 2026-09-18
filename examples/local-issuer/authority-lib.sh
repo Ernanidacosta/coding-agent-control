@@ -986,3 +986,168 @@ authority_export_git_workspace_env() {
   export GIT_CONFIG_KEY_3=core.pager       GIT_CONFIG_VALUE_3=cat
   export GIT_CONFIG_KEY_4=protocol.ext.allow GIT_CONFIG_VALUE_4=never
 }
+
+# --- Issuer key custody ------------------------------------------------------
+#
+# The signing key is the only thing in this system that turns an observation
+# into evidence, so its custody rules are stricter than anything else here.
+#
+# Layout under the key directory, which is 0700 and owned by the service user:
+#
+#   issuer-<key_id>.key   0600  the Ed25519 private key, PKCS#8 PEM
+#   issuer-<key_id>.pub   0644  the public key derived from it, SPKI PEM
+#   current               0644  one line: the key_id of the active key
+#
+# key_id is the full SHA-256 of the DER SPKI encoding of the public key. The
+# full digest is used rather than a truncation: a truncated identifier invites
+# a collision search against a value that selects which key validates a
+# receipt, and the cost of carrying 64 hex characters is nothing.
+#
+# "current" holds an identifier, never key material and never a symlink to a
+# key file. A mutable current.pem would make the active key a property of a
+# path that could be relinked; an identifier makes it a property of the key's
+# own content. Rotation therefore changes one short text file, and every
+# previously issued receipt still names the key that signed it.
+#
+# Publication is the rename of "current". A key whose files exist but which no
+# "current" names is not active and is not usable; a crash at any point before
+# that rename leaves an unreferenced key, never a half-published one.
+
+AUTHORITY_KEY_ALGORITHM=ed25519
+
+# authority_fsync_path <path>
+# Durability for a file or a directory. GNU coreutils syncs the named path;
+# elsewhere a full sync is slower but strictly stronger. Either way the caller
+# gets the ordering guarantee it asked for, so this never fails softly.
+authority_fsync_path() {
+  local path="$1"
+  if sync -d "$path" 2>/dev/null; then return 0; fi
+  sync 2>/dev/null || return 1
+  return 0
+}
+
+# authority_key_id_from_public <public-pem>
+# The identifier of a key: sha256 over the DER SPKI, which is the same bytes
+# any validator can recompute from the public key alone.
+authority_key_id_from_public() {
+  local pub="$1" der out
+  der=$(mktemp "${TMPDIR:-/tmp}/agent-md-spki.XXXXXX") || return 1
+  if ! openssl pkey -pubin -in "$pub" -outform DER -out "$der" 2>/dev/null; then
+    rm -f "$der"; return 1
+  fi
+  out=$(sha256_file "$der"); rm -f "$der"
+  case "$out" in
+    [0-9a-f]*) ;;
+    *) return 1 ;;
+  esac
+  [ ${#out} -eq 64 ] || return 1
+  printf '%s' "$out"
+}
+
+authority_key_id_is_safe() {
+  case "$1" in
+    *[!0-9a-f]*|"") return 1 ;;
+  esac
+  [ ${#1} -eq 64 ]
+}
+
+authority_private_key_path() { printf '%s/issuer-%s.key' "$(keys_dir)" "$1"; }
+authority_public_key_path()  { printf '%s/issuer-%s.pub' "$(keys_dir)" "$1"; }
+authority_current_key_file() { printf '%s/current' "$(keys_dir)"; }
+
+# authority_current_key_id
+# The active key, or nothing. A malformed or oversized pointer reads as no
+# active key rather than as an identifier to go looking for.
+authority_current_key_id() {
+  local file id
+  file=$(authority_current_key_file)
+  [ -f "$file" ] || return 1
+  [ -L "$file" ] && return 1
+  IFS= read -r id < "$file" || return 1
+  authority_key_id_is_safe "$id" || return 1
+  printf '%s' "$id"
+}
+
+# authority_key_custody_report <key-id>
+# Everything that must hold for a published key, as a reason on failure. The
+# private key is never read here: custody is a property of the inode.
+authority_key_custody_report() {
+  local id="$1" keys priv pub mode
+  keys=$(keys_dir)
+  priv=$(authority_private_key_path "$id")
+  pub=$(authority_public_key_path "$id")
+  if path_has_symlink "$keys"; then printf 'key directory has a symlinked path component'; return 1; fi
+  mode=$(mode_of "$keys") || { printf 'key directory is unreadable'; return 1; }
+  [ "${mode: -3}" = 700 ] || { printf 'key directory mode is %s, expected 700' "$mode"; return 1; }
+  [ -f "$priv" ] || { printf 'private key is absent'; return 1; }
+  [ -L "$priv" ] && { printf 'private key is a symlink'; return 1; }
+  mode=$(mode_of "$priv") || { printf 'private key is unreadable'; return 1; }
+  [ "${mode: -3}" = 600 ] || { printf 'private key mode is %s, expected 600' "$mode"; return 1; }
+  [ -f "$pub" ] || { printf 'public key is absent'; return 1; }
+  [ -L "$pub" ] && { printf 'public key is a symlink'; return 1; }
+  return 0
+}
+
+# authority_generate_key_into <staging-dir>
+# Creates a key pair inside a private staging directory and prints its key_id.
+# Nothing here writes into the key directory: the caller publishes, so a
+# failure at any step leaves the live layout exactly as it was.
+#
+# The private key reaches the filesystem through openssl's own -out. It is
+# never passed as an argument, never placed in the environment and never
+# written to a descriptor this shell reads, so it cannot appear in a process
+# listing or in captured output.
+authority_generate_key_into() {
+  local staging="$1" priv pub id
+  priv="$staging/new.key"
+  pub="$staging/new.pub"
+  ( umask 077 && openssl genpkey -algorithm "$AUTHORITY_KEY_ALGORITHM" -out "$priv" >/dev/null 2>&1 ) \
+    || { printf 'cannot generate an %s key' "$AUTHORITY_KEY_ALGORITHM"; return 1; }
+  chmod 0600 "$priv" || { printf 'cannot restrict the generated key'; return 1; }
+  openssl pkey -in "$priv" -pubout -out "$pub" >/dev/null 2>&1 \
+    || { printf 'cannot derive the public key'; return 1; }
+  chmod 0644 "$pub" || { printf 'cannot set the public key mode'; return 1; }
+  id=$(authority_key_id_from_public "$pub") || { printf 'cannot compute the key identifier'; return 1; }
+  printf '%s' "$id"
+}
+
+# authority_publish_key <staging-dir> <key-id> [owner]
+# Moves a staged pair into the key directory and then, and only then, names it
+# as current. Each step is durable before the next one is allowed to depend on
+# it, so the orderings a crash can produce are limited to:
+#
+#   nothing            -> no key, no pointer
+#   key files only     -> an unreferenced key, inert
+#   key files, pointer -> published
+#
+# There is no ordering in which "current" names a key whose material is
+# missing or partial.
+authority_publish_key() {
+  local staging="$1" id="$2" owner="${3:-}" keys priv pub tmp
+  keys=$(keys_dir)
+  priv=$(authority_private_key_path "$id")
+  pub=$(authority_public_key_path "$id")
+
+  authority_fsync_path "$staging/new.key" || { printf 'cannot flush the generated key'; return 1; }
+  authority_fsync_path "$staging/new.pub" || { printf 'cannot flush the public key'; return 1; }
+
+  if [ -n "$owner" ]; then
+    chown "$owner":"$owner" "$staging/new.key" "$staging/new.pub" 2>/dev/null \
+      || { printf 'cannot assign key ownership to %s' "$owner"; return 1; }
+  fi
+
+  mv -f "$staging/new.key" "$priv" || { printf 'cannot place the private key'; return 1; }
+  mv -f "$staging/new.pub" "$pub" || { printf 'cannot place the public key'; return 1; }
+  authority_fsync_path "$keys" || { printf 'cannot flush the key directory'; return 1; }
+
+  tmp="$staging/current"
+  printf '%s\n' "$id" > "$tmp" || { printf 'cannot stage the pointer'; return 1; }
+  chmod 0644 "$tmp" || { printf 'cannot set the pointer mode'; return 1; }
+  if [ -n "$owner" ]; then
+    chown "$owner":"$owner" "$tmp" 2>/dev/null || { printf 'cannot assign pointer ownership'; return 1; }
+  fi
+  authority_fsync_path "$tmp" || { printf 'cannot flush the pointer'; return 1; }
+  mv -f "$tmp" "$(authority_current_key_file)" || { printf 'cannot publish the pointer'; return 1; }
+  authority_fsync_path "$keys" || { printf 'cannot flush the key directory'; return 1; }
+  return 0
+}
