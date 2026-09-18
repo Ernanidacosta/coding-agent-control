@@ -64,7 +64,7 @@ ISSUER_EXHAUSTED=false
 RESPONSE_RUN_ID=null
 RESPONSE_CALLER=null
 RESPONSE_SNAPSHOT=null
-RESPONSE_SOURCE_IDENTITY=null
+RESPONSE_IDENTITY=null
 RESPONSE_CHECKS='[]'
 RESPONSE_BUDGET=null
 RESPONSE_PROJECT_ID=null
@@ -85,7 +85,7 @@ respond() {
       --argjson project_id "$RESPONSE_PROJECT_ID" --argjson run_id "$RESPONSE_RUN_ID" \
       --argjson workspace "$RESPONSE_WORKSPACE" --argjson scope "$RESPONSE_SCOPE" \
       --argjson caller "$RESPONSE_CALLER" --argjson snapshot "$RESPONSE_SNAPSHOT" \
-      --argjson source_identity "$RESPONSE_SOURCE_IDENTITY" \
+      --argjson identity "$RESPONSE_IDENTITY" \
       --argjson contract "$RESPONSE_CONTRACT" --argjson mechanism "$RESPONSE_MECHANISM" \
       --argjson environment "$RESPONSE_ENVIRONMENT" --argjson checks "$RESPONSE_CHECKS" \
       --argjson budget "$RESPONSE_BUDGET" '
@@ -93,13 +93,13 @@ respond() {
          reason_code: $reason_code, reason: $reason,
          project_id: $project_id, run_id: $run_id, workspace: $workspace, scope: $scope,
          caller: $caller,
-         source: {
-           # What a gate recomputes. The snapshot identity describes the sealed
-           # tree the checks read; the Phase A identity is the one a receipt
-           # will have to carry, because it is the one the core can reproduce.
-           phase_a: $source_identity,
-           snapshot: $snapshot
-         },
+         # The four fingerprints the core already understands, bound to this
+         # run. A later signing step consumes exactly these; on their own they
+         # are orchestration output and carry no authority.
+         identity: $identity,
+         # The sealed tree the checks actually read, which is a different thing
+         # from the source identity and is reported separately.
+         snapshot: $snapshot,
          contract: {state: $contract}, mechanism: {state: $mechanism},
          environment: {state: $environment},
          checks: $checks, budget: $budget}'
@@ -442,13 +442,20 @@ issuer_prepare_run() {
   local run_dir manifest_file identity_file
   run_dir=$(authority_run_dir "$ISSUER_PROJECT_ID" "$ISSUER_RUN_ID")
   manifest_file="$run_dir/snapshot/manifest.json"
-  identity_file="$run_dir/source-identity.json"
+  identity_file="$run_dir/identity.json"
   [ -f "$manifest_file" ] || refuse REFUSED_RUN_FAILED "the prepared run has no snapshot manifest" "$EX_RUN_FAILED"
-  [ -f "$identity_file" ] || refuse REFUSED_RUN_FAILED "the prepared run has no bound source identity" "$EX_RUN_FAILED"
+  [ -f "$identity_file" ] || refuse REFUSED_RUN_FAILED "the prepared run has no bound identity" "$EX_RUN_FAILED"
+  if ! jq -e '
+    (.fingerprints | type) == "object" and
+    ([.fingerprints.source, .fingerprints.contract, .fingerprints.control, .fingerprints.mechanism]
+      | all(.[]; type == "object" and (.value | type == "string" and length == 64)))
+  ' "$identity_file" >/dev/null 2>&1; then
+    refuse REFUSED_RUN_FAILED "the prepared run has an incomplete bound identity" "$EX_RUN_FAILED"
+  fi
   ISSUER_SNAPSHOT_FP=$(jq -cS . "$manifest_file" | sha256_hex)
   RESPONSE_SNAPSHOT=$(jq -nc --arg v "$ISSUER_SNAPSHOT_FP" '{algorithm:"sha256",value:$v}')
-  ISSUER_SOURCE_FP=$(jq -cS . "$identity_file" | sha256_hex)
-  RESPONSE_SOURCE_IDENTITY=$(jq -nc --arg v "$ISSUER_SOURCE_FP" '{algorithm:"sha256",value:$v}')
+  ISSUER_SOURCE_FP=$(jq -r '.fingerprints.source.value' "$identity_file")
+  RESPONSE_IDENTITY=$(jq -c '.fingerprints' "$identity_file")
 }
 
 # One hop per check, always through the descending boundary in production. The

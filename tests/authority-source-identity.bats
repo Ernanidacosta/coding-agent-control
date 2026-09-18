@@ -28,7 +28,7 @@ teardown() {
 }
 
 core_manifest() { bash -c '. "$CORE"; verification_receipt_source_manifest_json "${1:-worktree}"' _ "${1:-worktree}"; }
-authority_manifest() { bash -c '. "$VENDORED"; authority_pa_source_manifest_json "${1:-worktree}"' _ "${1:-worktree}"; }
+authority_manifest() { bash -c '. "$VENDORED"; authority_pa_verification_receipt_source_manifest_json "${1:-worktree}"' _ "${1:-worktree}"; }
 
 fingerprint() { jq -cS . | sha256sum | cut -d' ' -f1; }
 

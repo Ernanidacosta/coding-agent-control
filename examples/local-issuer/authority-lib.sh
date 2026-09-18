@@ -825,7 +825,7 @@ authority_snapshot_manifest() {
       # Phase A hashes the raw target bytes without readlink's terminator, so
       # the vendored primitive is used rather than a second, subtly different
       # implementation.
-      digest=$(authority_pa_symlink_digest "$path") || { rm -f "$entries"; return 1; }
+      digest=$(authority_pa_verification_receipt_symlink_digest "$path") || { rm -f "$entries"; return 1; }
     else
       kind="file"
       if [ -x "$dest/$path" ]; then mode=100755; else mode=100644; fi

@@ -54,12 +54,18 @@ teardown() {
 }
 
 project_dir() { printf '%s/var/lib/agent-md/projects/%s' "$ROOT" "$PROJECT_ID"; }
+# The bijection helper takes the source manifest on its own.
+source_projection() {
+  local out="$BATS_TEST_TMPDIR/source.json"
+  jq -c '.manifests.source' "$(run_dir)/identity.json" > "$out"
+  printf '%s' "$out"
+}
 run_dir() { printf '%s/runs/%s' "$(project_dir)" "$(cat "$(project_dir)/current-run")"; }
 core_fingerprint() {
   bash -c 'cd "$1"; . "$2"; verification_receipt_source_manifest_json worktree | jq -cS . | sha256sum | cut -d" " -f1' \
     _ "$WS" "$CORE"
 }
-bound_fingerprint() { jq -cS . "$(run_dir)/source-identity.json" | sha256sum | cut -d' ' -f1; }
+bound_fingerprint() { jq -r '.fingerprints.source.value' "$(run_dir)/identity.json"; }
 
 @test "1 the bound identity is the identity the core computes" {
   run bash "$AUTHORITY" prepare-run "$PROJECT_ID" --root "$ROOT"
@@ -81,11 +87,11 @@ bound_fingerprint() { jq -cS . "$(run_dir)/source-identity.json" | sha256sum | c
   [ "$(bound_fingerprint)" = "$(core_fingerprint)" ]
 
   # Staged and unstaged stay distinct in the identity.
-  jq -e '.entries[] | select(.path == "marker.txt")
-    | .index.digest != .worktree.digest' "$(run_dir)/source-identity.json" >/dev/null
+  jq -e '.manifests.source.entries[] | select(.path == "marker.txt")
+    | .index.digest != .worktree.digest' "$(run_dir)/identity.json" >/dev/null
   # An unstaged delete is visible as index-present, worktree-absent.
-  jq -e '.entries[] | select(.path == "doomed.txt")
-    | .index.state == "present" and .worktree.state == "absent"' "$(run_dir)/source-identity.json" >/dev/null
+  jq -e '.manifests.source.entries[] | select(.path == "doomed.txt")
+    | .index.state == "present" and .worktree.state == "absent"' "$(run_dir)/identity.json" >/dev/null
   # The executed tree holds the unstaged content and not the deleted path.
   [ "$(cat "$(run_dir)/snapshot/src/marker.txt")" = UNSTAGED ]
   [ ! -e "$(run_dir)/snapshot/src/doomed.txt" ]
@@ -96,7 +102,7 @@ bound_fingerprint() { jq -cS . "$(run_dir)/source-identity.json" | sha256sum | c
   [ "$status" -eq 0 ]
   run bash -c '. "$1"; . "$2"; authority_snapshot_matches_identity "$3" "$4"' \
     _ "$LIB" "$BATS_TEST_DIRNAME/../examples/local-issuer/phase-a-source.sh" \
-    "$(run_dir)/source-identity.json" "$(run_dir)/snapshot/src"
+    "$(source_projection)" "$(run_dir)/snapshot/src"
   [ "$status" -eq 0 ]
 }
 
@@ -108,7 +114,7 @@ bound_fingerprint() { jq -cS . "$(run_dir)/source-identity.json" | sha256sum | c
   printf 'SUBSTITUTED\n' > "$(run_dir)/snapshot/src/marker.txt"
   run bash -c '. "$1"; . "$2"; authority_snapshot_matches_identity "$3" "$4"' \
     _ "$LIB" "$BATS_TEST_DIRNAME/../examples/local-issuer/phase-a-source.sh" \
-    "$(run_dir)/source-identity.json" "$(run_dir)/snapshot/src"
+    "$(source_projection)" "$(run_dir)/snapshot/src"
   [ "$status" -ne 0 ]
   [[ "$output" == *"does not match the source identity"* ]]
 }
@@ -130,7 +136,7 @@ bound_fingerprint() { jq -cS . "$(run_dir)/source-identity.json" | sha256sum | c
     # It succeeded, so the sealed tree must be exactly what the identity says.
     run bash -c '. "$1"; . "$2"; authority_snapshot_matches_identity "$3" "$4"' \
       _ "$LIB" "$BATS_TEST_DIRNAME/../examples/local-issuer/phase-a-source.sh" \
-      "$(run_dir)/source-identity.json" "$(run_dir)/snapshot/src"
+      "$(source_projection)" "$(run_dir)/snapshot/src"
     [ "$status" -eq 0 ]
   else
     # It refused, which is the other acceptable outcome. It must not have left
@@ -149,7 +155,7 @@ bound_fingerprint() { jq -cS . "$(run_dir)/source-identity.json" | sha256sum | c
   [ "$lint" = "$(run_dir)/snapshot/src" ]
   [ "$(jq -r .run_id "$(run_dir)/jobs/lint.json")" = "$(jq -r .run_id "$(run_dir)/jobs/test.json")" ]
   # One identity file for the run, not one per check.
-  [ "$(find "$(run_dir)" -maxdepth 1 -name 'source-identity.json' | wc -l)" -eq 1 ]
+  [ "$(find "$(run_dir)" -maxdepth 1 -name 'identity.json' | wc -l)" -eq 1 ]
 }
 
 @test "7 the evaluation reports the bound identity, and it is the core's" {
@@ -158,9 +164,9 @@ bound_fingerprint() { jq -cS . "$(run_dir)/source-identity.json" | sha256sum | c
     _ "$WS" "$ISSUER" "$ROOT"
   [ "$status" -eq 0 ]
   printf '%s' "$output" | jq -e '.status == "candidate_pass"' >/dev/null
-  [ "$(printf '%s' "$output" | jq -r '.source.phase_a.value')" = "$(core_fingerprint)" ]
-  # The snapshot identity is reported too, and is a different thing.
-  printf '%s' "$output" | jq -e '.source.snapshot.value != .source.phase_a.value' >/dev/null
+  [ "$(printf '%s' "$output" | jq -r '.identity.source.value')" = "$(core_fingerprint)" ]
+  # The sealed tree is reported too, and is a different thing.
+  printf '%s' "$output" | jq -e '.snapshot.value != .identity.source.value' >/dev/null
 }
 
 # --- current-run is scratch, not evidence -----------------------------------
@@ -169,7 +175,7 @@ bound_fingerprint() { jq -cS . "$(run_dir)/source-identity.json" | sha256sum | c
   run bash "$AUTHORITY" prepare-run "$PROJECT_ID" --root "$ROOT"
   [ "$status" -eq 0 ]
   # Nothing in a run is signed, sequenced or presented as proof.
-  ! jq -e 'has("signature") or has("sequence") or has("authentic")' "$(run_dir)/source-identity.json" >/dev/null
+  ! jq -e 'has("signature") or has("sequence") or has("authentic")' "$(run_dir)/identity.json" >/dev/null
   ! grep -qE 'signature|authentic|attested|receipt' "$(run_dir)/jobs/lint.json"
 }
 
@@ -179,7 +185,7 @@ bound_fingerprint() { jq -cS . "$(run_dir)/source-identity.json" | sha256sum | c
   local old_run old_identity
   old_run=$(cat "$(project_dir)/current-run")
   old_identity=$(mktemp)
-  cp "$(run_dir)/source-identity.json" "$old_identity"
+  cp "$(run_dir)/identity.json" "$old_identity"
 
   # A second run supersedes it and the old directory is released.
   run bash "$AUTHORITY" prepare-run "$PROJECT_ID" --root "$ROOT"
@@ -190,7 +196,7 @@ bound_fingerprint() { jq -cS . "$(run_dir)/source-identity.json" | sha256sum | c
   # Putting the old identity back where a run would live grants nothing: the
   # pointer is authority-owned and still names the newer run.
   mkdir -p "$(project_dir)/runs/$old_run"
-  cp "$old_identity" "$(project_dir)/runs/$old_run/source-identity.json"
+  cp "$old_identity" "$(project_dir)/runs/$old_run/identity.json"
   [ "$(cat "$(project_dir)/current-run")" != "$old_run" ]
   rm -f "$old_identity"
 }
@@ -199,6 +205,47 @@ bound_fingerprint() { jq -cS . "$(run_dir)/source-identity.json" | sha256sum | c
   # A future signing step must be a continuation of an eligible evaluation, not
   # an operation that signs whatever summary it finds.
   ! grep -qE 'summary|source-identity\.json' "$ISSUER" || \
-    grep -qE 'identity_file="\$run_dir/source-identity.json"' "$ISSUER"
+    grep -qE 'identity_file="\$run_dir/identity.json"' "$ISSUER"
   ! grep -qE '(--summary|--receipt|--sign)' "$ISSUER" "$AUTHORITY"
+}
+
+@test "11 a contract that changes during capture never yields an inconsistent run" {
+  # The bijection check can only see the source tree. Contract, control and
+  # mechanism are equally part of what a run is authorised against, so the
+  # bracket recomputes all four and refuses if any of them moved.
+  local i
+  for i in $(seq 1 300); do printf 'content %s\n' "$i" > "$WS/bulk$i.txt"; done
+  git -C "$WS" add -A >/dev/null 2>&1
+
+  ( for i in $(seq 1 60); do
+      printf '[verify]\nlint = "cat marker.txt"\ntest = "echo %s"\n\n[verify.policy]\nrequired = ["lint","test"]\ntimeout_seconds = 20\n' "$i" > "$WS/agent-md.toml"
+      sleep 0.05
+    done ) &
+  local mutator=$!
+  run bash "$AUTHORITY" prepare-run "$PROJECT_ID" --root "$ROOT"
+  local prepared="$status"
+  wait "$mutator" 2>/dev/null || true
+
+  if [ "$prepared" -eq 0 ]; then
+    # It succeeded, so the bound contract must be the one on disk right then,
+    # and every fingerprint must be present.
+    jq -e '
+      [.fingerprints.source, .fingerprints.contract, .fingerprints.control, .fingerprints.mechanism]
+      | all(.[]; (.value | length) == 64)
+    ' "$(run_dir)/identity.json" >/dev/null
+  else
+    [ ! -e "$(project_dir)/current-run" ] || [ ! -d "$(run_dir)/identity.json" ]
+  fi
+}
+
+@test "12 the bound identity carries exactly the four fields the protocol needs" {
+  run bash "$AUTHORITY" prepare-run "$PROJECT_ID" --root "$ROOT"
+  [ "$status" -eq 0 ]
+  jq -e '
+    (.fingerprints | keys | sort) == ["contract","control","mechanism","source"] and
+    (.manifests | keys | sort) == ["contract","control","mechanism","source"] and
+    all(.fingerprints[]; .algorithm == "sha256" and (.value | length) == 64)
+  ' "$(run_dir)/identity.json" >/dev/null
+  # Still nothing that claims to be evidence.
+  ! jq -e 'has("signature") or has("sequence") or has("receipt")' "$(run_dir)/identity.json" >/dev/null
 }

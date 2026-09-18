@@ -36,7 +36,7 @@ Usage:
   agent-md-authority prepare-job PROJECT_ID --check NAME [--root PREFIX]
   agent-md-authority sudoers PROJECT_ID [--root PREFIX] [--write]
   agent-md-authority enumerate PROJECT_ID
-  agent-md-authority source-identity PROJECT_ID
+  agent-md-authority identity PROJECT_ID
 
 Options:
   --root PREFIX   Operate under an alternate filesystem root. Intended for
@@ -380,36 +380,48 @@ cmd_prepare_run() {
     rm -rf "${run_dir:?}"
   }
 
-  # 1. The identity first, so the path set and the fingerprint come from one
-  #    source of truth instead of two enumerations that could disagree.
+  # 1. All four identities first, from one pass, so the path set and every
+  #    fingerprint come from one source of truth instead of several passes that
+  #    could disagree with each other.
   identity=$(mktemp "${TMPDIR:-/tmp}/agent-md-identity.XXXXXX") || die "cannot create a temporary file"
-  if ! authority_source_identity_for "$workspace" "$project_id" > "$identity"; then
-    rm -f "$identity"; abandon_run; die "could not compute the workspace source identity"
+  if ! authority_identity_for "$workspace" "$project_id" > "$identity"; then
+    rm -f "$identity"; abandon_run; die "could not compute the workspace identities"
   fi
-  if ! jq -e '.valid == true' "$identity" >/dev/null 2>&1; then
-    reason=$(jq -r '[.entries[]? | select(.valid == false) | (.error // .index.error // .worktree.error // "unsupported entry")][0] // .error // "unknown"' "$identity")
-    rm -f "$identity"; abandon_run
-    die "the workspace source identity is not usable: $reason"
-  fi
+  local part
+  for part in source contract control mechanism; do
+    if ! jq -e --arg p "$part" '.[$p].valid == true' "$identity" >/dev/null 2>&1; then
+      reason=$(jq -r --arg p "$part" '.[$p] | [.entries[]?, .files[]? | select(.valid == false)
+        | (.error // .index.error // .worktree.error // "unsupported entry")][0] // .error // "not usable"' "$identity")
+      rm -f "$identity"; abandon_run
+      die "the workspace $part identity is not usable: $reason"
+    fi
+  done
 
   # 2. Materialise exactly what that identity describes.
-  if ! reason=$(authority_materialize_from_manifest "$workspace" "$identity" "$run_dir/snapshot/src"); then
-    rm -f "$identity"; abandon_run; die "snapshot refused: $reason"
+  local source_manifest
+  source_manifest=$(mktemp "${TMPDIR:-/tmp}/agent-md-source.XXXXXX") || die "cannot create a temporary file"
+  jq -c '.source' "$identity" > "$source_manifest"
+  if ! reason=$(authority_materialize_from_manifest "$workspace" "$source_manifest" "$run_dir/snapshot/src"); then
+    rm -f "$identity" "$source_manifest"; abandon_run; die "snapshot refused: $reason"
   fi
   # 3. Seal it.
   authority_seal_snapshot "$run_dir/snapshot/src"
 
   # 4. Prove the sealed tree is the tree the identity describes. The authority
   #    holds both sides, so a worktree that moved during the copy shows up here.
-  if ! reason=$(authority_snapshot_matches_identity "$identity" "$run_dir/snapshot/src"); then
-    rm -f "$identity"; abandon_run; die "capture refused: $reason"
+  if ! reason=$(authority_snapshot_matches_identity "$source_manifest" "$run_dir/snapshot/src"); then
+    rm -f "$identity" "$source_manifest"; abandon_run; die "capture refused: $reason"
   fi
+  rm -f "$source_manifest"
 
   # 5. Recompute. The bijection above cannot see the index, and Phase A's
   #    identity covers both halves, so the bracket closes that gap.
+  # 5. Recompute all four. The bijection above cannot see the index, the
+  #    contract, the control record or the mechanism files, and every one of
+  #    them is part of what the run is authorised against.
   recheck=$(mktemp "${TMPDIR:-/tmp}/agent-md-identity2.XXXXXX") || die "cannot create a temporary file"
-  if ! authority_source_identity_for "$workspace" "$project_id" > "$recheck"; then
-    rm -f "$identity" "$recheck"; abandon_run; die "could not recompute the workspace source identity"
+  if ! authority_identity_for "$workspace" "$project_id" > "$recheck"; then
+    rm -f "$identity" "$recheck"; abandon_run; die "could not recompute the workspace identities"
   fi
   if [ "$(jq -cS . "$identity")" != "$(jq -cS . "$recheck")" ]; then
     rm -f "$identity" "$recheck"; abandon_run
@@ -417,8 +429,26 @@ cmd_prepare_run() {
   fi
   rm -f "$recheck"
 
-  source_fingerprint=$(jq -cS . "$identity" | sha256_hex) || die "cannot fingerprint the source identity"
-  atomic_write "$run_dir/source-identity.json" 0444 < "$identity"
+  # The four fingerprints the core already understands. This is the input a
+  # later signing step will consume; it is not a receipt and carries no
+  # authority of its own.
+  local fp_source fp_contract fp_control fp_mechanism
+  fp_source=$(jq -cS '.source' "$identity" | sha256_hex)
+  fp_contract=$(jq -cS '.contract' "$identity" | sha256_hex)
+  fp_control=$(jq -cS '.control' "$identity" | sha256_hex)
+  fp_mechanism=$(jq -cS '.mechanism' "$identity" | sha256_hex)
+  source_fingerprint="$fp_source"
+  jq -nc --argjson schema "$AUTHORITY_SCHEMA" \
+    --argjson manifests "$(cat "$identity")" \
+    --arg s "$fp_source" --arg c "$fp_contract" --arg k "$fp_control" --arg m "$fp_mechanism" '
+      {schema: $schema,
+       fingerprints: {
+         source:    {algorithm: "sha256", value: $s},
+         contract:  {algorithm: "sha256", value: $c},
+         control:   {algorithm: "sha256", value: $k},
+         mechanism: {algorithm: "sha256", value: $m}
+       },
+       manifests: $manifests}' | atomic_write "$run_dir/identity.json" 0444
   rm -f "$identity"
 
   manifest=$(authority_snapshot_manifest "$run_dir/snapshot/src") || die "cannot fingerprint the snapshot"
@@ -477,7 +507,10 @@ cmd_prepare_run() {
   printf 'run %s\n' "$run_id"
   note "execution account: $(printf '%s' "$runner" | jq -r '.user') (uid $(printf '%s' "$runner" | jq -r '.uid'))"
   note "snapshot sealed at $run_dir/snapshot/src ($(printf '%s' "$manifest" | jq 'length') entries)"
-  note "source identity bound: $source_fingerprint"
+  note "bound identities: source $fp_source"
+  note "                   contract $fp_contract"
+  note "                   control $fp_control"
+  note "                   mechanism $fp_mechanism"
   note "jobs: ${ordered[*]}"
   note "per-check timeout ${timeout}s, total ${total}s"
 }
@@ -494,14 +527,19 @@ cmd_prepare_job() {
 # repository that manages to execute code through its own Git configuration
 # reaches the runner and never the authority. A staging root has no such
 # account, and the skipped hop is announced rather than hidden.
-authority_source_identity_for() {
+authority_identity_for() {
   local workspace="$1" project_id="$2"
   if is_real_root_prefix && getent passwd "$AUTHORITY_RUNNER_USER" >/dev/null 2>&1; then
-    sudo -n -u "$AUTHORITY_RUNNER_USER" "$(lib_dir)/agent-md-authority" source-identity "$project_id"
+    sudo -n -u "$AUTHORITY_RUNNER_USER" "$(lib_dir)/agent-md-authority" identity "$project_id"
     return $?
   fi
-  note "staging root: computing the source identity without the runner hop" >&2
-  ( cd "$workspace" && authority_pa_source_manifest_json worktree )
+  note "staging root: computing identities without the runner hop" >&2
+  ( cd "$workspace" && jq -nc \
+      --argjson source "$(authority_pa_verification_receipt_source_manifest_json worktree)" \
+      --argjson contract "$(authority_pa_effective_verification_contract_json worktree)" \
+      --argjson control "$(authority_pa_effective_control_requirements_json worktree)" \
+      --argjson mechanism "$(authority_pa_verification_receipt_mechanism_manifest_json worktree)" \
+      '{source: $source, contract: $contract, control: $control, mechanism: $mechanism}' )
 }
 
 authority_enumerate_for() {
@@ -572,7 +610,7 @@ Defaults!$alias env_reset, secure_path="/usr/local/bin:/usr/bin:/bin"
 Defaults!${alias}_EVAL env_reset, secure_path="/usr/local/bin:/usr/bin:/bin"
 Cmnd_Alias $alias = \\
 ${entries}    $(lib_dir)/agent-md-authority enumerate $project_id, \\
-    $(lib_dir)/agent-md-authority source-identity $project_id
+    $(lib_dir)/agent-md-authority identity $project_id
 Cmnd_Alias ${alias}_EVAL = $(lib_dir)/agent-md-issuer evaluate
 $AUTHORITY_SERVICE_USER ALL=($AUTHORITY_RUNNER_USER) NOPASSWD: $alias
 $exec_user ALL=($AUTHORITY_SERVICE_USER) NOPASSWD: ${alias}_EVAL
@@ -606,11 +644,11 @@ cmd_enumerate() {
   authority_enumerate_paths "$workspace"
 }
 
-# Emits the Phase A source identity for the enrolled workspace. Like enumerate,
-# this is a code path that reads a repository's own Git configuration, so it is
-# meant to be reached through the descending rule and to run as the
-# execution-only account.
-cmd_source_identity() {
+# Emits all four identities the core recognises, computed in one pass so they
+# describe one instant rather than four. Like enumerate, this reads the
+# repository's own Git configuration, so it is meant to be reached through the
+# descending rule and to run as the execution-only account.
+cmd_identity() {
   local project_id="${1:-}" file workspace
   [ -n "$project_id" ] || die "source-identity requires a project id"
   case "$project_id" in */*|..|.|*[!a-zA-Z0-9-]*) die "invalid project id" ;; esac
@@ -621,7 +659,12 @@ cmd_source_identity() {
   [ -n "$workspace" ] || die "enrollment declares no workspace"
   [ -d "$workspace" ] || die "enrollment workspace is not a directory"
   cd "$workspace" || die "cannot enter the enrollment workspace"
-  authority_pa_source_manifest_json worktree
+  jq -nc \
+    --argjson source "$(authority_pa_verification_receipt_source_manifest_json worktree)" \
+    --argjson contract "$(authority_pa_effective_verification_contract_json worktree)" \
+    --argjson control "$(authority_pa_effective_control_requirements_json worktree)" \
+    --argjson mechanism "$(authority_pa_verification_receipt_mechanism_manifest_json worktree)" \
+    '{source: $source, contract: $contract, control: $control, mechanism: $mechanism}'
 }
 
 cmd_show() {
@@ -661,7 +704,7 @@ case "$subcommand" in
   enroll) cmd_enroll "$@" ;;
   show) cmd_show "$@" ;;
   enumerate) cmd_enumerate "$@" ;;
-  source-identity) cmd_source_identity "$@" ;;
+  identity) cmd_identity "$@" ;;
   prepare-run) cmd_prepare_run "$@" ;;
   prepare-job) cmd_prepare_job "$@" ;;
   sudoers) cmd_sudoers "$@" ;;

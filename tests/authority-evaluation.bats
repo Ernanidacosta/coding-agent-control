@@ -151,7 +151,12 @@ timeout_seconds = 20'
     = "$(jq -r '.snapshot_fingerprint' "$(project_dir)/runs/$run/jobs/test.json")" ]
 }
 
-@test "6 mutating the worktree during an evaluation does not change what checks see" {
+@test "6 mutating the worktree during an evaluation never changes what checks see" {
+  # The checks read a sealed snapshot, so a mutation cannot reach them. Since
+  # the identity is now bracketed around the capture, a mutation that lands
+  # inside that window is also detected and refused rather than quietly
+  # producing a run. Both outcomes are correct; what must never happen is a
+  # candidate pass whose checks observed the tampered content.
   contract '[verify]
 lint = "cat marker.txt"
 test = "sleep 2; cat marker.txt"
@@ -164,9 +169,15 @@ timeout_seconds = 20'
   local mutator=$!
   evaluate
   wait "$mutator"
-  [ "$status" -eq 0 ]
   [ "$(cat "$WS/marker.txt")" = TAMPERED ]
-  printf '%s' "$output" | jq -e '.status == "candidate_pass"' >/dev/null
+
+  if [ "$status" -eq 0 ]; then
+    printf '%s' "$output" | jq -e '.status == "candidate_pass"' >/dev/null
+    # The sealed tree the checks read holds the original, not the tampering.
+    [ "$(cat "$(project_dir)/runs/$(cat "$(project_dir)/current-run")/snapshot/src/marker.txt")" = ORIGINAL ]
+  else
+    printf '%s' "$output" | jq -e '.status == "refused"' >/dev/null
+  fi
 }
 
 @test "7 a second evaluation gets a fresh run and the old one is released" {
