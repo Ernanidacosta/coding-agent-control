@@ -659,6 +659,7 @@ cmd_identity() {
   [ -n "$workspace" ] || die "enrollment declares no workspace"
   [ -d "$workspace" ] || die "enrollment workspace is not a directory"
   cd "$workspace" || die "cannot enter the enrollment workspace"
+  authority_export_git_workspace_env "$workspace"
   jq -nc \
     --argjson source "$(authority_pa_verification_receipt_source_manifest_json worktree)" \
     --argjson contract "$(authority_pa_effective_verification_contract_json worktree)" \

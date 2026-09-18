@@ -959,3 +959,30 @@ authority_snapshot_matches_identity() {
   fi
   return 0
 }
+
+# authority_export_git_workspace_env <workspace>
+# The same containment authority_enumerate_paths applies with -c flags, but
+# expressed through the environment so that it reaches the vendored Phase A
+# functions without editing their git invocations.
+#
+# Those invocations must stay byte-identical to the core they were copied from,
+# because the parity tests compare the two implementations' output; rewriting
+# call sites to add flags would make the vendored copy a different program.
+# git reads GIT_CONFIG_COUNT/KEY/VALUE exactly as it reads -c, so the same
+# narrow exception applies with no call site touched.
+#
+# safe.directory names the one canonicalised, approved workspace. It is never
+# '*': the guard exists so that one user does not execute another user's
+# repository configuration, and the only thing being waived is the ownership
+# check for a path the authority already approved.
+authority_export_git_workspace_env() {
+  local workspace="$1"
+  export GIT_CONFIG_NOSYSTEM=1
+  export GIT_ATTR_NOSYSTEM=1
+  export GIT_CONFIG_COUNT=5
+  export GIT_CONFIG_KEY_0=safe.directory   GIT_CONFIG_VALUE_0="$workspace"
+  export GIT_CONFIG_KEY_1=core.fsmonitor   GIT_CONFIG_VALUE_1=false
+  export GIT_CONFIG_KEY_2=core.hooksPath   GIT_CONFIG_VALUE_2=/dev/null
+  export GIT_CONFIG_KEY_3=core.pager       GIT_CONFIG_VALUE_3=cat
+  export GIT_CONFIG_KEY_4=protocol.ext.allow GIT_CONFIG_VALUE_4=never
+}

@@ -56,6 +56,20 @@ required = ["lint", "test"]
 timeout_seconds = 8
 TOML
 
+# A contract that stays inside execution long enough for the harness to mutate
+# the worktree while a check is demonstrably running. The check reads the file
+# under attack, so a snapshot that leaked the live tree would show it.
+cat > "$PAYLOAD/mutate.toml" <<'TOML'
+[verify]
+lint = "cat marker.txt"
+test = "cat marker.txt && sleep 5"
+
+[verify.policy]
+required = ["lint", "test"]
+timeout_seconds = 20
+total_timeout_seconds = 120
+TOML
+
 cat > "$PAYLOAD/slow.toml" <<'TOML'
 [verify]
 lint = "sleep 30"
@@ -88,7 +102,7 @@ useradd -r -M -s /usr/sbin/nologin -d /var/lib/agent-md agentmd
 useradd -r -M -s /usr/sbin/nologin -d /nonexistent agentmd-runner
 
 install -d -o root -g root -m 0755 /usr/local/lib/agent-md
-for f in authority-lib.sh agent-md-authority agent-md-issuer run-check; do
+for f in authority-lib.sh phase-a-source.sh agent-md-authority agent-md-issuer run-check; do
   install -o root -g root -m 0755 "/src/$f" "/usr/local/lib/agent-md/$f"
 done
 install -d -o agentmd -g agentmd -m 0755 /var/lib/agent-md
@@ -162,7 +176,7 @@ evaluate_as() {
     sudo -n -u agentmd "$LIB/agent-md-issuer" evaluate \
     <<<'{"protocol":1,"scope":"worktree","workspace":"/home/dev/repo"}' 2>/tmp/ev.err
 }
-prepare() { sudo -u agentmd "$LIB/agent-md-authority" prepare-run "$PID" --check "$1" >/dev/null 2>&1; }
+prepare() { sudo -u agentmd "$LIB/agent-md-authority" prepare-run "$PID" --check "$1" >/dev/null 2>/tmp/prep.err; }
 run_job() { sudo -u agentmd sudo -n -u agentmd-runner "$LIB/run-check" "$PID" "$1" >/tmp/rc.out 2>/tmp/rc.err; echo $?; }
 
 echo "=== ENROLL + SUDOERS ==="
@@ -175,7 +189,16 @@ echo
 echo "=== FULL CHAIN: dev -> agentmd -> agentmd-runner ==="
 EV=$(evaluate_as dev); EVCODE=$?
 printf '%s\n' "$EV" | jq -c '{status,run_id,checks:[.checks[]|{name,exit_code,execution}],budget}' 2>/dev/null || { echo "ABORT: evaluate produced no object"; cat /tmp/ev.err; exit 1; }
-prepare test || { echo "ABORT: prepare failed"; exit 1; }
+# A refusal here is a setup failure, not a boundary result. Say why: the whole
+# matrix below is meaningless if the chain never ran.
+if [ "$(printf '%s' "$EV" | jq -r .status 2>/dev/null)" = refused ]; then
+  echo "ABORT: the chain refused before any boundary was exercised"
+  printf '%s\n' "$EV" | jq -r '"  reason: " + (.reason // "none") + "\n  code: " + ((.code // "none")|tostring)' 2>/dev/null
+  printf '%s\n' "$EV" | jq . 2>/dev/null | head -40
+  cat /tmp/ev.err
+  exit 1
+fi
+prepare test || { echo "ABORT: prepare failed"; cat /tmp/prep.err; exit 1; }
 SNAP=$(jq -r .snapshot "/var/lib/agent-md/projects/$PID/runs/$(cat /var/lib/agent-md/projects/$PID/current-run)/jobs/test.json")
 
 header "1. outer sudo boundary (developer -> authority)"
@@ -255,8 +278,38 @@ row authority "current run" "kept while in use" "cleanup" "$([ -d "/var/lib/agen
 
 header "7. candidate status through the whole chain"
 row dev evaluation "all required pass" "orchestration" "$(evaluate_as dev | jq -r .status)" candidate_pass
-row dev evaluation "worktree mutated mid-run" "sealed snapshot" "$( { sleep 1; sudo -u dev bash -c 'printf "TAMPERED\n" > ~/repo/marker.txt'; } & evaluate_as dev | jq -r .status )" candidate_pass
+# The mutation must land while a check is executing, which is the only window
+# the sealed snapshot claims to cover. An earlier version slept one second and
+# hoped; once identity computation grew a hop it began landing inside the
+# before/after bracket instead, where a refusal is the correct answer and the
+# row was measuring preparation rather than execution.
+#
+# The trigger is now the runner's own process: nothing is mutated until a check
+# is demonstrably running as agentmd-runner.
+install -o dev -g dev -m 0644 /it/mutate.toml /home/dev/repo/agent-md.toml
+enroll_project >/dev/null
+MUT_OUT=$(mktemp)
+( evaluate_as dev > "$MUT_OUT" ) & MUT_BG=$!
+MUT_SEEN=no
+for _ in $(seq 1 200); do
+  if pgrep -u agentmd-runner -x sleep >/dev/null 2>&1; then MUT_SEEN=yes; break; fi
+  sleep 0.1
+done
+if [ "$MUT_SEEN" = yes ]; then
+  sudo -u dev bash -c 'printf "TAMPERED\n" > ~/repo/marker.txt'
+fi
+wait "$MUT_BG"
+if [ "$MUT_SEEN" = yes ]; then
+  row dev evaluation "worktree mutated mid-run" "sealed snapshot" "$(jq -r .status < "$MUT_OUT")" candidate_pass
+  row dev "check output" "read the pre-mutation bytes" "sealed snapshot" \
+    "$(jq -r '[.checks[]|select(.name=="test")|.exit_code]|first' < "$MUT_OUT")" 0
+else
+  skip dev evaluation "worktree mutated mid-run" "sealed snapshot" "no runner check was observed executing"
+fi
+rm -f "$MUT_OUT"
 sudo -u dev bash -c 'printf "ORIGINAL\n" > ~/repo/marker.txt'
+install -o dev -g dev -m 0644 /it/agent-md.toml /home/dev/repo/agent-md.toml
+enroll_project >/dev/null
 install -o dev -g dev -m 0644 /it/failing.toml /home/dev/repo/agent-md.toml
 enroll_project >/dev/null
 row dev evaluation "required check fails" "orchestration" "$(evaluate_as dev | jq -r .status)" candidate_fail

@@ -11,6 +11,7 @@ as it does today and completion runs the full contract.
 | `agent-md-issuer` | runtime: answers eligibility for a request |
 | `run-check` | executes one approved check inside a sealed run |
 | `authority-lib.sh` | shared implementation all three programs source |
+| `phase-a-source.sh` | vendored Phase A identity functions, used unmodified |
 
 Executing checks, signing, sequence allocation and receipt persistence are
 later slices and are deliberately absent. Nothing here can produce a PASS.
@@ -54,10 +55,10 @@ Enrollment records are world-readable on purpose: a later slice validates
 receipts with the enrolled public key without needing any privileged call. That
 is also why an enrollment record must never contain secret material.
 
-No sudoers rule is installed yet. C1 has no runtime privilege boundary to
-cross — `enroll` is run by an administrator and `show` is read-only. The
-`dev -> agentmd` and `agentmd -> dev` rules arrive with the issuer in C3, where
-they can be reviewed against the code that actually uses them.
+The sudoers rules a project needs are generated per enrollment by
+`agent-md-authority sudoers PROJECT_ID`, and are reviewed against the code that
+uses them under [Sudo rule](#sudo-rule). Installing the programs installs no
+rule by itself.
 
 ## Enrolling a project
 
