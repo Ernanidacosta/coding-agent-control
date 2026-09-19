@@ -68,41 +68,6 @@ world_writable() {
   digit_has_write "${mode: -1}"
 }
 
-owner_of() { stat -c %u "$1" 2>/dev/null || stat -f %u "$1" 2>/dev/null; }
-group_of() { stat -c %g "$1" 2>/dev/null || stat -f %g "$1" 2>/dev/null; }
-
-digit_has_write() { case "$1" in 2|3|6|7) return 0 ;; esac; return 1; }
-
-world_writable() {
-  local mode
-  mode=$(mode_of "$1") || return 1
-  digit_has_write "${mode: -1}"
-}
-
-group_of() { stat -c %g "$1" 2>/dev/null || stat -f %g "$1" 2>/dev/null; }
-
-digit_has_write() { case "$1" in 2|3|6|7) return 0 ;; esac; return 1; }
-
-world_writable() {
-  local mode
-  mode=$(mode_of "$1") || return 1
-  digit_has_write "${mode: -1}"
-}
-
-digit_has_write() { case "$1" in 2|3|6|7) return 0 ;; esac; return 1; }
-
-world_writable() {
-  local mode
-  mode=$(mode_of "$1") || return 1
-  digit_has_write "${mode: -1}"
-}
-
-world_writable() {
-  local mode
-  mode=$(mode_of "$1") || return 1
-  digit_has_write "${mode: -1}"
-}
-
 assert_safe_dir() {
   local dir="$1"
   [ -e "$dir" ] || return 0
@@ -169,71 +134,6 @@ gids_of_user() { id -G "$1" 2>/dev/null; }
 # one that exits 0, collect an authenticated PASS and put the real tool back.
 # The source fingerprint would not notice, because the directory is outside the
 # repository. For the first provider this is disqualifying, not advisory.
-
-dir_writable_by_user() {
-  local dir="$1" uid="$2" gids="$3" owner group mode ugo gid
-  owner=$(owner_of "$dir") || return 2
-  group=$(group_of "$dir") || return 2
-  mode=$(mode_of "$dir") || return 2
-  ugo=${mode: -3}
-  if digit_has_write "${ugo:2:1}"; then return 0; fi
-  if [ "$owner" = "$uid" ] && digit_has_write "${ugo:0:1}"; then return 0; fi
-  if digit_has_write "${ugo:1:1}"; then
-    for gid in $gids; do
-      [ "$gid" = "$group" ] && return 0
-    done
-  fi
-  return 1
-}
-
-home_of_user() { passwd_field "$1" 6; }
-gids_of_user() { id -G "$1" 2>/dev/null; }
-
-# --- PATH eligibility --------------------------------------------------------
-# A PATH entry the execution user can write is a way to replace a real tool with
-# one that exits 0, collect an authenticated PASS and put the real tool back.
-# The source fingerprint would not notice, because the directory is outside the
-# repository. For the first provider this is disqualifying, not advisory.
-
-dir_writable_by_user() {
-  local dir="$1" uid="$2" gids="$3" owner group mode ugo gid
-  owner=$(owner_of "$dir") || return 2
-  group=$(group_of "$dir") || return 2
-  mode=$(mode_of "$dir") || return 2
-  ugo=${mode: -3}
-  if digit_has_write "${ugo:2:1}"; then return 0; fi
-  if [ "$owner" = "$uid" ] && digit_has_write "${ugo:0:1}"; then return 0; fi
-  if digit_has_write "${ugo:1:1}"; then
-    for gid in $gids; do
-      [ "$gid" = "$group" ] && return 0
-    done
-  fi
-  return 1
-}
-
-gids_of_user() { id -G "$1" 2>/dev/null; }
-
-# --- PATH eligibility --------------------------------------------------------
-# A PATH entry the execution user can write is a way to replace a real tool with
-# one that exits 0, collect an authenticated PASS and put the real tool back.
-# The source fingerprint would not notice, because the directory is outside the
-# repository. For the first provider this is disqualifying, not advisory.
-
-dir_writable_by_user() {
-  local dir="$1" uid="$2" gids="$3" owner group mode ugo gid
-  owner=$(owner_of "$dir") || return 2
-  group=$(group_of "$dir") || return 2
-  mode=$(mode_of "$dir") || return 2
-  ugo=${mode: -3}
-  if digit_has_write "${ugo:2:1}"; then return 0; fi
-  if [ "$owner" = "$uid" ] && digit_has_write "${ugo:0:1}"; then return 0; fi
-  if digit_has_write "${ugo:1:1}"; then
-    for gid in $gids; do
-      [ "$gid" = "$group" ] && return 0
-    done
-  fi
-  return 1
-}
 
 dir_writable_by_user() {
   local dir="$1" uid="$2" gids="$3" owner group mode ugo gid
