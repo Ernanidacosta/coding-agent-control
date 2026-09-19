@@ -152,32 +152,57 @@ timeout_seconds = 20'
 }
 
 @test "6 mutating the worktree during an evaluation never changes what checks see" {
-  # The checks read a sealed snapshot, so a mutation cannot reach them. Since
-  # the identity is now bracketed around the capture, a mutation that lands
-  # inside that window is also detected and refused rather than quietly
-  # producing a run. Both outcomes are correct; what must never happen is a
-  # candidate pass whose checks observed the tampered content.
-  contract '[verify]
-lint = "cat marker.txt"
-test = "sleep 2; cat marker.txt"
+  # The checks read a sealed snapshot, so a mutation cannot reach them.
+  #
+  # This used to sleep one second and hope the mutation landed after the
+  # capture. On a loaded machine the capture starts later than that, the
+  # snapshot then legitimately contains the mutation, and the case proved
+  # nothing while failing intermittently. The mutation is now ordered against
+  # the check's own execution instead of against the clock: nothing is touched
+  # until a check has signalled that it is running, which can only happen once
+  # the snapshot is sealed.
+  local running="$ROOT/running" hold="$ROOT/hold"
+  rm -f "$running"; : > "$hold"
+  contract "[verify]
+test = \"touch $running; while [ -e $hold ]; do sleep 0.2; done; cat marker.txt\"
 
 [verify.policy]
-required = ["lint", "test"]
-timeout_seconds = 20'
+required = [\"test\"]
+timeout_seconds = 60
+total_timeout_seconds = 180"
   enroll
-  ( sleep 1; printf 'TAMPERED\n' > "$WS/marker.txt" ) &
-  local mutator=$!
-  evaluate
-  wait "$mutator"
+
+  local out; out=$(mktemp)
+  ( printf '{"protocol":1,"scope":"worktree","workspace":"%s"}' "$WS" \
+      | bash "$ISSUER" evaluate --root "$ROOT" > "$out" 2>/dev/null ) &
+  local evaluation=$!
+
+  local i started=no
+  for i in $(seq 1 600); do
+    if [ -e "$running" ]; then started=yes; break; fi
+    sleep 0.1
+  done
+  [ "$started" = yes ]
+
+  # The snapshot is sealed and a check is executing. Now tamper.
+  printf 'TAMPERED\n' > "$WS/marker.txt"
+  rm -f "$hold"
+  # identity_changed exits non-zero, which is the expected outcome here.
+  wait "$evaluation" || true
+  local response; response=$(cat "$out"); rm -f "$out"
+
   [ "$(cat "$WS/marker.txt")" = TAMPERED ]
 
-  if [ "$status" -eq 0 ]; then
-    printf '%s' "$output" | jq -e '.status == "candidate_pass"' >/dev/null
-    # The sealed tree the checks read holds the original, not the tampering.
-    [ "$(cat "$(project_dir)/runs/$(cat "$(project_dir)/current-run")/snapshot/src/marker.txt")" = ORIGINAL ]
-  else
-    printf '%s' "$output" | jq -e '.status == "refused"' >/dev/null
-  fi
+  # The sealed tree the checks read holds the original, not the tampering.
+  [ "$(cat "$(project_dir)/runs/$(cat "$(project_dir)/current-run")/snapshot/src/marker.txt")" = ORIGINAL ]
+  # And the check really did read it: cat succeeded against the sealed copy.
+  [ "$(printf '%s' "$response" | jq -r '.checks[] | select(.name == "test") | .exit_code')" = 0 ]
+
+  # The workspace no longer matches what was captured, so the authority
+  # supersedes the attempt and publishes nothing. What must never happen is a
+  # pass whose checks observed the tampered content, and that is excluded by
+  # the snapshot assertion above.
+  [ "$(printf '%s' "$response" | jq -r .status)" = identity_changed ]
 }
 
 @test "7 a second evaluation gets a fresh run and the old one is released" {

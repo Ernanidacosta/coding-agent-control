@@ -1246,7 +1246,7 @@ shellcheck .claude/hooks/*.sh .codex/hooks/*.sh .agent-md/bin/*.sh examples/gith
 `tests/run.sh` is the required test runner. It runs the Bats suite in parallel
 and refuses to report success unless every collected test reported a result,
 because `bats --jobs` exits 0 after executing nothing when GNU parallel is
-missing. It defaults to four jobs; raise it per machine:
+missing. It defaults to six jobs; set it per machine:
 
 ```bash
 BATS_JOBS=8 bash tests/run.sh

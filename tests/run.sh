@@ -12,7 +12,18 @@ set -u
 ROOT=$(cd "$(dirname "$0")/.." && pwd) || exit 1
 cd "$ROOT" || exit 1
 
-JOBS=${BATS_JOBS:-4}
+# Six, not four. The suite outgrew the required-check budget at four jobs once
+# the authority's crash and receipt coverage landed: a full run measured 360s at
+# four against a 360-second limit, and 322-333s at six across three repeated
+# runs on an idle twelve-core machine. The budget itself is unchanged.
+#
+# That margin is real but not generous, and it is machine-dependent: the figures
+# above are one host. A slower or busier machine should set BATS_JOBS explicitly
+# rather than assume this default fits.
+#
+# This is a default, not a policy. Any value still wins over it, and BATS_JOBS=1
+# remains the serial path that needs no GNU parallel.
+JOBS=${BATS_JOBS:-6}
 case "$JOBS" in
   ''|*[!0-9]*|0)
     printf 'BATS_JOBS must be a positive integer; got %s\n' "$JOBS" >&2
