@@ -315,17 +315,25 @@ required = ["test"]
 timeout_seconds = 20'
   enroll
   evaluate
+  # A sequence is reserved from C4b onwards, so the response carries one. It is
+  # an allocation, not a verdict and not a receipt number: what must stay absent
+  # is anything that would claim the result was authenticated.
   printf '%s' "$output" | jq -e '
     (.status | test("authentic|attested|verified|signed|receipt") | not) and
-    (has("signature") | not) and (has("sequence") | not) and (has("receipt") | not)
+    (has("signature") | not) and (has("receipt") | not) and
+    (has("key_id") | not) and (.sequence | type) == "number"
   ' >/dev/null
+  [[ "$(printf '%s' "$output" | jq -r .reason)" == *"not evidence"* ]]
 }
 
-@test "15 no component reads a key, allocates a sequence or writes a receipt" {
+@test "15 no component reads a key, signs, or writes a receipt" {
+  # Sequence allocation exists from C4b and is covered by the state machine
+  # suite. Key use, signing and receipt persistence are still absent, and that
+  # is what this pins.
   local f
   for f in "$ISSUER" "$RUNCHECK" "$AUTHORITY"; do
-    ! grep -qE 'issuer\.key|openssl[[:space:]]+(pkeyutl|dgst[[:space:]]+-sign)' "$f"
-    ! grep -qE 'last_terminal|allocate_sequence|\.agent/verification' "$f"
+    ! grep -qE 'issuer-.*\.key|openssl[[:space:]]+(pkeyutl|dgst[[:space:]]+-sign)' "$f"
+    ! grep -qE '\.agent/verification|publish_receipt|sign_payload' "$f"
   done
-  [ ! -e "$ROOT/var/lib/agent-md/keys/issuer.key" ]
+  [ -z "$(ls -A "$ROOT/var/lib/agent-md/keys")" ]
 }

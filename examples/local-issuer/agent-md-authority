@@ -35,11 +35,13 @@ Usage:
                              [--exec-path VALUE] [--env NAME=VALUE]...
                              [--yes] [--dry-run]
   agent-md-authority show    (PROJECT_ID | --workspace PATH) [--root PREFIX]
-  agent-md-authority prepare-run PROJECT_ID [--check NAME] [--root PREFIX]
+  agent-md-authority prepare-run PROJECT_ID [--check NAME] [--run-id ID]
+                                 [--root PREFIX]
   agent-md-authority prepare-job PROJECT_ID --check NAME [--root PREFIX]
   agent-md-authority sudoers PROJECT_ID [--root PREFIX] [--write]
   agent-md-authority enumerate PROJECT_ID
   agent-md-authority identity PROJECT_ID
+  agent-md-authority identity-fingerprints PROJECT_ID [--root PREFIX]
 
 Options:
   --root PREFIX   Operate under an alternate filesystem root. Intended for
@@ -55,17 +57,7 @@ and generates nothing.
 USAGE
 }
 
-new_uuid() {
-  if [ -r /proc/sys/kernel/random/uuid ]; then
-    cat /proc/sys/kernel/random/uuid
-  elif command -v uuidgen >/dev/null 2>&1; then
-    uuidgen | tr '[:upper:]' '[:lower:]'
-  elif command -v openssl >/dev/null 2>&1; then
-    openssl rand -hex 16
-  else
-    die "no source of unique identifiers is available"
-  fi
-}
+new_uuid() { authority_new_id || die "no source of unique identifiers is available"; }
 
 AUTHORITY_INSTALLED_FILES="authority-lib.sh phase-a-source.sh agent-md-authority agent-md-issuer run-check"
 
@@ -268,9 +260,13 @@ cmd_enroll() {
   mkdir -p "$dir" || die "cannot create $dir"
   chmod 0755 "$dir"
   printf '%s\n' "$record" | atomic_write "$dir/enrollment.json" 0644
-  jq -nc --argjson schema "$AUTHORITY_SCHEMA" \
-    '{schema: $schema, last_terminal: null, pending: null}' \
-    | atomic_write "$dir/state.json" 0644
+  # A fresh project starts with empty sequence lines, never with a pending and
+  # never with a terminal result. Re-enrolling an existing project keeps its
+  # state: the sequence must not restart, or a stale receipt from before the
+  # re-enrollment could match a number issued after it.
+  if [ ! -e "$dir/state.json" ]; then
+    authority_state_new_json | atomic_write "$dir/state.json" 0644
+  fi
   note ""
   note "enrolled $canonical as $project_id ($status)"
 }
@@ -320,11 +316,12 @@ present_enrollment() {
 # Preparation is serialized per project. Two evaluations of the same project do
 # not interleave: the second waits briefly and is refused rather than racing.
 cmd_prepare_run() {
-  local project_id="" only_check=""
+  local project_id="" only_check="" want_run_id=""
   while [ $# -gt 0 ]; do
     case "$1" in
       --root) ROOT=${2%/}; shift 2 ;;
       --check) only_check="$2"; shift 2 ;;
+      --run-id) want_run_id="$2"; shift 2 ;;
       -h|--help) usage; return 0 ;;
       -*) die "unknown prepare-run option: $1" ;;
       *) project_id="$1"; shift ;;
@@ -374,10 +371,20 @@ cmd_prepare_run() {
     die "the approved contract carries no ordinary check"
   fi
 
+  # The issuer names the run before asking for it, because it has to reserve a
+  # sequence against that name and make the reservation durable before any of
+  # this work starts. The name is still validated here and must not collide with
+  # an existing run: naming a run is not permission to reopen one.
   local run_id run_dir
-  run_id=$(new_uuid)
-  authority_run_id_is_safe "$run_id" || die "generated run id is malformed"
+  if [ -n "$want_run_id" ]; then
+    authority_run_id_is_safe "$want_run_id" || die "the supplied run id is malformed"
+    run_id="$want_run_id"
+  else
+    run_id=$(new_uuid)
+    authority_run_id_is_safe "$run_id" || die "generated run id is malformed"
+  fi
   run_dir=$(authority_run_dir "$project_id" "$run_id")
+  [ -e "$run_dir" ] && die "run $run_id already exists"
   mkdir -p "$run_dir/jobs" || die "cannot create the run directory"
 
   local workspace identity recheck reason manifest fingerprint source_fingerprint
@@ -440,22 +447,14 @@ cmd_prepare_run() {
   # The four fingerprints the core already understands. This is the input a
   # later signing step will consume; it is not a receipt and carries no
   # authority of its own.
-  local fp_source fp_contract fp_control fp_mechanism
-  fp_source=$(jq -cS '.source' "$identity" | sha256_hex)
-  fp_contract=$(jq -cS '.contract' "$identity" | sha256_hex)
-  fp_control=$(jq -cS '.control' "$identity" | sha256_hex)
-  fp_mechanism=$(jq -cS '.mechanism' "$identity" | sha256_hex)
-  source_fingerprint="$fp_source"
+  local fingerprints
+  fingerprints=$(authority_identity_fingerprints "$identity")
+  source_fingerprint=$(jq -r '.source.value' <<<"$fingerprints")
   jq -nc --argjson schema "$AUTHORITY_SCHEMA" \
     --argjson manifests "$(cat "$identity")" \
-    --arg s "$fp_source" --arg c "$fp_contract" --arg k "$fp_control" --arg m "$fp_mechanism" '
+    --argjson fingerprints "$fingerprints" '
       {schema: $schema,
-       fingerprints: {
-         source:    {algorithm: "sha256", value: $s},
-         contract:  {algorithm: "sha256", value: $c},
-         control:   {algorithm: "sha256", value: $k},
-         mechanism: {algorithm: "sha256", value: $m}
-       },
+       fingerprints: $fingerprints,
        manifests: $manifests}' | atomic_write "$run_dir/identity.json" 0444
   rm -f "$identity"
 
@@ -515,10 +514,10 @@ cmd_prepare_run() {
   printf 'run %s\n' "$run_id"
   note "execution account: $(printf '%s' "$runner" | jq -r '.user') (uid $(printf '%s' "$runner" | jq -r '.uid'))"
   note "snapshot sealed at $run_dir/snapshot/src ($(printf '%s' "$manifest" | jq 'length') entries)"
-  note "bound identities: source $fp_source"
-  note "                   contract $fp_contract"
-  note "                   control $fp_control"
-  note "                   mechanism $fp_mechanism"
+  note "bound identities: source $(jq -r '.source.value' <<<"$fingerprints")"
+  note "                   contract $(jq -r '.contract.value' <<<"$fingerprints")"
+  note "                   control $(jq -r '.control.value' <<<"$fingerprints")"
+  note "                   mechanism $(jq -r '.mechanism.value' <<<"$fingerprints")"
   note "jobs: ${ordered[*]}"
   note "per-check timeout ${timeout}s, total ${total}s"
 }
@@ -674,6 +673,42 @@ cmd_identity() {
     --argjson control "$(authority_pa_effective_control_requirements_json worktree)" \
     --argjson mechanism "$(authority_pa_verification_receipt_mechanism_manifest_json worktree)" \
     '{source: $source, contract: $contract, control: $control, mechanism: $mechanism}'
+}
+
+# The four fingerprints of the workspace as it is right now, through the same
+# path prepare-run uses, including the descending hop in production. The issuer
+# calls this to revalidate before concluding, so that the bound identity and the
+# revalidated one are produced by one implementation rather than two.
+cmd_identity_fingerprints() {
+  local project_id="" file workspace identity
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --root) ROOT=${2%/}; shift 2 ;;
+      -h|--help) usage; return 0 ;;
+      -*) die "unknown identity-fingerprints option: $1" ;;
+      *) project_id="$1"; shift ;;
+    esac
+  done
+  [ -n "$project_id" ] || die "identity-fingerprints requires a project id"
+  case "$project_id" in */*|..|.|*[!a-zA-Z0-9-]*) die "invalid project id" ;; esac
+  file="$(projects_dir)/$project_id/enrollment.json"
+  [ -f "$file" ] || die "no enrollment for $project_id"
+  path_has_symlink "$file" && die "enrollment path traverses a symlink"
+  workspace=$(jq -r '.workspace // empty' "$file")
+  [ -n "$workspace" ] || die "enrollment declares no workspace"
+
+  identity=$(mktemp "${TMPDIR:-/tmp}/agent-md-revalidate.XXXXXX") || die "cannot create a temporary file"
+  if ! authority_identity_for "$workspace" "$project_id" > "$identity" 2>/dev/null; then
+    rm -f "$identity"; die "could not compute the workspace identities"
+  fi
+  local part
+  for part in source contract control mechanism; do
+    if ! jq -e --arg p "$part" '.[$p].valid == true' "$identity" >/dev/null 2>&1; then
+      rm -f "$identity"; die "the workspace $part identity is not usable"
+    fi
+  done
+  authority_identity_fingerprints "$identity"
+  rm -f "$identity"
 }
 
 cmd_show() {
@@ -856,6 +891,7 @@ case "$subcommand" in
   show) cmd_show "$@" ;;
   enumerate) cmd_enumerate "$@" ;;
   identity) cmd_identity "$@" ;;
+  identity-fingerprints) cmd_identity_fingerprints "$@" ;;
   prepare-run) cmd_prepare_run "$@" ;;
   prepare-job) cmd_prepare_job "$@" ;;
   sudoers) cmd_sudoers "$@" ;;

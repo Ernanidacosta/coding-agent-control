@@ -357,10 +357,21 @@ mode_of_path() { stat -c %a "$1"; }
   [ "$status" -ne 0 ]
 }
 
-@test "38 signing, sequence and receipts are still absent as capability" {
+@test "38 signing and receipts are still absent as capability" {
   # The issuer's comments say it does none of this. The comments are not the
   # evidence; the executable lines are.
-  run bash -c "grep -hvE '^[[:space:]]*#' '$ISSUER' '$RUNCHECK' \
-    | grep -nE 'last_terminal|sequence|receipt|signature'"
+  #
+  # Sequence allocation arrived with the C4b state machine, so the issuer does
+  # mention it. Signing and receipt persistence did not.
+  run bash -c "grep -hvE '^[[:space:]]*#' '$ISSUER' | grep -nE 'receipt|signature|key_id'"
+  [ "$status" -ne 0 ]
+}
+
+@test "38b run-check carries no state, sequence or signing capability at all" {
+  # The execution boundary stays as narrow as it was: it runs one approved
+  # command and reports the exit status. It has no business reading or writing
+  # the sequence line.
+  run bash -c "grep -hvE '^[[:space:]]*#' '$RUNCHECK' \
+    | grep -nE 'last_terminal|next_sequence|pending|state\.json|receipt|signature'"
   [ "$status" -ne 0 ]
 }

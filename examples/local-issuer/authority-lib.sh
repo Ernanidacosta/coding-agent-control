@@ -1051,3 +1051,345 @@ authority_publish_key() {
   authority_fsync_path "$keys" || { printf 'cannot flush the key directory'; return 1; }
   return 0
 }
+
+# --- Evaluation state machine ------------------------------------------------
+#
+# What this exists to make true:
+#
+#   PASS n, then FAIL n+1  =>  PASS n is stale
+#
+# and to keep that true across a crash at any point. The ordering comes from a
+# sequence the authority allocates, never from a timestamp, an mtime, a file
+# name or a lexical sort: every one of those is either attacker-influenced or
+# unordered under concurrency, and none of them survives a clock change.
+#
+# The sequence line is keyed by (project_id, scope). worktree and staged are
+# independent lines: a staged evaluation must not renumber, supersede or be
+# superseded by a worktree one, because they describe different trees.
+#
+# The central rule is that a reservation happens BEFORE the checks run. If a
+# sequence were taken only once a result existed, a crash between "the checks
+# failed" and "record that they failed" would leave the previous PASS looking
+# current, which is exactly the outcome this machine has to prevent. So:
+#
+#   pending != null  =>  last_terminal is SUPPRESSED for latest purposes
+#
+# A pending is never read as a pass. It means "an attempt was started whose
+# outcome the authority could not close", and until a later evaluation resolves
+# it, nothing earlier may be treated as current.
+#
+# Sequences are monotonic, not contiguous. A reserved sequence is consumed the
+# moment it is allocated; if that evaluation never reaches a terminal result the
+# number is simply burned. Gaps are normal and carry no meaning.
+#
+# Nothing here signs, reads a key or writes a receipt. candidate_pass in this
+# file is an authority-side terminal result, not evidence and not a receipt.
+
+AUTHORITY_STATE_SCHEMA=2
+AUTHORITY_STATE_LEGACY_SCHEMA=7
+AUTHORITY_SCOPES="worktree staged"
+AUTHORITY_TERMINAL_STATUSES="candidate_pass candidate_fail identity_changed"
+
+# A fresh identifier for a run. Lives here because the issuer now names the run
+# before it asks for one: the sequence is reserved against that name, and the
+# reservation has to be durable before the snapshot is captured.
+authority_new_id() {
+  if [ -r /proc/sys/kernel/random/uuid ]; then
+    cat /proc/sys/kernel/random/uuid
+  elif command -v uuidgen >/dev/null 2>&1; then
+    uuidgen | tr '[:upper:]' '[:lower:]'
+  elif command -v openssl >/dev/null 2>&1; then
+    openssl rand -hex 16
+  else
+    return 1
+  fi
+}
+
+authority_state_file()      { printf '%s/%s/state.json' "$(projects_dir)" "$1"; }
+authority_evaluation_lock() { printf '%s/%s/.evaluation.lock' "$(projects_dir)" "$1"; }
+
+authority_scope_is_known() {
+  local s
+  for s in $AUTHORITY_SCOPES; do [ "$s" = "$1" ] && return 0; done
+  return 1
+}
+
+authority_state_new_json() {
+  jq -nc --argjson schema "$AUTHORITY_STATE_SCHEMA" --arg scopes "$AUTHORITY_SCOPES" '
+    {schema: $schema,
+     scopes: ($scopes | split(" ")
+              | map({key: ., value: {next_sequence: 1, pending: null, last_terminal: null}})
+              | from_entries)}'
+}
+
+# authority_state_validate <json>
+# Every invariant the machine depends on, checked before the state is allowed to
+# influence anything. A reason is printed on failure; there is no repair path.
+authority_state_validate() {
+  local json="$1" scope entry
+  jq -e . >/dev/null 2>&1 <<<"$json" || { printf 'state is not valid JSON'; return 1; }
+  [ "$(jq -r '.schema // empty' <<<"$json")" = "$AUTHORITY_STATE_SCHEMA" ] \
+    || { printf 'state schema is not %s' "$AUTHORITY_STATE_SCHEMA"; return 1; }
+  [ "$(jq -r '.scopes | type' <<<"$json")" = object ] \
+    || { printf 'state carries no scope map'; return 1; }
+  local have want
+  have=$(jq -r '.scopes | keys_unsorted | sort | join(" ")' <<<"$json")
+  want=$(printf '%s' "$AUTHORITY_SCOPES" | tr ' ' '\n' | sort | tr '\n' ' '); want=${want% }
+  [ "$have" = "$want" ] || { printf 'state scopes are %s, expected %s' "$have" "$want"; return 1; }
+
+  for scope in $AUTHORITY_SCOPES; do
+    entry=$(jq -c --arg s "$scope" '.scopes[$s]' <<<"$json")
+    if ! jq -e '(.next_sequence | type) == "number"
+                and (.next_sequence | floor) == .next_sequence
+                and .next_sequence >= 1' >/dev/null 2>&1 <<<"$entry"; then
+      printf '%s: next_sequence is not a positive integer' "$scope"; return 1
+    fi
+    if [ "$(jq -r '.pending | type' <<<"$entry")" != "null" ]; then
+      if ! jq -e '(.pending | type) == "object"
+                  and (.pending.sequence | type) == "number"
+                  and (.pending.sequence | floor) == .pending.sequence
+                  and .pending.sequence >= 1
+                  and (.pending.run_id | type) == "string"
+                  and (.pending.scope | type) == "string"
+                  and .pending.sequence < .next_sequence' >/dev/null 2>&1 <<<"$entry"; then
+        printf '%s: pending is malformed or not below next_sequence' "$scope"; return 1
+      fi
+      [ "$(jq -r '.pending.scope' <<<"$entry")" = "$scope" ] \
+        || { printf '%s: pending records a different scope' "$scope"; return 1; }
+    fi
+    if [ "$(jq -r '.last_terminal | type' <<<"$entry")" != "null" ]; then
+      if ! jq -e '(.last_terminal | type) == "object"
+                  and (.last_terminal.sequence | type) == "number"
+                  and (.last_terminal.sequence | floor) == .last_terminal.sequence
+                  and .last_terminal.sequence >= 1
+                  and (.last_terminal.run_id | type) == "string"
+                  and (.last_terminal.scope | type) == "string"
+                  and (.last_terminal.status | type) == "string"
+                  and (.last_terminal.fingerprints | type) == "object"
+                  and .last_terminal.sequence < .next_sequence' >/dev/null 2>&1 <<<"$entry"; then
+        printf '%s: last_terminal is malformed or not below next_sequence' "$scope"; return 1
+      fi
+      local status; status=$(jq -r '.last_terminal.status' <<<"$entry")
+      case " $AUTHORITY_TERMINAL_STATUSES " in
+        *" $status "*) ;;
+        *) printf '%s: last_terminal carries an unknown status %s' "$scope" "$status"; return 1 ;;
+      esac
+      [ "$(jq -r '.last_terminal.scope' <<<"$entry")" = "$scope" ] \
+        || { printf '%s: last_terminal records a different scope' "$scope"; return 1; }
+    fi
+  done
+  return 0
+}
+
+# authority_state_migrate <json>
+# The only recognised earlier state is the one enrollment wrote and nothing ever
+# updated: schema 7 with both fields null. That is migrated deterministically to
+# fresh sequence lines. Any other shape is refused rather than guessed at: a
+# schema 7 file carrying a non-null pending or last_terminal was never produced
+# by any released code, so it is evidence of tampering or corruption, not of an
+# older version.
+authority_state_migrate() {
+  local json="$1"
+  if [ "$(jq -r '.schema // empty' <<<"$json")" = "$AUTHORITY_STATE_LEGACY_SCHEMA" ] \
+     && [ "$(jq -r 'has("scopes")' <<<"$json")" = false ] \
+     && [ "$(jq -r '.pending | type' <<<"$json")" = null ] \
+     && [ "$(jq -r '.last_terminal | type' <<<"$json")" = null ]; then
+    authority_state_new_json
+    return 0
+  fi
+  return 1
+}
+
+# authority_state_read <project-id>
+# Prints the validated state, migrating a recognised earlier schema on the way.
+# A missing, unreadable, corrupt or unrecognised state fails closed: it is never
+# treated as an empty state, and it is never reconstructed from receipts, run
+# directories or file names, because none of those can prove what was already
+# consumed.
+authority_state_read() {
+  local project_id="$1" file json reason
+  file=$(authority_state_file "$project_id")
+  [ -e "$file" ] || { printf 'the authority holds no state for this project'; return 1; }
+  [ -L "$file" ] && { printf 'the state file is a symlink'; return 1; }
+  path_has_symlink "$file" && { printf 'the state path traverses a symlink'; return 1; }
+  [ -f "$file" ] || { printf 'the state path is not a regular file'; return 1; }
+  json=$(cat "$file" 2>/dev/null) || { printf 'the state file cannot be read'; return 1; }
+  jq -e . >/dev/null 2>&1 <<<"$json" || { printf 'the state file is not valid JSON'; return 1; }
+
+  if ! reason=$(authority_state_validate "$json"); then
+    local migrated
+    if migrated=$(authority_state_migrate "$json"); then
+      printf '%s' "$migrated"; return 0
+    fi
+    printf '%s' "$reason"; return 1
+  fi
+  printf '%s' "$json"
+}
+
+# authority_state_write <project-id> <json>
+# One rename, never a partial file. The content is flushed before it is named,
+# and the directory entry is flushed before the call returns, so a reader after
+# a crash sees either the previous state or this one and never a truncated JSON
+# document.
+authority_state_write() {
+  local project_id="$1" json="$2" file dir tmp reason
+  if ! reason=$(authority_state_validate "$json"); then
+    printf 'refusing to persist an invalid state: %s' "$reason"; return 1
+  fi
+  file=$(authority_state_file "$project_id")
+  dir=$(dirname "$file")
+
+  # The project directory is sealed read-only between runs so that nothing can
+  # introduce a file next to the pointer a check resolves through. The authority
+  # owns it, so it unseals to write and seals again; the original mode is
+  # restored on every path out, including failure.
+  local dirmode; dirmode=$(mode_of "$dir")
+  chmod u+w "$dir" 2>/dev/null || true
+  _authority_state_reseal() { [ -n "$dirmode" ] && chmod "$dirmode" "$dir" 2>/dev/null || true; }
+
+  tmp=$(mktemp "$dir/.agent-md-state.XXXXXX") || {
+    _authority_state_reseal; printf 'cannot create a temporary state file'; return 1; }
+  printf '%s\n' "$json" > "$tmp" || {
+    rm -f "$tmp"; _authority_state_reseal; printf 'cannot write the state file'; return 1; }
+  chmod 0644 "$tmp" || {
+    rm -f "$tmp"; _authority_state_reseal; printf 'cannot set the state file mode'; return 1; }
+  authority_fsync_path "$tmp" || {
+    rm -f "$tmp"; _authority_state_reseal; printf 'cannot flush the state file'; return 1; }
+  mv -f "$tmp" "$file" || {
+    rm -f "$tmp"; _authority_state_reseal; printf 'cannot replace the state file'; return 1; }
+  authority_fsync_path "$dir" || {
+    _authority_state_reseal; printf 'cannot flush the state directory'; return 1; }
+  _authority_state_reseal
+  return 0
+}
+
+# authority_state_reserve <project-id> <scope> <run-id>
+# Allocates the next sequence and makes it durable BEFORE any check runs.
+# Prints "<sequence> <recovered>" where recovered is true when this call also
+# took over an abandoned pending.
+#
+# Recovery is the same single write as an ordinary reservation, deliberately.
+# Clearing an abandoned pending first and reserving afterwards would open a
+# window in which pending is null and the old last_terminal reads as current
+# again -- a crash in that window resurrects a stale PASS. Replacing the pending
+# in one atomic transition means the previous terminal is suppressed from before
+# the recovery starts until after it ends.
+#
+# The abandoned sequence stays consumed. It is never reused, and next_sequence
+# never moves backwards.
+authority_state_reserve() {
+  local project_id="$1" scope="$2" run_id="$3" json seq recovered next updated reason
+  authority_scope_is_known "$scope" || { printf 'unknown scope %s' "$scope"; return 1; }
+  json=$(authority_state_read "$project_id") || { printf '%s' "$json"; return 1; }
+
+  recovered=false
+  [ "$(jq -r --arg s "$scope" '.scopes[$s].pending | type' <<<"$json")" = null ] || recovered=true
+  seq=$(jq -r --arg s "$scope" '.scopes[$s].next_sequence' <<<"$json")
+  next=$(( seq + 1 ))
+
+  updated=$(jq -c --arg s "$scope" --argjson seq "$seq" --argjson next "$next" \
+    --arg run "$run_id" '
+      .scopes[$s].next_sequence = $next
+      | .scopes[$s].pending = {sequence: $seq, run_id: $run, scope: $s}' <<<"$json") \
+    || { printf 'cannot compute the reservation'; return 1; }
+
+  if ! reason=$(authority_state_write "$project_id" "$updated"); then
+    printf '%s' "$reason"; return 1
+  fi
+  printf '%s %s' "$seq" "$recovered"
+}
+
+# authority_state_commit_terminal <project-id> <scope> <status> <run-id> <fingerprints-json>
+# The reserved sequence becomes the published terminal result and the pending is
+# cleared, in one write. next_sequence is untouched: it already moved when the
+# sequence was reserved.
+authority_state_commit_terminal() {
+  local project_id="$1" scope="$2" status="$3" run_id="$4" fingerprints="$5"
+  local json seq updated reason
+  authority_scope_is_known "$scope" || { printf 'unknown scope %s' "$scope"; return 1; }
+  case " $AUTHORITY_TERMINAL_STATUSES " in
+    *" $status "*) ;;
+    *) printf 'refusing to commit unknown terminal status %s' "$status"; return 1 ;;
+  esac
+  json=$(authority_state_read "$project_id") || { printf '%s' "$json"; return 1; }
+
+  seq=$(jq -r --arg s "$scope" '.scopes[$s].pending.sequence // empty' <<<"$json")
+  [ -n "$seq" ] || { printf 'there is no reserved sequence to conclude'; return 1; }
+  [ "$(jq -r --arg s "$scope" '.scopes[$s].pending.run_id' <<<"$json")" = "$run_id" ] \
+    || { printf 'the reserved sequence belongs to a different run'; return 1; }
+
+  updated=$(jq -c --arg s "$scope" --argjson seq "$seq" --arg run "$run_id" \
+    --arg status "$status" --argjson fp "$fingerprints" '
+      .scopes[$s].last_terminal = {sequence: $seq, run_id: $run, scope: $s,
+                                   status: $status, fingerprints: $fp}
+      | .scopes[$s].pending = null' <<<"$json") \
+    || { printf 'cannot compute the terminal transition'; return 1; }
+
+  if ! reason=$(authority_state_write "$project_id" "$updated"); then
+    printf '%s' "$reason"; return 1
+  fi
+  printf '%s' "$seq"
+}
+
+# authority_state_release_pending <project-id> <scope> <run-id>
+# The controlled incomplete path, and the only way a pending is cleared without
+# producing a terminal result.
+#
+# It is sound only because the caller is alive, still holds the evaluation lock
+# and established itself that this evaluation produced no verification result:
+# the budget ran out, the run could not be prepared after the reservation, or
+# the execution hop never started. In all of those the authority knows there is
+# nothing to publish, so the reserved sequence is burned and the previous
+# terminal legitimately stays current -- an incomplete attempt is not a verdict
+# and must not supersede one.
+#
+# A process that dies cannot reach this path, which is the point: its pending
+# survives and keeps the previous terminal suppressed until a later evaluation
+# takes the pending over.
+authority_state_release_pending() {
+  local project_id="$1" scope="$2" run_id="$3" json updated reason
+  authority_scope_is_known "$scope" || { printf 'unknown scope %s' "$scope"; return 1; }
+  json=$(authority_state_read "$project_id") || { printf '%s' "$json"; return 1; }
+  [ "$(jq -r --arg s "$scope" '.scopes[$s].pending | type' <<<"$json")" = null ] && return 0
+  [ "$(jq -r --arg s "$scope" '.scopes[$s].pending.run_id' <<<"$json")" = "$run_id" ] \
+    || { printf 'the pending reservation belongs to a different run'; return 1; }
+
+  updated=$(jq -c --arg s "$scope" '.scopes[$s].pending = null' <<<"$json") \
+    || { printf 'cannot compute the release'; return 1; }
+  if ! reason=$(authority_state_write "$project_id" "$updated"); then
+    printf '%s' "$reason"; return 1
+  fi
+  return 0
+}
+
+# authority_state_latest <project-id> <scope>
+# What the state says is current, with the suppression rule applied. A pending
+# reservation always wins: while one exists the answer is "unresolved", never
+# the older terminal underneath it.
+authority_state_latest() {
+  local project_id="$1" scope="$2" json
+  json=$(authority_state_read "$project_id") || { printf '%s' "$json"; return 1; }
+  jq -c --arg s "$scope" '
+    if (.scopes[$s].pending | type) != "null"
+    then {state: "unresolved", pending: .scopes[$s].pending, suppressed: .scopes[$s].last_terminal}
+    elif (.scopes[$s].last_terminal | type) != "null"
+    then {state: "terminal", terminal: .scopes[$s].last_terminal}
+    else {state: "none"} end' <<<"$json"
+}
+
+# authority_identity_fingerprints <identity-file>
+# The four fingerprints of one identity document. Shared so that the value bound
+# into a run and the value revalidated before a terminal result are produced by
+# the same code rather than by two expressions that could drift apart.
+authority_identity_fingerprints() {
+  local identity="$1" s c k m
+  s=$(jq -cS '.source' "$identity" | sha256_hex)
+  c=$(jq -cS '.contract' "$identity" | sha256_hex)
+  k=$(jq -cS '.control' "$identity" | sha256_hex)
+  m=$(jq -cS '.mechanism' "$identity" | sha256_hex)
+  jq -nc --arg s "$s" --arg c "$c" --arg k "$k" --arg m "$m" '
+    {source:   {algorithm: "sha256", value: $s},
+     contract: {algorithm: "sha256", value: $c},
+     control:  {algorithm: "sha256", value: $k},
+     mechanism:{algorithm: "sha256", value: $m}}'
+}

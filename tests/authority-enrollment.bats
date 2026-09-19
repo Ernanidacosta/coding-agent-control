@@ -237,5 +237,10 @@ enrollment_file() {
   local id state
   id=$(bash "$AUTHORITY" show --workspace "$WS" --root "$ROOT" | awk '/^project id:/ { print $3 }')
   state="$ROOT/var/lib/agent-md/projects/$id/state.json"
-  jq -e '.schema == 7 and .last_terminal == null and .pending == null' "$state" >/dev/null
+  # Both scope lines start empty: no reservation outstanding, no result to
+  # supersede, and a sequence that has not yet issued a number.
+  jq -e '.schema == 2
+    and (.scopes | keys | sort) == ["staged","worktree"]
+    and all(.scopes[]; .next_sequence == 1 and .pending == null and .last_terminal == null)' \
+    "$state" >/dev/null
 }

@@ -48,6 +48,8 @@ EX_CALLER_UNBOUND=14
 EX_CALLER_MISMATCH=15
 EX_RUN_FAILED=16
 EX_BUDGET_EXHAUSTED=17
+EX_EVALUATION_IN_PROGRESS=18
+EX_STATE_UNUSABLE=19
 EX_INTERNAL=20
 
 RESPONSE_MODE=eligibility
@@ -61,6 +63,11 @@ ISSUER_SOURCE_FP=""
 ISSUER_CALLER_UID=""
 ISSUER_CALLER_USER=""
 ISSUER_EXHAUSTED=false
+ISSUER_SCOPE=""
+ISSUER_SEQUENCE=""
+ISSUER_TERMINAL_DONE=0
+ISSUER_RECOVERED=false
+RESPONSE_SEQUENCE=null
 RESPONSE_RUN_ID=null
 RESPONSE_CALLER=null
 RESPONSE_SNAPSHOT=null
@@ -88,11 +95,15 @@ respond() {
       --argjson identity "$RESPONSE_IDENTITY" \
       --argjson contract "$RESPONSE_CONTRACT" --argjson mechanism "$RESPONSE_MECHANISM" \
       --argjson environment "$RESPONSE_ENVIRONMENT" --argjson checks "$RESPONSE_CHECKS" \
-      --argjson budget "$RESPONSE_BUDGET" '
+      --argjson budget "$RESPONSE_BUDGET" --argjson sequence "$RESPONSE_SEQUENCE" '
         {protocol: $protocol, schema: $protocol, status: $status,
          reason_code: $reason_code, reason: $reason,
          project_id: $project_id, run_id: $run_id, workspace: $workspace, scope: $scope,
          caller: $caller,
+         # The sequence this evaluation reserved, or null when it never got as
+         # far as reserving one. A reserved sequence is consumed whether or not
+         # it ever becomes a terminal result, so this is not a receipt number.
+         sequence: $sequence,
          # The four fingerprints the core already understands, bound to this
          # run. A later signing step consumes exactly these; on their own they
          # are orchestration output and carry no authority.
@@ -198,6 +209,7 @@ issuer_resolve_request() {
     refuse REFUSED_UNSUPPORTED_PROTOCOL "unsupported protocol: $protocol" "$EX_UNSUPPORTED_PROTOCOL"
 
   RESPONSE_SCOPE=$(json_string "$scope")
+  ISSUER_SCOPE="$scope"
   case "$scope" in
     worktree) ;;
     staged) refuse REFUSED_UNSUPPORTED_SCOPE "staged scope is not supported yet" "$EX_UNSUPPORTED_SCOPE" ;;
@@ -429,15 +441,98 @@ issuer_assert_caller_matches_enrollment() {
     refuse REFUSED_CALLER_MISMATCH "this project is enrolled for $enrolled_user (uid $enrolled_uid); the caller is $ISSUER_CALLER_USER (uid $ISSUER_CALLER_UID)" "$EX_CALLER_MISMATCH"
 }
 
+# --- Evaluation transaction --------------------------------------------------
+#
+# The lock covers the whole terminal evaluation: final eligibility, the
+# reservation, the snapshot, the checks, the revalidation and the terminal
+# transition. Anything less and two evaluations could interleave around the
+# sequence or around the single current-run pointer.
+#
+# It is taken per project, not per (project, scope), even though the sequence
+# lines are per scope. The runs directory, the current-run pointer a check
+# resolves through, and the state file are all per project today, so two
+# concurrent evaluations in different scopes would race over the pointer and
+# lose one of the two state updates. Serialising the project is the safe
+# reading of that layout; splitting the lock would need those resources split
+# first.
+#
+# Non-blocking on purpose. A second evaluation is told that one is already
+# running rather than queueing behind it: it reserves nothing, writes nothing
+# and cannot be mistaken for the first one's result.
+issuer_acquire_evaluation_lock() {
+  local lock dir
+  dir="$(projects_dir)/$ISSUER_PROJECT_ID"
+  lock=$(authority_evaluation_lock "$ISSUER_PROJECT_ID")
+  if [ ! -e "$lock" ]; then
+    chmod u+w "$dir" 2>/dev/null || true
+    : > "$lock" 2>/dev/null || refuse REFUSED_STATE_UNUSABLE \
+      "the authority cannot create its evaluation lock" "$EX_STATE_UNUSABLE"
+    chmod 0600 "$lock" 2>/dev/null || true
+  fi
+  [ -L "$lock" ] && refuse REFUSED_STATE_UNUSABLE "the evaluation lock is a symlink" "$EX_STATE_UNUSABLE"
+  exec 8>"$lock" || refuse REFUSED_STATE_UNUSABLE \
+    "the authority cannot open its evaluation lock" "$EX_STATE_UNUSABLE"
+  flock -n 8 || refuse REFUSED_EVALUATION_IN_PROGRESS \
+    "another evaluation already holds this project; this request reserved nothing" \
+    "$EX_EVALUATION_IN_PROGRESS"
+}
+
+# Durable before the first check runs. If this ordering were reversed, a crash
+# between "the checks failed" and "record that they failed" would leave the
+# previous pass looking current.
+issuer_reserve_sequence() {
+  local out
+  if ! out=$(authority_state_reserve "$ISSUER_PROJECT_ID" "$ISSUER_SCOPE" "$ISSUER_RUN_ID"); then
+    refuse REFUSED_STATE_UNUSABLE "the authority state is not usable: $out" "$EX_STATE_UNUSABLE"
+  fi
+  ISSUER_SEQUENCE=${out%% *}
+  ISSUER_RECOVERED=${out##* }
+  RESPONSE_SEQUENCE="$ISSUER_SEQUENCE"
+}
+
+# The safety net for every ordinary exit taken after a reservation: a refusal, a
+# die, an exhausted budget. It is the controlled-incomplete path, so it burns
+# the sequence and leaves the previous terminal alone.
+#
+# A killed process never reaches it, which is the intended difference: its
+# pending survives and keeps the previous terminal suppressed.
+issuer_on_exit() {
+  [ -n "$ISSUER_SEQUENCE" ] || return 0
+  [ "$ISSUER_TERMINAL_DONE" -eq 0 ] || return 0
+  local reason
+  if ! reason=$(authority_state_release_pending "$ISSUER_PROJECT_ID" "$ISSUER_SCOPE" "$ISSUER_RUN_ID"); then
+    printf '%s: the incomplete evaluation could not be closed: %s\n' "$PROGRAM" "$reason" >&2
+  fi
+}
+
+# Recomputed live and compared with what the run was captured against. A
+# divergence here means the checks did run, and ran against a tree that no
+# longer describes the workspace, so their result may not be published -- but it
+# still supersedes whatever came before, because leaving the older result
+# current would be a lie in the other direction.
+issuer_identity_still_matches() {
+  local fingerprints
+  fingerprints=$("$AUTHORITY_SELF_DIR/agent-md-authority" identity-fingerprints \
+                   "$ISSUER_PROJECT_ID" ${ROOT:+--root "$ROOT"} 2>/dev/null 8>&-) || return 1
+  jq -e . >/dev/null 2>&1 <<<"$fingerprints" || return 1
+  [ "$(jq -cS . <<<"$fingerprints")" = "$(jq -cS . <<<"$RESPONSE_IDENTITY")" ]
+}
+
+issuer_commit_terminal() {
+  local status="$1" out
+  if ! out=$(authority_state_commit_terminal "$ISSUER_PROJECT_ID" "$ISSUER_SCOPE" \
+               "$status" "$ISSUER_RUN_ID" "$RESPONSE_IDENTITY"); then
+    refuse REFUSED_STATE_UNUSABLE "the terminal result could not be recorded: $out" "$EX_STATE_UNUSABLE"
+  fi
+  ISSUER_TERMINAL_DONE=1
+}
+
 issuer_prepare_run() {
   local out
-  if ! out=$("$AUTHORITY_SELF_DIR/agent-md-authority" prepare-run "$ISSUER_PROJECT_ID" ${ROOT:+--root "$ROOT"} 2>&1); then
+  if ! out=$("$AUTHORITY_SELF_DIR/agent-md-authority" prepare-run "$ISSUER_PROJECT_ID" \
+               --run-id "$ISSUER_RUN_ID" ${ROOT:+--root "$ROOT"} 2>&1 8>&-); then
     refuse REFUSED_RUN_FAILED "the evaluation run could not be prepared: $(printf '%s' "$out" | tail -1)" "$EX_RUN_FAILED"
   fi
-  ISSUER_RUN_ID=$(printf '%s' "$out" | awk '/^run /{print $2; exit}')
-  authority_run_id_is_safe "$ISSUER_RUN_ID" || \
-    refuse REFUSED_RUN_FAILED "the prepared run has no usable identifier" "$EX_RUN_FAILED"
-  RESPONSE_RUN_ID=$(json_string "$ISSUER_RUN_ID")
 
   local run_dir manifest_file identity_file
   run_dir=$(authority_run_dir "$ISSUER_PROJECT_ID" "$ISSUER_RUN_ID")
@@ -463,10 +558,14 @@ issuer_prepare_run() {
 # exactly one response object.
 issuer_run_one_check() {
   local check="$1"
+  # 8>&- keeps the evaluation lock out of the child. Without it a check that
+  # outlives a killed issuer would still hold the lock through the inherited
+  # descriptor, and no later evaluation could ever recover the pending. sudo
+  # closes descriptors above 2 on its own; the direct path does not.
   if is_real_root_prefix; then
-    sudo -n -u "$AUTHORITY_RUNNER_USER" "$(lib_dir)/run-check" "$ISSUER_PROJECT_ID" "$check" >&2
+    sudo -n -u "$AUTHORITY_RUNNER_USER" "$(lib_dir)/run-check" "$ISSUER_PROJECT_ID" "$check" >&2 8>&-
   else
-    "$AUTHORITY_SELF_DIR/run-check" "$ISSUER_PROJECT_ID" "$check" --root "$ROOT" >&2
+    "$AUTHORITY_SELF_DIR/run-check" "$ISSUER_PROJECT_ID" "$check" --root "$ROOT" >&2 8>&-
   fi
 }
 
@@ -527,12 +626,26 @@ issuer_conclude() {
   failed=$(printf '%s' "$RESPONSE_CHECKS" | jq '[.[] | select(.requirement == "required" and (.exit_code != 0 or .execution != "completed"))] | length')
   missing=$(printf '%s' "$RESPONSE_CHECKS" | jq '[.[] | select(.execution != "completed")] | length')
 
+  # An incomplete evaluation is not a verdict. The reserved sequence is burned
+  # by the exit path and the previous terminal result stays current, because
+  # nothing here observed the contract either passing or failing.
   if [ "$ISSUER_EXHAUSTED" = true ] || [ "$missing" -gt 0 ]; then
     respond refused REFUSED_BUDGET_EXHAUSTED "the evaluation did not complete within the approved budget" "$EX_BUDGET_EXHAUSTED"
   fi
+
+  # The checks completed, so this evaluation owes a terminal result whichever
+  # way it goes. Revalidation decides which one.
+  if ! issuer_identity_still_matches; then
+    issuer_commit_terminal identity_changed
+    respond identity_changed IDENTITY_CHANGED \
+      "the checks completed but the workspace identity changed before the result could be concluded; this attempt supersedes the previous result and publishes nothing" \
+      "$EX_CANDIDATE_FAIL"
+  fi
   if [ "$failed" -gt 0 ]; then
+    issuer_commit_terminal candidate_fail
     respond candidate_fail CANDIDATE_FAIL "a required check did not return zero" "$EX_CANDIDATE_FAIL"
   fi
+  issuer_commit_terminal candidate_pass
   respond candidate_pass CANDIDATE_PASS "every required check returned zero for this snapshot; this is orchestration output, not evidence" 0
 }
 
@@ -541,7 +654,19 @@ cmd_evaluate() {
   issuer_parse_options "$@"
   issuer_bind_caller
   issuer_resolve_request
+  issuer_acquire_evaluation_lock
   issuer_check_eligibility
+
+  # The run is named, then the sequence is reserved against that name and made
+  # durable, and only then is anything captured or executed.
+  ISSUER_RUN_ID=$(authority_new_id) || \
+    refuse REFUSED_INTERNAL "no source of unique identifiers is available" "$EX_INTERNAL"
+  authority_run_id_is_safe "$ISSUER_RUN_ID" || \
+    refuse REFUSED_INTERNAL "the generated run identifier is malformed" "$EX_INTERNAL"
+  RESPONSE_RUN_ID=$(json_string "$ISSUER_RUN_ID")
+  trap issuer_on_exit EXIT
+  issuer_reserve_sequence
+
   issuer_prepare_run
   issuer_execute_checks
   issuer_conclude

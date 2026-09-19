@@ -70,6 +70,28 @@ timeout_seconds = 20
 total_timeout_seconds = 120
 TOML
 
+# Steered from outside the workspace so the approved contract and the workspace
+# identity both stay fixed while the outcome changes.
+cat > "$PAYLOAD/flagged.toml" <<'TOML'
+[verify]
+test = "cat /srv/flag"
+
+[verify.policy]
+required = ["test"]
+timeout_seconds = 20
+total_timeout_seconds = 120
+TOML
+
+cat > "$PAYLOAD/slowflag.toml" <<'TOML'
+[verify]
+test = "touch /srv/running; cat /srv/flag || exit 1; if [ -e /srv/slow ]; then sleep 40; fi; true"
+
+[verify.policy]
+required = ["test"]
+timeout_seconds = 60
+total_timeout_seconds = 180
+TOML
+
 cat > "$PAYLOAD/slow.toml" <<'TOML'
 [verify]
 lint = "sleep 30"
@@ -109,6 +131,9 @@ install -d -o agentmd -g agentmd -m 0755 /var/lib/agent-md
 install -d -o agentmd -g agentmd -m 0755 /var/lib/agent-md/projects
 install -d -o agentmd -g agentmd -m 0700 /var/lib/agent-md/keys
 install -d -o agentmd-runner -g agentmd-runner -m 0700 /var/tmp/agent-md-runner
+# Trigger files for the state-machine rows. They sit outside every workspace on
+# purpose: steering an outcome must not change the workspace identity.
+install -d -o root -g root -m 0777 /srv
 # A real issuer key, created the way an operator creates one. Earlier rounds
 # planted a sentinel file here; a sentinel proves the directory permissions but
 # not that the program that creates a key leaves it in the state it claims.
@@ -312,7 +337,18 @@ if [ "$MUT_SEEN" = yes ]; then
 fi
 wait "$MUT_BG"
 if [ "$MUT_SEEN" = yes ]; then
-  row dev evaluation "worktree mutated mid-run" "sealed snapshot" "$(jq -r .status < "$MUT_OUT")" candidate_pass
+  # Two separate properties, and both must hold.
+  #
+  # The snapshot property is the exit code below: the check read the bytes as
+  # they were when the run was captured, not the mutated ones, so the mutation
+  # could not influence the result.
+  #
+  # The status is identity_changed from C4b onwards. The checks completed, but
+  # the workspace no longer matches what they ran against, so the authority
+  # concludes a terminal result that supersedes the previous one and publishes
+  # nothing. Before C4b there was no revalidation and this read candidate_pass;
+  # refusing to publish is the stricter answer, not a weaker one.
+  row dev evaluation "worktree mutated mid-run" "pre-terminal revalidation" "$(jq -r .status < "$MUT_OUT")" identity_changed
   row dev "check output" "read the pre-mutation bytes" "sealed snapshot" \
     "$(jq -r '[.checks[]|select(.name=="test")|.exit_code]|first' < "$MUT_OUT")" 0
 else
@@ -363,6 +399,79 @@ RUNDIR=/var/lib/agent-md/projects/$PID/runs/$(cat "/var/lib/agent-md/projects/$P
 row root "run artefacts" "contain key material" "custody" "$(grep -rlF "$(sed -n 2p "$PRIV")" "$RUNDIR" 2>/dev/null | wc -l)" 0
 row root "job files" "name the key directory" "custody" "$(grep -rlE 'keys/|issuer-.*\.key' "$RUNDIR/jobs" 2>/dev/null | wc -l)" 0
 row root "snapshot" "contains a PEM private key" "custody" "$(grep -rlF 'BEGIN PRIVATE KEY' "$RUNDIR/snapshot" 2>/dev/null | wc -l)" 0
+
+header "8c. evaluation state machine, real accounts"
+STATE=/var/lib/agent-md/projects/$PID/state.json
+row root "state" "schema on disk" "C4b state machine" "$(jq -r .schema "$STATE")" 2
+row root "state" "owner" "authority-owned" "$(stat -c %U "$STATE")" agentmd
+row root "state" "mode" "not world-writable" "$(stat -c %a "$STATE")" 644
+row dev "state" "write" "DAC agentmd-owned" "$(try sudo -u dev bash -c "echo x > $STATE")" denied
+row agentmd-runner "state" "write" "DAC agentmd-owned" "$(try sudo -u agentmd-runner bash -c "echo x > $STATE")" denied
+row dev "state" "replace via the project dir" "DAC sealed 0555" "$(try sudo -u dev bash -c "echo x > /var/lib/agent-md/projects/$PID/state.json.new")" denied
+row agentmd-runner "evaluation lock" "write" "DAC agentmd-owned" "$(try sudo -u agentmd-runner bash -c "echo x > /var/lib/agent-md/projects/$PID/.evaluation.lock")" denied
+
+# PASS then FAIL through the whole chain, with real accounts and a real lock.
+SEQ_BEFORE=$(jq -r '.scopes.worktree.next_sequence' "$STATE")
+install -o dev -g dev -m 0644 /it/flagged.toml /home/dev/repo/agent-md.toml
+enroll_project >/dev/null
+STATE=/var/lib/agent-md/projects/$PID/state.json
+printf 'ok\n' > /srv/flag; chmod 0644 /srv/flag
+row dev evaluation "flag present" "orchestration" "$(evaluate_as dev | jq -r .status)" candidate_pass
+PASS_SEQ=$(jq -r '.scopes.worktree.last_terminal.sequence' "$STATE")
+row root "state" "pass is the terminal" "C4b state machine" "$(jq -r '.scopes.worktree.last_terminal.status' "$STATE")" candidate_pass
+rm -f /srv/flag
+row dev evaluation "flag removed" "orchestration" "$(evaluate_as dev | jq -r .status)" candidate_fail
+FAIL_SEQ=$(jq -r '.scopes.worktree.last_terminal.sequence' "$STATE")
+row root "state" "fail supersedes the pass" "C4b state machine" "$(jq -r '.scopes.worktree.last_terminal.status' "$STATE")" candidate_fail
+row root "sequence" "fail is later than the pass" "monotonicity" "$([ "$FAIL_SEQ" -gt "$PASS_SEQ" ] && printf later || printf "not-later")" later
+row root "pending" "cleared after a terminal" "C4b state machine" "$(jq -r '.scopes.worktree.pending | type' "$STATE")" null
+
+# kill -9 during a check must leave the pending, and the previous terminal
+# must stay suppressed until a later evaluation takes the reservation over.
+printf 'ok\n' > /srv/flag; chmod 0644 /srv/flag
+install -o dev -g dev -m 0644 /it/slowflag.toml /home/dev/repo/agent-md.toml
+enroll_project >/dev/null
+STATE=/var/lib/agent-md/projects/$PID/state.json
+evaluate_as dev >/dev/null
+BEFORE_KILL_SEQ=$(jq -r '.scopes.worktree.last_terminal.sequence' "$STATE")
+rm -f /srv/running
+touch /srv/slow
+( evaluate_as dev >/dev/null 2>&1 ) & EVBG=$!
+for _ in $(seq 1 300); do [ -e /srv/running ] && break; sleep 0.1; done
+EVPG=$(ps -o pgid= -p "$EVBG" 2>/dev/null | tr -d ' ')
+[ -n "$EVPG" ] && kill -9 -"$EVPG" 2>/dev/null
+kill -9 "$EVBG" 2>/dev/null; wait "$EVBG" 2>/dev/null
+row root "pending" "survives kill -9" "crash consistency" "$(jq -r '.scopes.worktree.pending | type' "$STATE")" object
+ABANDONED=$(jq -r '.scopes.worktree.pending.sequence' "$STATE")
+row root "previous terminal" "still suppressed by the pending" "crash consistency" "$(jq -r '.scopes.worktree.last_terminal.sequence' "$STATE")" "$BEFORE_KILL_SEQ"
+
+# The lock must be free again: the killed tree may not keep holding it.
+rm -f /srv/slow
+row dev evaluation "recovers after the crash" "lock released on death" "$(evaluate_as dev | jq -r .status)" candidate_pass
+RECOVERED=$(jq -r '.scopes.worktree.last_terminal.sequence' "$STATE")
+row root "sequence" "abandoned number never reused" "monotonicity" "$([ "$RECOVERED" -gt "$ABANDONED" ] && printf later || printf reused)" later
+row root "pending" "resolved by the recovery" "crash consistency" "$(jq -r '.scopes.worktree.pending | type' "$STATE")" null
+
+# A second evaluation while one holds the lock must reserve nothing.
+rm -f /srv/running; touch /srv/slow
+( evaluate_as dev >/dev/null 2>&1 ) & EVBG=$!
+for _ in $(seq 1 300); do [ -e /srv/running ] && break; sleep 0.1; done
+HELD_NEXT=$(jq -r '.scopes.worktree.next_sequence' "$STATE")
+CONC=$(evaluate_as dev)
+row dev evaluation "concurrent request" "flock, non-blocking" "$(printf '%s' "$CONC" | jq -r .reason_code)" REFUSED_EVALUATION_IN_PROGRESS
+row dev evaluation "concurrent reserved nothing" "flock, non-blocking" "$(printf '%s' "$CONC" | jq -r '.sequence | type')" null
+row root "next_sequence" "unchanged by the refusal" "flock, non-blocking" "$(jq -r '.scopes.worktree.next_sequence' "$STATE")" "$HELD_NEXT"
+EVPG=$(ps -o pgid= -p "$EVBG" 2>/dev/null | tr -d ' ')
+[ -n "$EVPG" ] && kill -9 -"$EVPG" 2>/dev/null
+kill -9 "$EVBG" 2>/dev/null; wait "$EVBG" 2>/dev/null
+rm -f /srv/slow /srv/running
+
+row root "state" "carries no key material" "C4b holds no key" "$(grep -cE 'BEGIN |PRIVATE|key_id' "$STATE" || true)" 0
+row root "private key" "untouched by the state machine" "C4b holds no key" "$([ "$(sha256sum "$PRIV" | cut -d' ' -f1)" = "$KEY_DIGEST" ] && printf intact || printf changed)" intact
+row root "sequence line" "is not a receipt" "C4b publishes nothing" "$(jq -r '[paths|join(".")]|join(" ")' "$STATE" | grep -cE 'signature|receipt|signed' || true)" 0
+
+install -o dev -g dev -m 0644 /it/agent-md.toml /home/dev/repo/agent-md.toml
+enroll_project >/dev/null
 
 header "9. C3a boundaries still hold"
 P=/var/lib/agent-md/projects/$PID
