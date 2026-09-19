@@ -43,6 +43,10 @@ timeout_seconds = 20
 TOML
   git -C "$WS" add -A >/dev/null 2>&1
   bash "$AUTHORITY" install --root "$ROOT" >/dev/null
+  # From C4c a terminal result is always signed, so an authority with no
+  # key cannot conclude one at all. That refusal is the point of the key
+  # tests; here it would only stop every other case from running.
+  bash "$AUTHORITY" install-key --root "$ROOT" >/dev/null
   bash "$AUTHORITY" enroll "$WS" --root "$ROOT" --exec-path "$EXEC_PATH" --yes >/dev/null
   PROJECT_ID=$(ls "$ROOT/var/lib/agent-md/projects" | head -1)
   export PROJECT_ID
@@ -163,7 +167,7 @@ bound_fingerprint() { jq -r '.fingerprints.source.value' "$(run_dir)/identity.js
     'printf "{\"protocol\":1,\"scope\":\"worktree\",\"workspace\":\"%s\"}" "$1" | bash "$2" evaluate --root "$3"' \
     _ "$WS" "$ISSUER" "$ROOT"
   [ "$status" -eq 0 ]
-  printf '%s' "$output" | jq -e '.status == "candidate_pass"' >/dev/null
+  printf '%s' "$output" | jq -e '.status == "authenticated_pass"' >/dev/null
   [ "$(printf '%s' "$output" | jq -r '.identity.source.value')" = "$(core_fingerprint)" ]
   # The sealed tree is reported too, and is a different thing.
   printf '%s' "$output" | jq -e '.snapshot.value != .identity.source.value' >/dev/null

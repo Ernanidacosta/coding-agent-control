@@ -21,6 +21,10 @@ setup() {
     printf '#!/bin/bash\n' > "$WS/$hook"
   done
   bash "$AUTHORITY" install --root "$ROOT" >/dev/null
+  # From C4c a terminal result is always signed, so an authority with no
+  # key cannot conclude one at all. That refusal is the point of the key
+  # tests; here it would only stop every other case from running.
+  bash "$AUTHORITY" install-key --root "$ROOT" >/dev/null
   TOOLCHAIN="$(mktemp -d)"
   EXEC_PATH="$(trusted_toolchain_path "$TOOLCHAIN")"
   export TOOLCHAIN EXEC_PATH
@@ -54,7 +58,7 @@ evaluate() {
 
 project_dir() { printf '%s/var/lib/agent-md/projects/%s' "$ROOT" "$PROJECT_ID"; }
 
-@test "1 an approved contract that passes yields candidate_pass" {
+@test "1 an approved contract that passes yields an authenticated pass" {
   contract '[verify]
 lint = "true"
 test = "cat marker.txt"
@@ -66,13 +70,13 @@ timeout_seconds = 20'
   evaluate
   [ "$status" -eq 0 ]
   printf '%s' "$output" | jq -e '
-    .status == "candidate_pass" and
+    .status == "authenticated_pass" and
     (.checks | length) == 2 and
     all(.checks[]; .exit_code == 0 and .execution == "completed")
   ' >/dev/null
 }
 
-@test "2 a failing required check yields candidate_fail and still runs the rest" {
+@test "2 a failing required check yields an authenticated fail and still runs the rest" {
   contract '[verify]
 lint = "exit 3"
 test = "true"
@@ -84,7 +88,7 @@ timeout_seconds = 20'
   evaluate
   [ "$status" -eq 1 ]
   printf '%s' "$output" | jq -e '
-    .status == "candidate_fail" and
+    .status == "authenticated_fail" and
     (.checks[] | select(.name == "lint") | .exit_code) == 3 and
     (.checks[] | select(.name == "test") | .exit_code) == 0
   ' >/dev/null
@@ -102,7 +106,7 @@ timeout_seconds = 20'
   evaluate
   [ "$status" -eq 0 ]
   printf '%s' "$output" | jq -e '
-    .status == "candidate_pass" and
+    .status == "authenticated_pass" and
     (.checks[] | select(.name == "smoke") | .requirement) == "optional" and
     (.checks[] | select(.name == "smoke") | .exit_code) == 9
   ' >/dev/null
@@ -203,6 +207,7 @@ total_timeout_seconds = 180"
   # pass whose checks observed the tampered content, and that is excluded by
   # the snapshot assertion above.
   [ "$(printf '%s' "$response" | jq -r .status)" = identity_changed ]
+  [ "$(printf '%s' "$response" | jq -r '.receipt | type')" = null ]
 }
 
 @test "7 a second evaluation gets a fresh run and the old one is released" {
@@ -328,10 +333,10 @@ timeout_seconds = 20'
   enroll
   evaluate
   printf '%s' "$output" | jq -e -s 'length == 1 and (.[0] | type) == "object"' >/dev/null
-  printf '%s' "$output" | jq -e '.status == "candidate_fail"' >/dev/null
+  printf '%s' "$output" | jq -e '.status == "authenticated_fail"' >/dev/null
 }
 
-@test "14 the result never claims evidence it cannot produce" {
+@test "14 the result claims exactly what it can prove" {
   contract '[verify]
 test = "true"
 
@@ -340,25 +345,30 @@ required = ["test"]
 timeout_seconds = 20'
   enroll
   evaluate
-  # A sequence is reserved from C4b onwards, so the response carries one. It is
-  # an allocation, not a verdict and not a receipt number: what must stay absent
-  # is anything that would claim the result was authenticated.
+  # From C4c the result is signed, so it names its receipt. What it must never
+  # do is carry the signature itself or a key identifier the caller could act
+  # on: the receipt is the artefact, and the state decides what is current.
   printf '%s' "$output" | jq -e '
-    (.status | test("authentic|attested|verified|signed|receipt") | not) and
-    (has("signature") | not) and (has("receipt") | not) and
-    (has("key_id") | not) and (.sequence | type) == "number"
+    .status == "authenticated_pass" and
+    (has("signature") | not) and (has("key_id") | not) and
+    (.sequence | type) == "number" and
+    (.receipt.path | type) == "string" and (.receipt.schema | type) == "number"
   ' >/dev/null
-  [[ "$(printf '%s' "$output" | jq -r .reason)" == *"not evidence"* ]]
+  # And the receipt it names really is on disk and really is signed.
+  local path; path=$(printf '%s' "$output" | jq -r .receipt.path)
+  [ -f "$path" ]
+  [ "$(jq -r .authentication.format "$path")" = ed25519-openssl-rawin ]
 }
 
-@test "15 no component reads a key, signs, or writes a receipt" {
-  # Sequence allocation exists from C4b and is covered by the state machine
-  # suite. Key use, signing and receipt persistence are still absent, and that
-  # is what this pins.
-  local f
-  for f in "$ISSUER" "$RUNCHECK" "$AUTHORITY"; do
-    ! grep -qE 'issuer-.*\.key|openssl[[:space:]]+(pkeyutl|dgst[[:space:]]+-sign)' "$f"
-    ! grep -qE '\.agent/verification|publish_receipt|sign_payload' "$f"
-  done
-  [ -z "$(ls -A "$ROOT/var/lib/agent-md/keys")" ]
+@test "15 only the issuer signs, and only as the end of an evaluation" {
+  # From C4c the issuer signs. The execution boundary and the administrative
+  # CLI must not: run-check runs one command, and the authority CLI has no
+  # entry point that produces a signature on request.
+  ! grep -qE 'pkeyutl|issuer-.*\.key|publish_receipt' "$RUNCHECK"
+  ! grep -qE 'pkeyutl -sign' "$AUTHORITY"
+  ! grep -qE -- '--sign|sign-receipt|sign-run|receipt-from-run' "$AUTHORITY" "$ISSUER"
+
+  # The issuer reaches signing from exactly one place, the conclusion.
+  [ "$(sed -n '/^issuer_conclude/,/^}/p' "$ISSUER" | grep -c issuer_publish_signed_terminal)" -eq 2 ]
+  [ "$(sed -n '/^cmd_eligibility/,/^}/p' "$ISSUER" | grep -c issuer_publish_signed_terminal)" -eq 0 ]
 }

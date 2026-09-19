@@ -82,6 +82,20 @@ timeout_seconds = 20
 total_timeout_seconds = 120
 TOML
 
+# Holds inside execution until the harness releases it, so the workspace can be
+# changed at a known point rather than raced against. The check cannot mutate
+# the developer's tree itself: it runs as the execution account, which has no
+# write access there, and that is the correct boundary.
+cat > "$PAYLOAD/holdflag.toml" <<'TOML'
+[verify]
+test = "touch /srv/running; cat /srv/flag || exit 1; while [ -e /srv/hold ]; do sleep 0.2; done; true"
+
+[verify.policy]
+required = ["test"]
+timeout_seconds = 60
+total_timeout_seconds = 180
+TOML
+
 cat > "$PAYLOAD/slowflag.toml" <<'TOML'
 [verify]
 test = "touch /srv/running; cat /srv/flag || exit 1; if [ -e /srv/slow ]; then sleep 40; fi; true"
@@ -276,14 +290,14 @@ sed -i 's/^dev2 ALL=/dev ALL=/' "/etc/sudoers.d/agent-md-$PID"
 # boundary. A cosmetic edit also leaves the approved contract unchanged, which
 # is correct: approval is over the canonical contract, not over bytes.
 sudo -u dev bash -c 'printf "\n" >> ~/repo/agent-md.toml'
-row dev repo "whitespace edit" "canonical contract" "$(evaluate_as dev | jq -r .status)" candidate_pass
+row dev repo "whitespace edit" "canonical contract" "$(evaluate_as dev | jq -r .status)" authenticated_pass
 row dev repo "caller after repo edit" "boundary-derived caller" "$(evaluate_as dev | jq -r .caller.user)" dev
 sudo -u dev bash -c 'truncate -s -1 ~/repo/agent-md.toml'
 # Changing what a check actually runs is the change approval exists to catch.
 sudo -u dev sed -i 's|^lint = .*|lint = "true"|' /home/dev/repo/agent-md.toml
 row dev repo "semantic contract change" "approved fingerprint" "$(evaluate_as dev | jq -r .reason_code)" REFUSED_CONTRACT_CHANGED
 sudo -u dev sed -i 's|^lint = .*|lint = "cat marker.txt"|' /home/dev/repo/agent-md.toml
-row dev repo "restored contract" "approved fingerprint" "$(evaluate_as dev | jq -r .status)" candidate_pass
+row dev repo "restored contract" "approved fingerprint" "$(evaluate_as dev | jq -r .status)" authenticated_pass
 
 header "4. request may not carry authority"
 for FIELD in '"command":"true"' '"checks":[]' '"project_id":"x"' '"caller":{"uid":0}' '"fingerprints":{}'; do
@@ -314,7 +328,7 @@ row authority "previous run" "released after switch" "cleanup" "$([ -d "/var/lib
 row authority "current run" "kept while in use" "cleanup" "$([ -d "/var/lib/agent-md/projects/$PID/runs/$RUN2" ] && printf present || printf removed)" present
 
 header "7. candidate status through the whole chain"
-row dev evaluation "all required pass" "orchestration" "$(evaluate_as dev | jq -r .status)" candidate_pass
+row dev evaluation "all required pass" "orchestration" "$(evaluate_as dev | jq -r .status)" authenticated_pass
 # The mutation must land while a check is executing, which is the only window
 # the sealed snapshot claims to cover. An earlier version slept one second and
 # hoped; once identity computation grew a hop it began landing inside the
@@ -360,20 +374,25 @@ install -o dev -g dev -m 0644 /it/agent-md.toml /home/dev/repo/agent-md.toml
 enroll_project >/dev/null
 install -o dev -g dev -m 0644 /it/failing.toml /home/dev/repo/agent-md.toml
 enroll_project >/dev/null
-row dev evaluation "required check fails" "orchestration" "$(evaluate_as dev | jq -r .status)" candidate_fail
+row dev evaluation "required check fails" "orchestration" "$(evaluate_as dev | jq -r .status)" authenticated_fail
 install -o dev -g dev -m 0644 /it/slow.toml /home/dev/repo/agent-md.toml
 enroll_project >/dev/null
 row dev evaluation "budget exhausted" "never a candidate pass" "$(evaluate_as dev | jq -r .status)" refused
 install -o dev -g dev -m 0644 /it/agent-md.toml /home/dev/repo/agent-md.toml
 enroll_project >/dev/null
 
-header "8. no evidence capability yet"
-row issuer key "reads issuer.key" "source inspection" "$(grep -qE 'issuer\.key' "$LIB/agent-md-issuer" && printf present || printf absent)" absent
-row issuer signing "openssl signing" "source inspection" "$(grep -qE 'openssl[[:space:]]+(pkeyutl|dgst[[:space:]]+-sign)' "$LIB/agent-md-issuer" && printf present || printf absent)" absent
-row issuer sequence "sequence allocation" "source inspection" "$(grep -qE 'last_terminal|allocate_sequence' "$LIB/agent-md-issuer" && printf present || printf absent)" absent
-row issuer receipt "writes a receipt" "source inspection" "$(grep -qE '\.agent/verification' "$LIB/agent-md-issuer" && printf present || printf absent)" absent
-row agentmd "private key" "untouched by evaluation" "post-run check" "$([ "$(sha256sum "$PRIV" | cut -d' ' -f1)" = "$KEY_DIGEST" ] && printf intact || printf changed)" intact
-row issuer vocabulary "claims authenticity" "response text" "$(evaluate_as dev | jq -r '.status | test("authentic|attested|verified|signed|receipt")')" false
+header "8. what stays out of reach"
+# This section used to claim sequence allocation was absent, which stopped
+# being true at C4b, and signing, which stopped being true at C4c. What it
+# pins now is the surface that must stay closed: no way to ask for a
+# signature, no key use outside the one signing step, and an execution
+# boundary that still knows nothing about either.
+row issuer "signing oracle" "--sign / sign-receipt" "source inspection" "$(grep -qE -- '--sign|sign-receipt|sign-run|receipt-from-run' "$LIB/agent-md-issuer" "$LIB/agent-md-authority" && printf present || printf absent)" absent
+row authority "signing entry point" "signs on request" "source inspection" "$(grep -qE 'pkeyutl -sign' "$LIB/agent-md-authority" && printf present || printf absent)" absent
+row run-check "key or receipt" "any use at all" "source inspection" "$(grep -qE 'pkeyutl|issuer-.*\.key|publish_receipt|trusted-keys' "$LIB/run-check" && printf present || printf absent)" absent
+row run-check "authority state" "reads or writes it" "source inspection" "$(grep -qE 'state\.json|next_sequence|last_terminal' "$LIB/run-check" && printf present || printf absent)" absent
+row lib "private key open sites" "how many" "source inspection" "$(grep -c 'pkeyutl -sign' "$LIB/authority-lib.sh")" 1
+row agentmd "private key" "unchanged by signing" "post-run check" "$([ "$(sha256sum "$PRIV" | cut -d' ' -f1)" = "$KEY_DIGEST" ] && printf intact || printf changed)" intact
 
 header "8b. issuer key custody, real accounts"
 row dev "keys dir" "list" "DAC 0700 agentmd" "$(try sudo -u dev ls /var/lib/agent-md/keys)" denied
@@ -402,7 +421,7 @@ row root "snapshot" "contains a PEM private key" "custody" "$(grep -rlF 'BEGIN P
 
 header "8c. evaluation state machine, real accounts"
 STATE=/var/lib/agent-md/projects/$PID/state.json
-row root "state" "schema on disk" "C4b state machine" "$(jq -r .schema "$STATE")" 2
+row root "state" "schema on disk" "C4b state machine" "$(jq -r .schema "$STATE")" 3
 row root "state" "owner" "authority-owned" "$(stat -c %U "$STATE")" agentmd
 row root "state" "mode" "not world-writable" "$(stat -c %a "$STATE")" 644
 row dev "state" "write" "DAC agentmd-owned" "$(try sudo -u dev bash -c "echo x > $STATE")" denied
@@ -416,11 +435,11 @@ install -o dev -g dev -m 0644 /it/flagged.toml /home/dev/repo/agent-md.toml
 enroll_project >/dev/null
 STATE=/var/lib/agent-md/projects/$PID/state.json
 printf 'ok\n' > /srv/flag; chmod 0644 /srv/flag
-row dev evaluation "flag present" "orchestration" "$(evaluate_as dev | jq -r .status)" candidate_pass
+row dev evaluation "flag present" "orchestration" "$(evaluate_as dev | jq -r .status)" authenticated_pass
 PASS_SEQ=$(jq -r '.scopes.worktree.last_terminal.sequence' "$STATE")
 row root "state" "pass is the terminal" "C4b state machine" "$(jq -r '.scopes.worktree.last_terminal.status' "$STATE")" candidate_pass
 rm -f /srv/flag
-row dev evaluation "flag removed" "orchestration" "$(evaluate_as dev | jq -r .status)" candidate_fail
+row dev evaluation "flag removed" "orchestration" "$(evaluate_as dev | jq -r .status)" authenticated_fail
 FAIL_SEQ=$(jq -r '.scopes.worktree.last_terminal.sequence' "$STATE")
 row root "state" "fail supersedes the pass" "C4b state machine" "$(jq -r '.scopes.worktree.last_terminal.status' "$STATE")" candidate_fail
 row root "sequence" "fail is later than the pass" "monotonicity" "$([ "$FAIL_SEQ" -gt "$PASS_SEQ" ] && printf later || printf "not-later")" later
@@ -447,7 +466,7 @@ row root "previous terminal" "still suppressed by the pending" "crash consistenc
 
 # The lock must be free again: the killed tree may not keep holding it.
 rm -f /srv/slow
-row dev evaluation "recovers after the crash" "lock released on death" "$(evaluate_as dev | jq -r .status)" candidate_pass
+row dev evaluation "recovers after the crash" "lock released on death" "$(evaluate_as dev | jq -r .status)" authenticated_pass
 RECOVERED=$(jq -r '.scopes.worktree.last_terminal.sequence' "$STATE")
 row root "sequence" "abandoned number never reused" "monotonicity" "$([ "$RECOVERED" -gt "$ABANDONED" ] && printf later || printf reused)" later
 row root "pending" "resolved by the recovery" "crash consistency" "$(jq -r '.scopes.worktree.pending | type' "$STATE")" null
@@ -466,10 +485,77 @@ EVPG=$(ps -o pgid= -p "$EVBG" 2>/dev/null | tr -d ' ')
 kill -9 "$EVBG" 2>/dev/null; wait "$EVBG" 2>/dev/null
 rm -f /srv/slow /srv/running
 
-row root "state" "carries no key material" "C4b holds no key" "$(grep -cE 'BEGIN |PRIVATE|key_id' "$STATE" || true)" 0
+# The state names the key that signed the current receipt; an identifier is
+# not material. What must never appear is the key itself.
+row root "state" "carries key material" "C4c names, never carries" "$(grep -cE 'BEGIN |PRIVATE|[.]key' "$STATE" || true)" 0
 row root "private key" "untouched by the state machine" "C4b holds no key" "$([ "$(sha256sum "$PRIV" | cut -d' ' -f1)" = "$KEY_DIGEST" ] && printf intact || printf changed)" intact
-row root "sequence line" "is not a receipt" "C4b publishes nothing" "$(jq -r '[paths|join(".")]|join(" ")' "$STATE" | grep -cE 'signature|receipt|signed' || true)" 0
 
+header "8d. authenticated receipts, real accounts"
+install -o dev -g dev -m 0644 /it/flagged.toml /home/dev/repo/agent-md.toml
+enroll_project >/dev/null
+STATE=/var/lib/agent-md/projects/$PID/state.json
+PROJ=/var/lib/agent-md/projects/$PID
+printf 'ok\n' > /srv/flag; chmod 0644 /srv/flag
+
+EV=$(evaluate_as dev)
+row dev evaluation "signed pass" "C4c issuance" "$(printf '%s' "$EV" | jq -r .status)" authenticated_pass
+RSEQ=$(printf '%s' "$EV" | jq -r .sequence)
+RPATH=$(printf '%s' "$EV" | jq -r .receipt.path)
+RKEY=$(jq -r .authentication.key_id "$RPATH" 2>/dev/null)
+row root receipt "published at the sequence" "C4c issuance" "$RPATH" "$PROJ/receipts/worktree/$RSEQ.json"
+row root receipt "mode on disk" "immutable" "$(stat -c %a "$RPATH")" 444
+row root receipt "directory mode" "immutable" "$(stat -c %a "$PROJ/receipts/worktree")" 555
+row root receipt "owner" "authority-owned" "$(stat -c %U "$RPATH")" agentmd
+row root "trusted key" "published for the project" "C4c issuance" "$(stat -c %a "$PROJ/trusted-keys/$RKEY.pub")" 444
+row root "trusted key" "hashes to its own name" "key_id binding" "$(openssl pkey -pubin -in "$PROJ/trusted-keys/$RKEY.pub" -outform DER | sha256sum | cut -d' ' -f1)" "$RKEY"
+
+# The whole point: verifiable by a party that holds only the public key.
+CANON=$(mktemp); SIGB=$(mktemp)
+jq -cS 'del(.authentication)' "$RPATH" | tr -d '\n' > "$CANON"
+jq -r .authentication.value "$RPATH" | base64 -d > "$SIGB"
+row anyone receipt "verifies with the public key" "ed25519" "$(openssl pkeyutl -verify -pubin -inkey "$PROJ/trusted-keys/$RKEY.pub" -rawin -in "$CANON" -sigfile "$SIGB" >/dev/null 2>&1 && printf valid || printf invalid)" valid
+printf 'x' >> "$CANON"
+row anyone "tampered payload" "verifies with the public key" "ed25519" "$(openssl pkeyutl -verify -pubin -inkey "$PROJ/trusted-keys/$RKEY.pub" -rawin -in "$CANON" -sigfile "$SIGB" >/dev/null 2>&1 && printf valid || printf invalid)" invalid
+rm -f "$CANON" "$SIGB"
+
+row dev receipt "overwrite" "DAC 0444 in 0555" "$(try sudo -u dev bash -c "echo x > $RPATH")" denied
+row agentmd-runner receipt "overwrite" "DAC 0444 in 0555" "$(try sudo -u agentmd-runner bash -c "echo x > $RPATH")" denied
+row dev receipt "remove" "DAC 0555 directory" "$(try sudo -u dev rm -f "$RPATH")" denied
+row agentmd-runner receipt "remove" "DAC 0555 directory" "$(try sudo -u agentmd-runner rm -f "$RPATH")" denied
+row dev "trusted key" "replace" "DAC 0444 in 0555" "$(try sudo -u dev bash -c "echo x > $PROJ/trusted-keys/$RKEY.pub")" denied
+row dev receipts "add a receipt of their own" "DAC 0555 directory" "$(try sudo -u dev bash -c "echo x > $PROJ/receipts/worktree/999.json")" denied
+
+# A signed FAIL supersedes a signed PASS.
+rm -f /srv/flag
+EV2=$(evaluate_as dev)
+row dev evaluation "signed fail" "C4c issuance" "$(printf '%s' "$EV2" | jq -r .status)" authenticated_fail
+FSEQ=$(printf '%s' "$EV2" | jq -r .sequence)
+row root state "latest is the failure" "supersession" "$(jq -r '.scopes.worktree.last_terminal.sequence' "$STATE")" "$FSEQ"
+row root "earlier pass receipt" "still on disk and still signed" "history" "$([ -f "$PROJ/receipts/worktree/$RSEQ.json" ] && printf present || printf gone)" present
+row root "earlier pass receipt" "is not current" "state decides latest" "$([ "$(jq -r '.scopes.worktree.last_terminal.receipt.path' "$STATE")" = "$PROJ/receipts/worktree/$RSEQ.json" ] && printf current || printf "not-current")" not-current
+
+# identity_changed opens no key and publishes nothing. The workspace is changed
+# while a check is demonstrably executing, then the check is released, so the
+# divergence is certain rather than raced for.
+printf 'ok\n' > /srv/flag; chmod 0644 /srv/flag
+install -o dev -g dev -m 0644 /it/holdflag.toml /home/dev/repo/agent-md.toml
+enroll_project >/dev/null
+STATE=/var/lib/agent-md/projects/$PID/state.json
+PROJ=/var/lib/agent-md/projects/$PID
+rm -f /srv/running; touch /srv/hold
+EV3OUT=$(mktemp)
+( evaluate_as dev > "$EV3OUT" 2>/dev/null ) & EV3BG=$!
+for _ in $(seq 1 600); do [ -e /srv/running ] && break; sleep 0.1; done
+sudo -u dev bash -c 'printf "CHANGED\n" >> ~/repo/marker.txt'
+rm -f /srv/hold
+wait "$EV3BG" 2>/dev/null
+EV3=$(cat "$EV3OUT"); rm -f "$EV3OUT"
+row dev evaluation "identity changed before signing" "policy B" "$(printf '%s' "$EV3" | jq -r .status)" identity_changed
+row root receipt "published for identity_changed" "policy B" "$(printf '%s' "$EV3" | jq -r '.receipt | type')" null
+row root receipts "directory created at all" "policy B" "$(ls -A "$PROJ/receipts/worktree" 2>/dev/null | wc -l)" 0
+row root "trusted key" "published without signing" "policy B" "$(ls -A "$PROJ/trusted-keys" 2>/dev/null | wc -l)" 0
+
+sudo -u dev bash -c 'printf "ORIGINAL\n" > ~/repo/marker.txt'
 install -o dev -g dev -m 0644 /it/agent-md.toml /home/dev/repo/agent-md.toml
 enroll_project >/dev/null
 

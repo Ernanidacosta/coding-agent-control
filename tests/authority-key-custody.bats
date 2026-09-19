@@ -275,12 +275,21 @@ mode_of_path() { stat -c %a "$1"; }
   [[ "$output" != *"PRIVATE KEY"* ]]
 }
 
-@test "29 the private key never reaches a command line" {
-  # openssl writes the key through its own -out. If the key were ever produced
-  # on stdout and passed onward, it would be visible in a process listing.
-  run grep -nE 'genpkey.*(\$\(|`)' "$LIB"
+@test "29 private key material never reaches a command line" {
+  # openssl reads and writes the key through its own -inkey and -out, so the
+  # only thing that can appear in a process listing is the path. The material
+  # itself is never captured into a variable and never interpolated.
+  run grep -nE 'genpkey.*[$][(]' "$LIB"
   [ "$status" -ne 0 ]
-  run grep -n 'pkeyutl' "$LIB"
+
+  # No command substitution anywhere reads the private key into the shell.
+  run grep -nE '[$][(][^)]*(cat|head|tail|base64|xxd)[^)]*(private_key_path|[.]key)' "$LIB"
+  [ "$status" -ne 0 ]
+
+  # Every use of the private key path is either the accessor itself, a local
+  # declaration, an existence test, or an openssl flag that takes a path.
+  run bash -c "grep -n 'authority_private_key_path' '$LIB' \
+    | grep -vE 'authority_private_key_path[(][)]|local |priv=|-inkey|\\[ -f'"
   [ "$status" -ne 0 ]
 }
 
@@ -357,13 +366,16 @@ mode_of_path() { stat -c %a "$1"; }
   [ "$status" -ne 0 ]
 }
 
-@test "38 signing and receipts are still absent as capability" {
-  # The issuer's comments say it does none of this. The comments are not the
-  # evidence; the executable lines are.
-  #
-  # Sequence allocation arrived with the C4b state machine, so the issuer does
-  # mention it. Signing and receipt persistence did not.
-  run bash -c "grep -hvE '^[[:space:]]*#' '$ISSUER' | grep -nE 'receipt|signature|key_id'"
+@test "38 the private key is opened in exactly one place" {
+  # Signing arrived with C4c. What still matters for custody is that there is a
+  # single place the key is ever read, so the ordering guarantee around it only
+  # has to hold once.
+  run bash -c "grep -c 'pkeyutl -sign' '$LIB'"
+  [ "$output" = "1" ]
+  run bash -c "sed -n '/^authority_sign_canonical/,/^}/p' '$LIB' | grep -c 'authority_private_key_path'"
+  [ "$output" = "1" ]
+  # No other program reaches for it.
+  run bash -c "grep -lE 'pkeyutl -sign' '$ISSUER' '$RUNCHECK'"
   [ "$status" -ne 0 ]
 }
 

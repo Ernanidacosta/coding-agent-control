@@ -1085,8 +1085,11 @@ authority_publish_key() {
 # Nothing here signs, reads a key or writes a receipt. candidate_pass in this
 # file is an authority-side terminal result, not evidence and not a receipt.
 
-AUTHORITY_STATE_SCHEMA=2
+AUTHORITY_STATE_SCHEMA=3
 AUTHORITY_STATE_LEGACY_SCHEMA=7
+AUTHORITY_STATE_UNISSUED_SCHEMA=2
+AUTHORITY_RECEIPT_SCHEMA=1
+AUTHORITY_SIGNATURE_FORMAT=ed25519-openssl-rawin
 AUTHORITY_SCOPES="worktree staged"
 AUTHORITY_TERMINAL_STATUSES="candidate_pass candidate_fail identity_changed"
 
@@ -1166,8 +1169,22 @@ authority_state_validate() {
                   and (.last_terminal.scope | type) == "string"
                   and (.last_terminal.status | type) == "string"
                   and (.last_terminal.fingerprints | type) == "object"
+                  and (.last_terminal | has("receipt")) and (.last_terminal | has("key_id"))
+                  and ((.last_terminal.receipt | type) == "null"
+                       or ((.last_terminal.receipt | type) == "object"
+                           and (.last_terminal.receipt.path | type) == "string"
+                           and (.last_terminal.receipt.schema | type) == "number"))
+                  and ((.last_terminal.key_id | type) == "null"
+                       or ((.last_terminal.key_id | type) == "string"
+                           and (.last_terminal.key_id | length) == 64))
                   and .last_terminal.sequence < .next_sequence' >/dev/null 2>&1 <<<"$entry"; then
         printf '%s: last_terminal is malformed or not below next_sequence' "$scope"; return 1
+      fi
+      # An authenticated terminal names both the receipt and the key that
+      # signed it; one without the other is not a state this authority writes.
+      if ! jq -e '((.last_terminal.receipt | type) == "null")
+                  == ((.last_terminal.key_id | type) == "null")' >/dev/null 2>&1 <<<"$entry"; then
+        printf '%s: last_terminal names a receipt without a key, or the reverse' "$scope"; return 1
       fi
       local status; status=$(jq -r '.last_terminal.status' <<<"$entry")
       case " $AUTHORITY_TERMINAL_STATUSES " in
@@ -1189,12 +1206,36 @@ authority_state_validate() {
 # by any released code, so it is evidence of tampering or corruption, not of an
 # older version.
 authority_state_migrate() {
-  local json="$1"
+  local json="$1" migrated
+
+  # The pre-sequence state: schema 7 with both fields null, which is the only
+  # shape enrollment ever wrote before the sequence line existed.
   if [ "$(jq -r '.schema // empty' <<<"$json")" = "$AUTHORITY_STATE_LEGACY_SCHEMA" ] \
      && [ "$(jq -r 'has("scopes")' <<<"$json")" = false ] \
      && [ "$(jq -r '.pending | type' <<<"$json")" = null ] \
      && [ "$(jq -r '.last_terminal | type' <<<"$json")" = null ]; then
     authority_state_new_json
+    return 0
+  fi
+
+  # The sequence state that predates receipts. Its terminal results were real
+  # evaluations, so their sequences stay consumed and next_sequence carries
+  # forward untouched -- but they were never signed and no receipt exists for
+  # them, so they are migrated with receipt and key_id explicitly null.
+  #
+  # That null is the whole point of the migration: it is what stops a
+  # candidate_pass recorded before receipts existed from being read later as
+  # authenticated evidence. Becoming authenticated requires a new evaluation
+  # that actually signs something.
+  if [ "$(jq -r '.schema // empty' <<<"$json")" = "$AUTHORITY_STATE_UNISSUED_SCHEMA" ] \
+     && [ "$(jq -r '.scopes | type' <<<"$json")" = object ]; then
+    migrated=$(jq -c --argjson schema "$AUTHORITY_STATE_SCHEMA" '
+      .schema = $schema
+      | .scopes |= with_entries(
+          .value.last_terminal |= (
+            if . == null then null
+            else . + {receipt: null, key_id: null} end))' <<<"$json") || return 1
+    printf '%s' "$migrated"
     return 0
   fi
   return 1
@@ -1305,6 +1346,7 @@ authority_state_reserve() {
 # sequence was reserved.
 authority_state_commit_terminal() {
   local project_id="$1" scope="$2" status="$3" run_id="$4" fingerprints="$5"
+  local receipt="${6:-null}" key_id="${7:-null}"
   local json seq updated reason
   authority_scope_is_known "$scope" || { printf 'unknown scope %s' "$scope"; return 1; }
   case " $AUTHORITY_TERMINAL_STATUSES " in
@@ -1319,9 +1361,11 @@ authority_state_commit_terminal() {
     || { printf 'the reserved sequence belongs to a different run'; return 1; }
 
   updated=$(jq -c --arg s "$scope" --argjson seq "$seq" --arg run "$run_id" \
-    --arg status "$status" --argjson fp "$fingerprints" '
+    --arg status "$status" --argjson fp "$fingerprints" \
+    --argjson receipt "$receipt" --argjson key_id "$key_id" '
       .scopes[$s].last_terminal = {sequence: $seq, run_id: $run, scope: $s,
-                                   status: $status, fingerprints: $fp}
+                                   status: $status, fingerprints: $fp,
+                                   receipt: $receipt, key_id: $key_id}
       | .scopes[$s].pending = null' <<<"$json") \
     || { printf 'cannot compute the terminal transition'; return 1; }
 
@@ -1373,7 +1417,10 @@ authority_state_latest() {
     if (.scopes[$s].pending | type) != "null"
     then {state: "unresolved", pending: .scopes[$s].pending, suppressed: .scopes[$s].last_terminal}
     elif (.scopes[$s].last_terminal | type) != "null"
-    then {state: "terminal", terminal: .scopes[$s].last_terminal}
+    then {state: "terminal", terminal: .scopes[$s].last_terminal,
+          # A terminal recorded before receipts existed, or one that never
+          # published a receipt, names no receipt and is not evidence.
+          authenticated: ((.scopes[$s].last_terminal.receipt | type) != "null")}
     else {state: "none"} end' <<<"$json"
 }
 
@@ -1392,4 +1439,194 @@ authority_identity_fingerprints() {
      contract: {algorithm: "sha256", value: $c},
      control:  {algorithm: "sha256", value: $k},
      mechanism:{algorithm: "sha256", value: $m}}'
+}
+
+# --- Authenticated receipts --------------------------------------------------
+#
+# A receipt is the only artefact in this system that can later be shown to
+# something that did not watch the evaluation happen. Everything about how it is
+# built is therefore about one question: what exactly did the authority commit
+# to, and can a validator reconstruct those bytes without trusting anything but
+# the public key?
+#
+# Canonical bytes. The signed value is `jq -cS` over the payload with the
+# authentication envelope removed, with no trailing newline. That is this
+# project's canonical form, already used for every fingerprint; it is not
+# RFC 8785. A validator reproduces it with exactly the same expression.
+#
+# What is signed is everything that decides acceptance: who issued it, which
+# key, which project, workspace, scope and run, the sequence, the terminal
+# status, the four Phase A fingerprints, and the coverage. What is deliberately
+# not signed is command output, excerpts and timestamps -- output because it is
+# untrusted data the receipt should never carry authority for, timestamps
+# because freshness here is a sequence, not a clock, and signing one would
+# invite a validator to reason about time it cannot verify.
+#
+# checks[] carries command_identity, never the literal command. The command set
+# is already authenticated by the contract fingerprint, which covers the
+# contract manifest including each command string. Signing the literal too
+# would create a second source of truth that could drift from the first; a
+# validator instead recomputes sha256 over the contract's command for that check
+# and compares it with command_identity, which is deterministic and needs no
+# extra trust.
+
+authority_receipts_dir()   { printf '%s/%s/receipts/%s' "$(projects_dir)" "$1" "$2"; }
+authority_receipt_path()   { printf '%s/%s.json' "$(authority_receipts_dir "$1" "$2")" "$3"; }
+authority_trusted_keys_dir()  { printf '%s/%s/trusted-keys' "$(projects_dir)" "$1"; }
+authority_trusted_key_path()  { printf '%s/%s.pub' "$(authority_trusted_keys_dir "$1")" "$2"; }
+
+# The public vocabulary. The authority's own bookkeeping keeps candidate_pass
+# and candidate_fail because those describe an attempt it ran; a receipt states
+# a result to someone else, so it says pass or fail and nothing hedged.
+# identity_changed maps to no receipt at all.
+authority_receipt_status_for() {
+  case "$1" in
+    candidate_pass) printf 'pass' ;;
+    candidate_fail) printf 'fail' ;;
+    *) return 1 ;;
+  esac
+}
+
+# authority_resolve_signing_key
+# Read at signing time, not earlier, so that a key swapped or broken during the
+# evaluation is caught at the moment it would be used. Everything that makes the
+# key usable is rechecked here: the pointer's shape, custody of both files, and
+# that the published public key really is the one this key_id names.
+authority_resolve_signing_key() {
+  local id reason pub computed
+  id=$(authority_current_key_id) || { printf 'no issuer key is installed'; return 1; }
+  if ! reason=$(authority_key_custody_report "$id"); then
+    printf 'the issuer key is not in a usable state: %s' "$reason"; return 1
+  fi
+  pub=$(authority_public_key_path "$id")
+  computed=$(authority_key_id_from_public "$pub") || { printf 'the public key cannot be read'; return 1; }
+  [ "$computed" = "$id" ] || { printf 'the key material does not match the key id it is filed under'; return 1; }
+  printf '%s' "$id"
+}
+
+# authority_sign_canonical <payload-file> <key-id>
+# Prints the base64 signature on one line with no embedded newline.
+#
+# This is the only place the private key is opened. It is opened after every
+# descending hop has finished, after the checks, and after revalidation, so no
+# child process can ever exist while it is readable. openssl reads it through
+# -inkey; it is never an argument, an environment value or captured output.
+authority_sign_canonical() {
+  local payload="$1" id="$2" priv sig out
+  priv=$(authority_private_key_path "$id")
+  [ -f "$priv" ] || { printf 'the private key is absent'; return 1; }
+  sig=$(mktemp "${TMPDIR:-/tmp}/agent-md-sig.XXXXXX") || { printf 'cannot create a temporary file'; return 1; }
+  if ! openssl pkeyutl -sign -inkey "$priv" -rawin -in "$payload" -out "$sig" 2>/dev/null; then
+    rm -f "$sig"; printf 'the payload could not be signed'; return 1
+  fi
+  [ "$(wc -c < "$sig")" -eq 64 ] || { rm -f "$sig"; printf 'the signature is not an Ed25519 signature'; return 1; }
+  out=$(base64 -w0 < "$sig" 2>/dev/null || base64 < "$sig" | tr -d '\n')
+  rm -f "$sig"
+  printf '%s' "$out"
+}
+
+# authority_canonical_bytes <receipt-json-file>
+# The exact bytes the signature covers, for signing and for verification. The
+# authentication envelope is removed first, so a receipt always carries its own
+# recipe for reproducing what was signed.
+authority_canonical_bytes() {
+  jq -cS 'del(.authentication)' "$1" | tr -d '\n'
+}
+
+# authority_verify_receipt_signature <receipt-file> <public-key>
+# Provided so the round trip can be exercised. Nothing in the product validates
+# receipts yet; that arrives with the unprivileged validator.
+authority_verify_receipt_signature() {
+  local receipt="$1" pub="$2" payload sig value ok
+  value=$(jq -r '.authentication.value // empty' "$receipt") || return 1
+  [ -n "$value" ] || return 1
+  payload=$(mktemp "${TMPDIR:-/tmp}/agent-md-verify.XXXXXX") || return 1
+  sig=$(mktemp "${TMPDIR:-/tmp}/agent-md-vsig.XXXXXX") || { rm -f "$payload"; return 1; }
+  authority_canonical_bytes "$receipt" > "$payload"
+  if ! printf '%s' "$value" | base64 -d > "$sig" 2>/dev/null; then
+    rm -f "$payload" "$sig"; return 1
+  fi
+  if openssl pkeyutl -verify -pubin -inkey "$pub" -rawin -in "$payload" -sigfile "$sig" >/dev/null 2>&1; then
+    ok=0
+  else
+    ok=1
+  fi
+  rm -f "$payload" "$sig"
+  return "$ok"
+}
+
+# authority_publish_trusted_key <project-id> <key-id>
+# Copies the public key next to the project so a validator never needs to reach
+# into the key directory. The copy is only made after recomputing the key id
+# from the material itself: filing a key under a name is not evidence that the
+# name describes it.
+#
+# An existing entry is never overwritten. Byte-identical is a no-op; anything
+# else is a refusal, because a project's trusted key changing underneath its
+# receipts is exactly the substitution this whole design exists to prevent.
+authority_publish_trusted_key() {
+  local project_id="$1" id="$2" dir target src computed tmp dirmode parent
+  src=$(authority_public_key_path "$id")
+  [ -f "$src" ] || { printf 'the public key is absent'; return 1; }
+  computed=$(authority_key_id_from_public "$src") || { printf 'the public key cannot be read'; return 1; }
+  [ "$computed" = "$id" ] || { printf 'the public key does not hash to the key id'; return 1; }
+
+  dir=$(authority_trusted_keys_dir "$project_id")
+  target=$(authority_trusted_key_path "$project_id" "$id")
+  if [ -e "$target" ]; then
+    [ -L "$target" ] && { printf 'the published trusted key is a symlink'; return 1; }
+    if cmp -s "$src" "$target"; then return 0; fi
+    printf 'a different key is already published for this key id'; return 1
+  fi
+
+  parent=$(dirname "$dir")
+  dirmode=$(mode_of "$parent")
+  chmod u+w "$parent" 2>/dev/null || true
+  mkdir -p "$dir" 2>/dev/null || { chmod "$dirmode" "$parent" 2>/dev/null || true
+                                   printf 'cannot create the trusted key directory'; return 1; }
+  chmod u+w "$dir" 2>/dev/null || true
+  tmp=$(mktemp "$dir/.agent-md-key.XXXXXX") || { printf 'cannot stage the trusted key'; return 1; }
+  cat < "$src" > "$tmp" || { rm -f "$tmp"; printf 'cannot copy the trusted key'; return 1; }
+  chmod 0444 "$tmp" || { rm -f "$tmp"; printf 'cannot set the trusted key mode'; return 1; }
+  authority_fsync_path "$tmp" || { rm -f "$tmp"; printf 'cannot flush the trusted key'; return 1; }
+  mv -f "$tmp" "$target" || { rm -f "$tmp"; printf 'cannot publish the trusted key'; return 1; }
+  authority_fsync_path "$dir" || true
+  chmod 0555 "$dir" 2>/dev/null || true
+  [ -n "$dirmode" ] && chmod "$dirmode" "$parent" 2>/dev/null || true
+  return 0
+}
+
+# authority_publish_receipt <project-id> <scope> <sequence> <receipt-file>
+# Durable before the state that will point at it. An existing sequence is
+# refused rather than replaced: a receipt is history, and a sequence is issued
+# exactly once.
+authority_publish_receipt() {
+  local project_id="$1" scope="$2" seq="$3" src="$4" dir target tmp parent dirmode
+  authority_scope_is_known "$scope" || { printf 'unknown scope %s' "$scope"; return 1; }
+  case "$seq" in ''|*[!0-9]*) printf 'the sequence is not a number'; return 1 ;; esac
+
+  dir=$(authority_receipts_dir "$project_id" "$scope")
+  target=$(authority_receipt_path "$project_id" "$scope" "$seq")
+  parent="$(projects_dir)/$project_id"
+  dirmode=$(mode_of "$parent")
+  chmod u+w "$parent" 2>/dev/null || true
+  mkdir -p "$dir" 2>/dev/null || { chmod "$dirmode" "$parent" 2>/dev/null || true
+                                   printf 'cannot create the receipt directory'; return 1; }
+  chmod u+w "$dir" 2>/dev/null || true
+
+  if [ -e "$target" ]; then
+    chmod 0555 "$dir" 2>/dev/null || true
+    [ -n "$dirmode" ] && chmod "$dirmode" "$parent" 2>/dev/null || true
+    printf 'a receipt already exists for sequence %s' "$seq"; return 1
+  fi
+
+  tmp=$(mktemp "$dir/.agent-md-receipt.XXXXXX") || { printf 'cannot stage the receipt'; return 1; }
+  cat < "$src" > "$tmp" || { rm -f "$tmp"; printf 'cannot write the receipt'; return 1; }
+  chmod 0444 "$tmp" || { rm -f "$tmp"; printf 'cannot set the receipt mode'; return 1; }
+  authority_fsync_path "$tmp" || { rm -f "$tmp"; printf 'cannot flush the receipt'; return 1; }
+  mv -f "$tmp" "$target" || { rm -f "$tmp"; printf 'cannot publish the receipt'; return 1; }
+  authority_fsync_path "$dir" || { printf 'cannot flush the receipt directory'; return 1; }
+  chmod 0555 "$dir" 2>/dev/null || true
+  [ -n "$dirmode" ] && chmod "$dirmode" "$parent" 2>/dev/null || true
+  return 0
 }

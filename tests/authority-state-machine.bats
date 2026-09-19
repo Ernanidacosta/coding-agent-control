@@ -6,9 +6,9 @@
 #
 #   PASS n, then FAIL n+1  =>  PASS n is stale
 #
-# Nothing here signs, reads a key or writes a receipt. candidate_pass in the
-# state file is an authority-side terminal result; it is not evidence, and the
-# last tests in this file assert that no code treats it as any.
+# The state file keeps the authority's own vocabulary: candidate_pass and
+# candidate_fail describe the attempt it ran. The response and the receipt use
+# the public vocabulary, which is why the two differ throughout this file.
 
 load authority-helpers
 
@@ -34,6 +34,10 @@ setup() {
   EXEC_PATH="$(trusted_toolchain_path "$TOOLCHAIN")"
   export EXEC_PATH
   bash "$AUTHORITY" install --root "$ROOT" >/dev/null
+  # From C4c a terminal result is always signed, so an authority with no
+  # key cannot conclude one at all. That refusal is the point of the key
+  # tests; here it would only stop every other case from running.
+  bash "$AUTHORITY" install-key --root "$ROOT" >/dev/null
 }
 
 teardown() {
@@ -109,7 +113,7 @@ libcall() {
 
 @test "1 enrollment creates empty sequence lines for both scopes" {
   write_contract "cat marker.txt"; enroll
-  [ "$(jq -r '.schema' "$(state_file)")" = 2 ]
+  [ "$(jq -r '.schema' "$(state_file)")" = 3 ]
   [ "$(jq -r '.scopes.worktree.next_sequence' "$(state_file)")" = 1 ]
   [ "$(jq -r '.scopes.staged.next_sequence' "$(state_file)")" = 1 ]
   [ "$(jq -r '.scopes.worktree.pending' "$(state_file)")" = null ]
@@ -179,8 +183,8 @@ libcall() {
   write_contract "cat marker.txt"; enroll
   printf '{"schema":7,"last_terminal":null,"pending":null}\n' > "$(state_file)"
   run evaluate
-  [ "$(jq -r .status <<<"$output")" = candidate_pass ]
-  [ "$(jq -r '.schema' "$(state_file)")" = 2 ]
+  [ "$(jq -r .status <<<"$output")" = authenticated_pass ]
+  [ "$(jq -r '.schema' "$(state_file)")" = 3 ]
   [ "$(terminal_seq)" = 1 ]
   [ "$(jq -r '.scopes.staged.next_sequence' "$(state_file)")" = 1 ]
 }
@@ -212,12 +216,12 @@ libcall() {
 @test "12 PASS n then FAIL n+1 leaves the failure as the latest" {
   steerable_contract; enroll
   run evaluate
-  [ "$(jq -r .status <<<"$output")" = candidate_pass ]
+  [ "$(jq -r .status <<<"$output")" = authenticated_pass ]
   local pass_seq; pass_seq=$(terminal_seq)
 
   rm -f "$FLAG"
   run evaluate
-  [ "$(jq -r .status <<<"$output")" = candidate_fail ]
+  [ "$(jq -r .status <<<"$output")" = authenticated_fail ]
 
   [ "$(terminal_status)" = candidate_fail ]
   [ "$(terminal_seq)" -gt "$pass_seq" ]
@@ -410,19 +414,19 @@ wait_for() {
   [ "$(next_seq)" -gt "$before_next" ]
 }
 
-@test "24 E: candidate_fail becomes the terminal and clears the pending" {
+@test "24 E: a failure becomes the terminal and clears the pending" {
   write_contract "false"; enroll
   run evaluate
-  [ "$(jq -r .status <<<"$output")" = candidate_fail ]
+  [ "$(jq -r .status <<<"$output")" = authenticated_fail ]
   [ "$(terminal_status)" = candidate_fail ]
   [ "$(pending_seq)" = none ]
   [ "$(terminal_seq)" = "$(jq -r .sequence <<<"$output")" ]
 }
 
-@test "25 F: candidate_pass becomes the terminal and clears the pending" {
+@test "25 F: a pass becomes the terminal and clears the pending" {
   write_contract "cat marker.txt"; enroll
   run evaluate
-  [ "$(jq -r .status <<<"$output")" = candidate_pass ]
+  [ "$(jq -r .status <<<"$output")" = authenticated_pass ]
   [ "$(terminal_status)" = candidate_pass ]
   [ "$(pending_seq)" = none ]
 }
@@ -623,36 +627,53 @@ wait_for() {
   [ "$status" -ne 0 ]
 }
 
-@test "43 the state file carries no key material and no key id" {
+@test "43 the state file names a key but never carries key material" {
   write_contract "cat marker.txt"; enroll
   evaluate >/dev/null
-  run grep -qE 'BEGIN |PRIVATE|key_id|issuer-' "$(state_file)"
+  # From C4c the terminal names the key that signed its receipt. An identifier
+  # is not material: no PEM, no private bytes, no path to the private key.
+  run grep -qE 'BEGIN |PRIVATE|\.key' "$(state_file)"
   [ "$status" -ne 0 ]
+  [ "$(jq -r '.scopes.worktree.last_terminal.key_id | length' "$(state_file)")" = 64 ]
 }
 
-@test "44 no signature or receipt field entered the state" {
+@test "44 the state references a receipt but never duplicates the signature" {
   write_contract "cat marker.txt"; enroll
   evaluate >/dev/null
-  run bash -c "jq -r '[paths|join(\".\")]|join(\"\n\")' '$(state_file)' | grep -cE 'signature|receipt|signed|authenticated'"
+  # The receipt is the source of the signature; the state is the source of
+  # which sequence is current. Duplicating the signature would create a second
+  # copy that could disagree with the first.
+  run bash -c "jq -r '[paths|join(\".\")]|join(\"\n\")' '$(state_file)' | grep -cE 'signature|authentication'"
   [ "$output" = "0" ]
+  [ "$(jq -r '.scopes.worktree.last_terminal.receipt.path | length > 0' "$(state_file)")" = true ]
 }
 
-@test "45 candidate_pass is never described as evidence or a receipt" {
+@test "45 the state keeps the internal vocabulary while the response reports the public one" {
   write_contract "cat marker.txt"; enroll
   run evaluate
-  [ "$(jq -r .status <<<"$output")" = candidate_pass ]
-  [ "$(jq -r '.status | test("authentic|attested|verified|signed|receipt")' <<<"$output")" = false ]
-  [[ "$(jq -r .reason <<<"$output")" == *"not evidence"* ]]
+  [ "$(jq -r .status <<<"$output")" = authenticated_pass ]
+  # The authority's own record still describes the attempt it ran.
+  [ "$(terminal_status)" = candidate_pass ]
+  # And the receipt states the result in the public vocabulary.
+  [ "$(jq -r .status "$(jq -r '.scopes.worktree.last_terminal.receipt.path' "$(state_file)")")" = pass ]
 }
 
-@test "46 no key was created or read by an evaluation" {
+@test "46 an evaluation uses the installed key and publishes exactly one trusted key" {
   write_contract "cat marker.txt"; enroll
   evaluate >/dev/null
-  # C4b runs without a key at all; nothing in the flow requires one.
-  [ -z "$(ls -A "$ROOT/var/lib/agent-md/keys")" ]
+  local key_id; key_id=$(cat "$ROOT/var/lib/agent-md/keys/current")
+  [ "$(ls "$ROOT/var/lib/agent-md/projects/$PID/trusted-keys" | wc -l)" -eq 1 ]
+  [ -f "$ROOT/var/lib/agent-md/projects/$PID/trusted-keys/$key_id.pub" ]
+  # The key directory itself gained nothing: signing does not create keys.
+  [ "$(ls "$ROOT/var/lib/agent-md/keys"/issuer-*.key | wc -l)" -eq 1 ]
 }
 
-@test "47 the issuer declares no signing exit code or status" {
-  run grep -nE 'EX_[A-Z_]*SIGN|authenticated_pass|receipt_published' "$ISSUER"
+@test "47 signing is reachable only as the conclusion of an evaluation" {
+  # There is no entry point that signs anything on request.
+  run bash -c "grep -nE -- '--sign|sign-receipt|sign-run' '$ISSUER' '$AUTHORITY'"
   [ "$status" -ne 0 ]
+  # And the eligibility path, which answers without running anything, cannot
+  # reach the signing step.
+  run bash -c "sed -n '/^cmd_eligibility/,/^}/p' '$ISSUER' | grep -cE 'sign|receipt'"
+  [ "$output" = "0" ]
 }

@@ -50,6 +50,7 @@ EX_RUN_FAILED=16
 EX_BUDGET_EXHAUSTED=17
 EX_EVALUATION_IN_PROGRESS=18
 EX_STATE_UNUSABLE=19
+EX_SIGNING_UNAVAILABLE=21
 EX_INTERNAL=20
 
 RESPONSE_MODE=eligibility
@@ -67,7 +68,9 @@ ISSUER_SCOPE=""
 ISSUER_SEQUENCE=""
 ISSUER_TERMINAL_DONE=0
 ISSUER_RECOVERED=false
+ISSUER_KEY_ID=""
 RESPONSE_SEQUENCE=null
+RESPONSE_RECEIPT=null
 RESPONSE_RUN_ID=null
 RESPONSE_CALLER=null
 RESPONSE_SNAPSHOT=null
@@ -95,7 +98,8 @@ respond() {
       --argjson identity "$RESPONSE_IDENTITY" \
       --argjson contract "$RESPONSE_CONTRACT" --argjson mechanism "$RESPONSE_MECHANISM" \
       --argjson environment "$RESPONSE_ENVIRONMENT" --argjson checks "$RESPONSE_CHECKS" \
-      --argjson budget "$RESPONSE_BUDGET" --argjson sequence "$RESPONSE_SEQUENCE" '
+      --argjson budget "$RESPONSE_BUDGET" --argjson sequence "$RESPONSE_SEQUENCE" \
+      --argjson receipt "$RESPONSE_RECEIPT" '
         {protocol: $protocol, schema: $protocol, status: $status,
          reason_code: $reason_code, reason: $reason,
          project_id: $project_id, run_id: $run_id, workspace: $workspace, scope: $scope,
@@ -104,6 +108,10 @@ respond() {
          # far as reserving one. A reserved sequence is consumed whether or not
          # it ever becomes a terminal result, so this is not a receipt number.
          sequence: $sequence,
+         # Where the signed receipt for this evaluation was published, or null
+         # when this evaluation published none. The state file, not this field
+         # and not the file name, decides what is current.
+         receipt: $receipt,
          # The four fingerprints the core already understands, bound to this
          # run. A later signing step consumes exactly these; on their own they
          # are orchestration output and carry no authority.
@@ -519,12 +527,130 @@ issuer_identity_still_matches() {
 }
 
 issuer_commit_terminal() {
-  local status="$1" out
+  local status="$1" receipt="${2:-null}" key_id="${3:-null}" out
   if ! out=$(authority_state_commit_terminal "$ISSUER_PROJECT_ID" "$ISSUER_SCOPE" \
-               "$status" "$ISSUER_RUN_ID" "$RESPONSE_IDENTITY"); then
+               "$status" "$ISSUER_RUN_ID" "$RESPONSE_IDENTITY" "$receipt" "$key_id"); then
     refuse REFUSED_STATE_UNUSABLE "the terminal result could not be recorded: $out" "$EX_STATE_UNUSABLE"
   fi
   ISSUER_TERMINAL_DONE=1
+}
+
+# Nothing may still be running under the execution account when the key is about
+# to be opened. By this point every hop has been waited for, so this is an
+# assertion rather than a wait: if it ever fails, the ordering is wrong and
+# signing must not proceed.
+issuer_assert_no_live_child() {
+  local running
+  running=$(jobs -pr 2>/dev/null | wc -l)
+  [ "$running" -eq 0 ] || refuse REFUSED_INTERNAL \
+    "a child process was still running when signing was about to begin" "$EX_INTERNAL"
+}
+
+# The payload is built here, from the authority's own view of the run it just
+# executed. Nothing in it comes from the caller: the request carries only a
+# protocol, a scope and a workspace, and every field below is derived from the
+# enrollment, the prepared run or this process's own bookkeeping.
+issuer_build_payload() {
+  local status="$1" file="$2" receipt_status
+  receipt_status=$(authority_receipt_status_for "$status") || return 1
+  jq -n \
+    --argjson schema "$AUTHORITY_RECEIPT_SCHEMA" \
+    --argjson protocol "$ISSUER_PROTOCOL" \
+    --arg key_id "$ISSUER_KEY_ID" \
+    --argjson project_id "$RESPONSE_PROJECT_ID" \
+    --argjson workspace "$RESPONSE_WORKSPACE" \
+    --argjson scope "$RESPONSE_SCOPE" \
+    --arg run_id "$ISSUER_RUN_ID" \
+    --argjson sequence "$ISSUER_SEQUENCE" \
+    --arg status "$receipt_status" \
+    --argjson identity "$RESPONSE_IDENTITY" \
+    --argjson checks "$RESPONSE_CHECKS" '
+      {schema: $schema,
+       protocol: $protocol,
+       issuer: {kind: "local-authority", key_id: $key_id},
+       project_id: $project_id,
+       workspace: $workspace,
+       scope: $scope,
+       run_id: $run_id,
+       attempt: {sequence: $sequence},
+       status: $status,
+       fingerprints: $identity,
+       checks: [$checks[] | {name, requirement, origin, command_identity,
+                             execution, exit_code}]}' > "$file"
+}
+
+# The order here is the whole point and must not be rearranged:
+#
+#   revalidate -> resolve key -> sign -> publish key -> publish receipt
+#   -> commit state -> respond
+#
+# A crash anywhere before the state commit leaves the pending standing, so the
+# previous terminal stays suppressed and the new receipt is not current. A
+# receipt on disk that no state names has no authority at all.
+issuer_publish_signed_terminal() {
+  local status="$1" payload receipt signature reason receipt_path receipt_ref
+
+  issuer_assert_no_live_child
+
+  # Read at the moment of use. A key that was swapped or broken during the
+  # evaluation is caught here rather than assumed to still be the one enrolled.
+  if ! ISSUER_KEY_ID=$(authority_resolve_signing_key); then
+    reason="$ISSUER_KEY_ID"; ISSUER_KEY_ID=""
+    # Post-reservation infrastructure failure: the sequence stays burned and
+    # the exit path resolves the pending, so the previous terminal is preserved
+    # rather than superseded. An unsigned pass is never produced.
+    refuse REFUSED_SIGNING_UNAVAILABLE \
+      "the evaluation completed but no receipt could be signed: $reason" "$EX_SIGNING_UNAVAILABLE"
+  fi
+
+  payload=$(mktemp "${TMPDIR:-/tmp}/agent-md-payload.XXXXXX") \
+    || refuse REFUSED_INTERNAL "cannot stage the payload" "$EX_INTERNAL"
+  if ! issuer_build_payload "$status" "$payload"; then
+    rm -f "$payload"
+    refuse REFUSED_INTERNAL "the receipt payload could not be built" "$EX_INTERNAL"
+  fi
+
+  # Canonical bytes: jq -cS with no trailing newline. A validator reproduces
+  # these from the published receipt by deleting the authentication envelope.
+  local canonical
+  canonical=$(mktemp "${TMPDIR:-/tmp}/agent-md-canonical.XXXXXX") \
+    || { rm -f "$payload"; refuse REFUSED_INTERNAL "cannot stage the canonical payload" "$EX_INTERNAL"; }
+  jq -cS . "$payload" | tr -d '\n' > "$canonical"
+
+  if ! signature=$(authority_sign_canonical "$canonical" "$ISSUER_KEY_ID"); then
+    reason="$signature"; rm -f "$payload" "$canonical"
+    refuse REFUSED_SIGNING_UNAVAILABLE \
+      "the evaluation completed but the receipt could not be signed: $reason" "$EX_SIGNING_UNAVAILABLE"
+  fi
+
+  receipt=$(mktemp "${TMPDIR:-/tmp}/agent-md-receipt.XXXXXX") \
+    || { rm -f "$payload" "$canonical"; refuse REFUSED_INTERNAL "cannot stage the receipt" "$EX_INTERNAL"; }
+  jq -cS --arg fmt "$AUTHORITY_SIGNATURE_FORMAT" --arg key "$ISSUER_KEY_ID" --arg sig "$signature" \
+    '. + {authentication: {format: $fmt, key_id: $key, value: $sig}}' "$payload" > "$receipt"
+  rm -f "$payload" "$canonical"
+
+  # The key a validator needs, published next to the project before the receipt
+  # that depends on it exists.
+  if ! reason=$(authority_publish_trusted_key "$ISSUER_PROJECT_ID" "$ISSUER_KEY_ID"); then
+    rm -f "$receipt"
+    refuse REFUSED_SIGNING_UNAVAILABLE \
+      "the signing key could not be published for this project: $reason" "$EX_SIGNING_UNAVAILABLE"
+  fi
+
+  if ! reason=$(authority_publish_receipt "$ISSUER_PROJECT_ID" "$ISSUER_SCOPE" "$ISSUER_SEQUENCE" "$receipt"); then
+    rm -f "$receipt"
+    refuse REFUSED_SIGNING_UNAVAILABLE \
+      "the receipt could not be published: $reason" "$EX_SIGNING_UNAVAILABLE"
+  fi
+  rm -f "$receipt"
+
+  receipt_path=$(authority_receipt_path "$ISSUER_PROJECT_ID" "$ISSUER_SCOPE" "$ISSUER_SEQUENCE")
+  receipt_ref=$(jq -nc --arg p "$receipt_path" --argjson s "$AUTHORITY_RECEIPT_SCHEMA" \
+    '{path: $p, schema: $s}')
+  RESPONSE_RECEIPT="$receipt_ref"
+
+  # Only now does the receipt become the current result.
+  issuer_commit_terminal "$status" "$receipt_ref" "$(json_string "$ISSUER_KEY_ID")"
 }
 
 issuer_prepare_run() {
@@ -641,12 +767,18 @@ issuer_conclude() {
       "the checks completed but the workspace identity changed before the result could be concluded; this attempt supersedes the previous result and publishes nothing" \
       "$EX_CANDIDATE_FAIL"
   fi
+  # Both outcomes are authenticated. A failure is evidence too: it is what
+  # makes an earlier authenticated pass stale, so it has to be something a
+  # validator can verify rather than something it has to take on trust.
   if [ "$failed" -gt 0 ]; then
-    issuer_commit_terminal candidate_fail
-    respond candidate_fail CANDIDATE_FAIL "a required check did not return zero" "$EX_CANDIDATE_FAIL"
+    issuer_publish_signed_terminal candidate_fail
+    respond authenticated_fail AUTHENTICATED_FAIL \
+      "a required check did not return zero; the result is signed and supersedes any earlier one" \
+      "$EX_CANDIDATE_FAIL"
   fi
-  issuer_commit_terminal candidate_pass
-  respond candidate_pass CANDIDATE_PASS "every required check returned zero for this snapshot; this is orchestration output, not evidence" 0
+  issuer_publish_signed_terminal candidate_pass
+  respond authenticated_pass AUTHENTICATED_PASS \
+    "every required check returned zero for this snapshot and the result is signed" 0
 }
 
 cmd_evaluate() {
