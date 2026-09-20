@@ -656,10 +656,12 @@ JSON
   [ "$status" -ne 0 ]
 }
 
-@test "50 nothing in the product validates receipts yet" {
-  # C4c ends with the authority able to issue. Reuse arrives separately.
-  run bash -c "grep -rnE 'authority_verify_receipt_signature|trusted-keys' \
-    '$BATS_TEST_DIRNAME/../.claude/hooks' '$BATS_TEST_DIRNAME/../.agent-md/bin' 2>/dev/null"
+@test "50 nothing in the product reuses a receipt yet" {
+  # A validator exists from C4d, but reuse is a separate step: no hook and no
+  # verification entry point consults it, so an ordinary Stop still runs the
+  # full contract.
+  run bash -c "grep -rnE 'authority_verify_receipt_signature|trusted-keys|receipt-verify' \
+    '$BATS_TEST_DIRNAME/../.claude/hooks' '$BATS_TEST_DIRNAME/../.agent-md/bin' \
+    '$BATS_TEST_DIRNAME/../.codex/hooks' '$BATS_TEST_DIRNAME/../.githooks' 2>/dev/null"
   [ "$status" -ne 0 ]
-  [ ! -e "$BATS_TEST_DIRNAME/../examples/local-issuer/receipt-verify.sh" ]
 }

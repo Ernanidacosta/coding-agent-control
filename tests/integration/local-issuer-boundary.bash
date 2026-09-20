@@ -138,7 +138,7 @@ useradd -r -M -s /usr/sbin/nologin -d /var/lib/agent-md agentmd
 useradd -r -M -s /usr/sbin/nologin -d /nonexistent agentmd-runner
 
 install -d -o root -g root -m 0755 /usr/local/lib/agent-md
-for f in authority-lib.sh phase-a-source.sh agent-md-authority agent-md-issuer run-check; do
+for f in authority-lib.sh phase-a-source.sh agent-md-authority agent-md-issuer run-check receipt-verify.sh; do
   install -o root -g root -m 0755 "/src/$f" "/usr/local/lib/agent-md/$f"
 done
 install -d -o agentmd -g agentmd -m 0755 /var/lib/agent-md
@@ -556,6 +556,77 @@ row root receipts "directory created at all" "policy B" "$(ls -A "$PROJ/receipts
 row root "trusted key" "published without signing" "policy B" "$(ls -A "$PROJ/trusted-keys" 2>/dev/null | wc -l)" 0
 
 sudo -u dev bash -c 'printf "ORIGINAL\n" > ~/repo/marker.txt'
+
+header "8e. unprivileged receipt validation, real accounts"
+# Everything below runs as the ordinary developer: no sudo, no issuer, and no
+# access to the private key directory.
+install -o dev -g dev -m 0644 /it/flagged.toml /home/dev/repo/agent-md.toml
+enroll_project >/dev/null
+PROJ=/var/lib/agent-md/projects/$PID
+printf 'ok\n' > /srv/flag; chmod 0644 /srv/flag
+RV="sudo -u dev $LIB/receipt-verify.sh /home/dev/repo worktree"
+
+row dev "private key dir" "readable at all" "DAC 0700 agentmd" "$(try sudo -u dev ls /var/lib/agent-md/keys)" denied
+row dev validator "before any evaluation" "state is source of truth" "$($RV 2>/dev/null | jq -r .status)" no_evidence
+
+evaluate_as dev >/dev/null
+RVOUT=$($RV 2>/dev/null); RVRC=$?
+row dev validator "after an authenticated pass" "C4d validation" "$(printf '%s' "$RVOUT" | jq -r .status)" reusable_pass
+row dev validator "exit code for reusable" "only pass is zero" "$RVRC" 0
+row dev validator "authentic" "ed25519 under trusted key" "$(printf '%s' "$RVOUT" | jq -r .authentic)" true
+row dev validator "current" "state names this receipt" "$(printf '%s' "$RVOUT" | jq -r .current)" true
+row dev validator "applicable" "live identity matches" "$(printf '%s' "$RVOUT" | jq -r .applicable)" true
+row dev validator "control plane is one object" "stdout discipline" "$($RV 2>/dev/null | jq -s 'length')" 1
+
+# The validator must reach its verdict without any privileged path.
+STATE_BEFORE=$(sha256sum "$PROJ/state.json" | cut -d' ' -f1)
+$RV >/dev/null 2>&1
+row dev validator "mutates authority state" "read-only" "$([ "$(sha256sum "$PROJ/state.json" | cut -d' ' -f1)" = "$STATE_BEFORE" ] && printf no || printf yes)" no
+
+# Source changes make it stale, restoring makes it reusable again.
+sudo -u dev bash -c 'printf "MUTATED\n" >> ~/repo/marker.txt'
+row dev validator "source changed" "live fingerprint" "$($RV 2>/dev/null | jq -r .status)" stale
+row dev validator "still authentic when stale" "authentic != current" "$($RV 2>/dev/null | jq -r .authentic)" true
+sudo -u dev bash -c 'printf "ORIGINAL\n" > ~/repo/marker.txt'
+row dev validator "source restored" "live fingerprint" "$($RV 2>/dev/null | jq -r .status)" reusable_pass
+
+# A newer authenticated failure supersedes the earlier pass.
+PASS_SEQ=$(jq -r '.scopes.worktree.last_terminal.sequence' "$PROJ/state.json")
+rm -f /srv/flag
+evaluate_as dev >/dev/null
+row dev validator "after an authenticated failure" "supersession" "$($RV 2>/dev/null | jq -r .status)" current_fail
+row root "earlier pass receipt" "still present" "history" "$([ -f "$PROJ/receipts/worktree/$PASS_SEQ.json" ] && printf present || printf gone)" present
+row dev validator "earlier pass is not reusable" "state decides latest" "$($RV >/dev/null 2>&1; [ $? -eq 0 ] && printf reusable || printf "not-reusable")" not-reusable
+
+# A pending left by a crash suppresses everything underneath it.
+printf 'ok\n' > /srv/flag; chmod 0644 /srv/flag
+evaluate_as dev >/dev/null
+row dev validator "recovered to a pass" "C4d validation" "$($RV 2>/dev/null | jq -r .status)" reusable_pass
+install -o dev -g dev -m 0644 /it/slowflag.toml /home/dev/repo/agent-md.toml
+enroll_project >/dev/null
+PROJ=/var/lib/agent-md/projects/$PID
+printf 'ok\n' > /srv/flag; chmod 0644 /srv/flag
+evaluate_as dev >/dev/null
+rm -f /srv/running; touch /srv/slow
+( evaluate_as dev >/dev/null 2>&1 ) & RVBG=$!
+for _ in $(seq 1 600); do [ -e /srv/running ] && break; sleep 0.1; done
+RVPG=$(ps -o pgid= -p "$RVBG" 2>/dev/null | tr -d ' ')
+[ -n "$RVPG" ] && kill -9 -"$RVPG" 2>/dev/null
+kill -9 "$RVBG" 2>/dev/null; wait "$RVBG" 2>/dev/null
+rm -f /srv/slow
+row dev validator "pending after a crash" "pending suppresses" "$($RV 2>/dev/null | jq -r .status)" unresolved_pending
+row dev validator "pending is not reusable" "fail closed" "$($RV >/dev/null 2>&1; [ $? -eq 0 ] && printf reusable || printf "not-reusable")" not-reusable
+evaluate_as dev >/dev/null
+row dev validator "after recovery" "pending resolved" "$($RV 2>/dev/null | jq -r .status)" reusable_pass
+
+# A receipt is bound to its workspace: a copy elsewhere is not evidence.
+sudo -u dev cp -r /home/dev/repo /home/dev/clone
+row dev validator "a clone at another path" "workspace binding" "$(sudo -u dev $LIB/receipt-verify.sh /home/dev/clone worktree 2>/dev/null | jq -r .status)" no_evidence
+sudo -u dev rm -rf /home/dev/clone
+
+row dev validator "calls sudo internally" "unprivileged by construction" "$(grep -vE '^[[:space:]]*#' "$LIB/receipt-verify.sh" | grep -cE '\bsudo\b')" 0
+row dev validator "reads the private key" "unprivileged by construction" "$(grep -cE 'keys_dir|authority_private_key_path' "$LIB/receipt-verify.sh")" 0
+
 install -o dev -g dev -m 0644 /it/agent-md.toml /home/dev/repo/agent-md.toml
 enroll_project >/dev/null
 

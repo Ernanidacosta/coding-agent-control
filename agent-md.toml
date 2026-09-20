@@ -2,7 +2,7 @@
 # The filename remains a compatibility interface.
 
 [verify]
-lint = "shellcheck -x .claude/hooks/*.sh .codex/hooks/*.sh .agent-md/bin/*.sh examples/github-actions/*.sh examples/local-issuer/agent-md-authority examples/local-issuer/agent-md-issuer examples/local-issuer/authority-lib.sh examples/local-issuer/phase-a-source.sh examples/local-issuer/run-check tests/integration/local-issuer-boundary.bash .githooks/pre-commit .githooks/commit-msg install.sh"
+lint = "shellcheck -x .claude/hooks/*.sh .codex/hooks/*.sh .agent-md/bin/*.sh examples/github-actions/*.sh examples/local-issuer/agent-md-authority examples/local-issuer/agent-md-issuer examples/local-issuer/authority-lib.sh examples/local-issuer/phase-a-source.sh examples/local-issuer/receipt-verify.sh examples/local-issuer/run-check tests/integration/local-issuer-boundary.bash .githooks/pre-commit .githooks/commit-msg install.sh"
 test = "bash tests/run.sh"
 smoke = "bash tests/smoke.sh"
 independent = "./examples/github-actions/github-actions-independent.sh"

@@ -1,4 +1,4 @@
-# Local verification authority (slices C1-C4a)
+# Local verification authority (slices C1-C4d)
 
 This directory holds the optional component that decides which projects may
 ever receive an authenticated verification receipt. It is not required to use
@@ -12,10 +12,12 @@ as it does today and completion runs the full contract.
 | `run-check` | executes one approved check inside a sealed run |
 | `authority-lib.sh` | shared implementation all three programs source |
 | `phase-a-source.sh` | vendored Phase A identity functions, used unmodified |
+| `receipt-verify.sh` | unprivileged validation of a published receipt |
 
-Signing, sequence allocation and receipt persistence are later slices and are
-deliberately absent. There is an issuer key, and nothing uses it yet. Nothing
-here can produce a PASS.
+The authority can issue an authenticated receipt and validate one. What it
+still does not do is *reuse* one: no hook and no verification entry point
+consults the validator, so ordinary completion continues to run the full
+contract exactly as it does today.
 
 ## Why the authority lives outside the repository
 
@@ -475,15 +477,65 @@ A project whose verification depends on a developer-writable `.venv`,
 resources is incompatible with accelerated receipts in this version. Full
 verification stays available and unchanged.
 
+## Validating a receipt
+
+Validation is deliberately the unprivileged half. It runs as the ordinary
+developer, uses no `sudo`, never calls the issuer, never touches the private
+key directory and writes nothing:
+
+```bash
+./examples/local-issuer/receipt-verify.sh /path/to/repo worktree
+```
+
+It takes a workspace and a scope, and nothing else. There is no `--receipt`,
+`--sequence`, `--key` or `--project-id`: a caller that could name those could
+choose its own verdict. The receipt, its sequence, the project, the signing key
+and the expected fingerprints are all derived from the authority's own records.
+
+It prints exactly one JSON object on stdout and human diagnostics on stderr, so
+a future caller routes on structure rather than on prose. Exit 0 means
+`reusable_pass` and nothing else does:
+
+| status | exit | meaning |
+|---|---|---|
+| `reusable_pass` | 0 | authentic, current, and still applies |
+| `current_fail` | 3 | the current authenticated result is a failure |
+| `stale` | 4 | authentic, but the workspace has moved since |
+| `unresolved_pending` | 5 | an attempt is outstanding; nothing older is current |
+| `unauthenticated_terminal` | 6 | the current result predates receipts |
+| `invalid_receipt` | 7 | present but not trustworthy |
+| `no_evidence` | 8 | nothing has been issued for this workspace |
+| `unavailable` | 9 | the authority or its store cannot be read safely |
+| `insufficient_coverage` | 10 | the receipt does not cover what is required now |
+
+Three properties are reported separately because they fail for different
+reasons: `authentic` (the signature verifies under the project's trusted key),
+`current` (the authority's state names this exact receipt) and `applicable`
+(the live workspace still matches what was signed). A receipt can be authentic
+without being current, and current without being applicable; only all three
+make it reusable.
+
+Freshness comes from the state file, never from the filesystem. The newest file
+name, the highest sequence on disk and the most recent mtime decide nothing: an
+orphan receipt left by a crash is inert, and a pending reservation suppresses
+every older result underneath it.
+
+The validator reads the workspace through the vendored Phase A functions rather
+than the repository's own hooks. Deciding whether to trust a receipt by running
+code out of the repository that receipt describes would let the repository
+choose its verdict, and would run that code before any check could object.
+
 ## What these slices deliberately do not do
 
-There is a key, and nothing uses it. No signing, no receipt issuance, no
-sequence allocation, and no change to `verify.sh` or the Stop hook. An exit
-status of 0 from `run-check` means the command exited 0 and nothing more: it is
-not a receipt, not an attestation and not a PASS.
+No change to `verify.sh`, the Stop hook, the Codex wrapper or the pre-commit
+hook. Nothing in the product consults the validator, so a receipt currently
+changes nothing about how completion behaves; wiring that up is a separate
+step, deliberately taken after issuance and validation can each be reviewed on
+their own.
 
-The issuer and `run-check` do not read, name or open the key, and the test
-suite asserts that rather than trusting the comments that say so.
+An exit status of 0 from `run-check` still means the command exited 0 and
+nothing more. `run-check` does not read the key, the state or any receipt, and
+the test suite asserts that rather than trusting the comments that say so.
 
 ## Evaluating a project
 

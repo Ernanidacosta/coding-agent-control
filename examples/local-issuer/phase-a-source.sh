@@ -1377,3 +1377,31 @@ authority_pa_effective_control_requirements_json() {
       }
     '
 }
+
+# Ordinary coverage is calculated separately from external authority. A valid
+# local receipt can never satisfy the independent or approval arrays.
+authority_pa_verification_receipt_requirements_json() {
+  local contract="$1" control="$2"
+  jq -cn --argjson contract "$contract" --argjson control "$control" '
+    def ordinary_spec:
+      {name,requirement,origin,command};
+    ($control.effective.risk // null) as $risk
+    | ([ $contract.checks[] |
+          select(.name != "independent" and .name != "approval" and .requirement == "required") |
+          ordinary_spec ] | sort_by(.name,.command,.origin,.requirement)) as $required
+    | ([ $contract.checks[] |
+          select((.name == "runtime" or .name == "smoke") and .origin != "not configured") |
+          ordinary_spec ] | sort_by(.name,.command,.origin,.requirement)) as $runtime
+    | {
+        valid:($contract.valid == true and $control.valid == true),
+        required:$required,
+        any_of:(if (($risk == "medium" or $risk == "high" or $risk == "critical") and ($runtime | length) > 0)
+                then [{name:"runtime-or-smoke",checks:$runtime}]
+                else [] end),
+        external:([if ($risk == "high" or $risk == "critical") then "independent" else empty end,
+                   if ($risk == "critical" or
+                       ($control.risk_downgrade == "pending" and $control.downgrade_authority == "approval"))
+                   then "approval" else empty end] | unique)
+      }
+  '
+}
