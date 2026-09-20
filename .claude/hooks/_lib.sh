@@ -842,119 +842,27 @@ verification_receipt_identity_json() {
     '
 }
 
-# The authenticated payload is every receipt field except the provider-owned
-# authentication envelope. No field used for freshness, ordering, coverage, or
-# result interpretation is left unauthenticated.
-verification_receipt_payload_json() {
-  printf '%s' "$1" | jq -cS 'del(.authentication)' 2>/dev/null
-}
-
-verification_receipt_payload_fingerprint_json() {
-  local payload
-  payload=$(verification_receipt_payload_json "$1") || return 1
-  verification_receipt_json_fingerprint_json "$payload"
-}
-
-verification_receipt_state_json() {
-  local receipt="${1:-}" identity="${2:-}" provider_validation="${3:-}"
-  local payload_fingerprint coverage
-  if [ -z "$receipt" ]; then
-    jq -cn '{schema:1,state:"absent",reason:"no receipt was supplied"}'
-    return 0
-  fi
-  if ! printf '%s' "$receipt" | jq -e '
-    type == "object" and .schema == 1 and
-    (.scope == "worktree" or .scope == "staged") and
-    (.attempt | type == "object") and
-    (.attempt.issuer | type == "string" and length > 0) and
-    (.attempt.sequence | type == "string" and length > 0) and
-    (.fingerprints | type == "object") and
-    ([.fingerprints.source,.fingerprints.contract,.fingerprints.control,.fingerprints.mechanism] |
-      all(.[]; type == "object" and (.algorithm | type == "string" and length > 0) and
-                         (.value | type == "string" and length > 0))) and
-    (.status == "pass" or .status == "warn" or .status == "fail") and
-    (.checks | type == "array") and
-    (all(.checks[];
-      (.name | type == "string" and length > 0) and
-      (.requirement == "required" or .requirement == "optional") and
-      (.origin | type == "string" and length > 0) and
-      (.command | type == "string") and
-      (.status == "pass" or .status == "warn" or .status == "fail") and
-      (.exit_code | type == "number" and floor == .))) and
-    (.authentication | type == "object")
-  ' >/dev/null 2>&1; then
-    jq -cn '{schema:1,state:"invalid",reason:"receipt does not match protocol schema 1"}'
-    return 0
-  fi
-  if ! printf '%s' "$identity" | jq -e '
-    type == "object" and .valid == true and .schema == 1 and
-    (.scope == "worktree" or .scope == "staged") and
-    (.fingerprints | type == "object") and (.requirements.valid == true)
-  ' >/dev/null 2>&1; then
-    jq -cn '{schema:1,state:"invalid",reason:"current verification identity is unavailable or invalid"}'
-    return 0
-  fi
-  if ! printf '%s' "$provider_validation" | jq -e '
-    type == "object" and .schema == 1 and .status == "pass" and .authentic == true and
-    (.latest | type == "boolean") and
-    (.issuer | type == "string" and length > 0) and
-    (.sequence | type == "string" and length > 0) and
-    (.payload_fingerprint | type == "object")
-  ' >/dev/null 2>&1; then
-    jq -cn '{schema:1,state:"invalid",reason:"authority-separated authentication was not established"}'
-    return 0
-  fi
-
-  payload_fingerprint=$(verification_receipt_payload_fingerprint_json "$receipt") || {
-    jq -cn '{schema:1,state:"invalid",reason:"authenticated payload could not be canonicalized"}'
-    return 0
-  }
-  if ! jq -en --argjson receipt "$receipt" --argjson validation "$provider_validation" \
-    --argjson payload "$payload_fingerprint" '
-      $validation.issuer == $receipt.attempt.issuer and
-      $validation.sequence == $receipt.attempt.sequence and
-      $validation.payload_fingerprint == $payload
-    ' >/dev/null; then
-    jq -cn '{schema:1,state:"invalid",reason:"provider validation does not authenticate this receipt payload"}'
-    return 0
-  fi
-  if [ "$(printf '%s' "$provider_validation" | jq -r '.latest')" != true ]; then
-    jq -cn '{schema:1,state:"stale",reason:"receipt was superseded by a newer authenticated attempt"}'
-    return 0
-  fi
-  if ! jq -en --argjson receipt "$receipt" --argjson identity "$identity" '
-    $receipt.scope == $identity.scope and $receipt.fingerprints == $identity.fingerprints
-  ' >/dev/null; then
-    jq -cn '{schema:1,state:"stale",reason:"receipt fingerprints do not match the current state"}'
-    return 0
-  fi
-
-  coverage=$(jq -cn --argjson receipt "$receipt" --argjson identity "$identity" '
-    def passed($expected):
-      any($receipt.checks[];
-        .name == $expected.name and
-        .requirement == $expected.requirement and
-        .origin == $expected.origin and
-        .command == $expected.command and
-        .status == "pass" and .exit_code == 0);
-    ($identity.requirements) as $requirements
-    | ($requirements.required | map(select(passed(.) | not))) as $missing_required
-    | ($requirements.any_of | map(select(any(.checks[]; passed(.)) | not) | .name)) as $missing_groups
-    | {complete:($receipt.status != "fail" and
-                 ($missing_required | length) == 0 and
-                 ($missing_groups | length) == 0),
-       missing_required:$missing_required,
-       missing_groups:$missing_groups,
-       external:$requirements.external}
-  ')
-  if [ "$(printf '%s' "$coverage" | jq -r '.complete')" != true ]; then
-    jq -cn --argjson coverage "$coverage" \
-      '{schema:1,state:"insufficient-coverage",reason:"latest authenticated attempt does not cover every current ordinary requirement",coverage:$coverage}'
-    return 0
-  fi
-  jq -cn --argjson coverage "$coverage" \
-    '{schema:1,state:"authentic-current",reason:"latest authenticated attempt matches the current state and ordinary requirements",coverage:$coverage}'
-}
+# Phase A shipped a prototype receipt validator here. It is gone.
+#
+# It described a different artefact from the one the authority actually issues:
+# a string sequence instead of a number, an issuer string instead of a key, a
+# literal command in each check instead of the command identity, and a
+# pass/warn/fail result. Nothing in the product ever called it, and keeping it
+# would have left two receipt protocols with two acceptance paths, one of which
+# no issuer could satisfy and no validator enforced.
+#
+# The semantics it carried are the ones that survived: the four fingerprints,
+# the effective requirements (required, any_of, external) and the coverage rule
+# that a receipt never satisfies independent verification or human approval.
+# Those live in verification_receipt_requirements_json and the manifest
+# producers above, which the authority vendors verbatim and the parity suite
+# holds to this core byte for byte.
+#
+# Deciding whether a receipt may be reused is now one program,
+# examples/local-issuer/receipt-verify.sh, which runs unprivileged, verifies
+# the signature, asks the authority state what is current and revalidates the
+# live workspace. A caller consumes its structured result; it does not
+# reimplement any of this.
 
 risk_rank() {
   case "$1" in

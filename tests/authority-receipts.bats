@@ -660,8 +660,13 @@ JSON
   # A validator exists from C4d, but reuse is a separate step: no hook and no
   # verification entry point consults it, so an ordinary Stop still runs the
   # full contract.
-  run bash -c "grep -rnE 'authority_verify_receipt_signature|trusted-keys|receipt-verify' \
-    '$BATS_TEST_DIRNAME/../.claude/hooks' '$BATS_TEST_DIRNAME/../.agent-md/bin' \
-    '$BATS_TEST_DIRNAME/../.codex/hooks' '$BATS_TEST_DIRNAME/../.githooks' 2>/dev/null"
+  # Comments are stripped first: the core explains where the decision now lives,
+  # and naming a program is not calling one.
+  run bash -c "cat '$BATS_TEST_DIRNAME/../.claude/hooks/'*.sh \
+      '$BATS_TEST_DIRNAME/../.agent-md/bin/'*.sh \
+      '$BATS_TEST_DIRNAME/../.codex/hooks/'*.sh \
+      '$BATS_TEST_DIRNAME/../.githooks/'* 2>/dev/null \
+    | grep -vE '^[[:space:]]*#' \
+    | grep -nE 'authority_verify_receipt_signature|trusted-keys|receipt-verify'"
   [ "$status" -ne 0 ]
 }

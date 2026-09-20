@@ -39,9 +39,15 @@ AUTHORITY_SELF_DIR=$(cd "$(dirname "$(realpath "$0")")" && pwd)
 
 RECEIPT_VALIDATION_SCHEMA=1
 
-# Exactly one status means the receipt may be reused. Everything else is
-# non-zero, so a caller that cannot parse JSON still routes correctly, and
-# "could not tell" never reads as "yes".
+# Exit 0 means exactly one thing: the ordinary verification may be reused
+# because it passed for this state. It never means completion passed, because
+# a receipt cannot speak for independent verification, human approval or the
+# current Risk level; requires_external says what is still outstanding.
+#
+# An authenticated failure is reusable evidence too, but it keeps its own
+# non-zero code. A caller that routes on the exit status alone must never read
+# a failure as a success, and the structured result carries the distinction
+# for callers that read it properly.
 EX_REUSABLE=0
 EX_USAGE=2
 EX_CURRENT_FAIL=3
@@ -62,6 +68,8 @@ RV_RECEIPT_PATH=null
 RV_AUTHENTIC=false
 RV_CURRENT=false
 RV_APPLICABLE=false
+RV_EXTERNAL='[]'
+RV_ORDINARY=null
 
 usage() {
   cat <<'USAGE'
@@ -90,7 +98,8 @@ answer() {
     --argjson scope "$RV_SCOPE" --argjson sequence "$RV_SEQUENCE" \
     --argjson key_id "$RV_KEY_ID" --argjson receipt "$RV_RECEIPT_PATH" \
     --argjson authentic "$RV_AUTHENTIC" --argjson current "$RV_CURRENT" \
-    --argjson applicable "$RV_APPLICABLE" '
+    --argjson applicable "$RV_APPLICABLE" --argjson external "$RV_EXTERNAL" \
+    --argjson ordinary "$RV_ORDINARY" '
       {schema: $schema, status: $status, reason: $reason,
        # authentic: the signature verified under the project trusted key.
        # current:   the authority state names this exact receipt as latest.
@@ -99,7 +108,14 @@ answer() {
        # without being applicable; only all three make it reusable.
        authentic: $authentic, current: $current, applicable: $applicable,
        project_id: $project_id, workspace: $workspace, scope: $scope,
-       sequence: $sequence, key_id: $key_id, receipt: $receipt}'
+       sequence: $sequence, key_id: $key_id, receipt: $receipt,
+       # What the ordinary verification concluded for this exact state, once
+       # it is established that the receipt may speak for it at all: "pass",
+       # "fail", or null when no reusable conclusion was reached.
+       ordinary: $ordinary,
+       # Guarantees a receipt can never supply, as the current Risk level
+       # requires them. A consumer reads this rather than re-deriving Risk.
+       requires_external: $external}'
   [ "$exit_code" -eq 0 ] || printf '%s: %s\n' "$PROGRAM" "$reason" >&2
   exit "$exit_code"
 }
@@ -378,9 +394,12 @@ rv_check_bindings() {
 
   RV_CURRENT=true
 
-  # A current authenticated failure is a real answer, and it is not a pass.
-  [ "$(jq -r '.status' <<<"$RV_RECEIPT")" = fail ] && answer current_fail \
-    "the current authenticated result is a failure" "$EX_CURRENT_FAIL"
+  # A current authenticated failure is a real result and is reusable evidence,
+  # so it is not concluded here: it still has to survive the live identity and
+  # the structural coverage check before anyone may act on it. Re-running 861
+  # tests to rediscover a failure that is already signed and still current is
+  # exactly the waste this is meant to remove.
+  RV_ORDINARY=$(jq -c '.status' <<<"$RV_RECEIPT")
 }
 
 # --- live state --------------------------------------------------------------
@@ -462,14 +481,23 @@ rv_check_coverage() {
   [ "$(jq -r '.valid' <<<"$requirements")" = true ] || answer unavailable \
     "the current contract or control record is not usable" "$EX_UNAVAILABLE"
 
-  missing=$(jq -c --argjson receipt "$RV_RECEIPT" '
-    def digest_of($c): $c.command;
+  # Two modes, one rule. A pass must show every currently required check
+  # completed and green. A failure must show every currently required check
+  # completed against the same contract, whatever it exited with: that is what
+  # makes the recorded failure a statement about this contract rather than a
+  # stale or partial run. Either way the command identity must match, so a
+  # receipt cannot cover a check whose command has since changed.
+  local require_green=true
+  [ "$(jq -r '. // "null"' <<<"$RV_ORDINARY")" = fail ] && require_green=false
+
+  missing=$(jq -c --argjson receipt "$RV_RECEIPT" --argjson green "$require_green" '
     def covered($expected):
       any($receipt.checks[];
         .name == $expected.name and
         .requirement == $expected.requirement and
         .origin == $expected.origin and
-        .execution == "completed" and .exit_code == 0 and
+        .execution == "completed" and
+        (if $green then .exit_code == 0 else true end) and
         .command_identity == $expected.command_digest);
     [.required[] | select(covered(.) | not) | .name]' \
     <<<"$(rv_requirements_with_digests "$requirements")")
@@ -480,10 +508,11 @@ rv_check_coverage() {
       "$EX_INSUFFICIENT_COVERAGE"
   fi
 
-  groups=$(jq -c --argjson receipt "$RV_RECEIPT" '
+  groups=$(jq -c --argjson receipt "$RV_RECEIPT" --argjson green "$require_green" '
     def covered($expected):
       any($receipt.checks[];
-        .name == $expected.name and .execution == "completed" and .exit_code == 0 and
+        .name == $expected.name and .execution == "completed" and
+        (if $green then .exit_code == 0 else true end) and
         .command_identity == $expected.command_digest);
     [.any_of[] | select([.checks[] | select(covered(.))] | length == 0) | .name]' \
     <<<"$(rv_requirements_with_digests "$requirements")")
@@ -495,12 +524,15 @@ rv_check_coverage() {
   fi
 
   # Independent verification and human approval are never ordinary receipt
-  # checks. A receipt does not and must not satisfy them.
-  if [ "$(jq -r '.external | length' <<<"$requirements")" != 0 ]; then
-    answer insufficient_coverage \
-      "this risk level additionally requires $(jq -r '.external | join(" and ")' <<<"$requirements"), which a receipt cannot supply" \
-      "$EX_INSUFFICIENT_COVERAGE"
-  fi
+  # checks, and no receipt may ever stand in for them.
+  #
+  # They do not, however, invalidate the ordinary half. A receipt that covers
+  # the ordinary contract still spares those checks from running again; what it
+  # cannot do is finish the job. So the requirement is reported rather than
+  # used to refuse, and the exit status deliberately does not mean "completion
+  # passed" -- only "the ordinary verification may be reused". A caller reads
+  # requires_external to learn what it must still satisfy itself.
+  RV_EXTERNAL=$(jq -c '.external' <<<"$requirements")
 }
 
 # Annotates each expected check with the digest of its command, which is what
@@ -573,8 +605,14 @@ main() {
   rv_check_bindings
   rv_check_applicable
 
-  answer reusable_pass \
-    "an authenticated receipt is current and still applies to this workspace" "$EX_REUSABLE"
+  if [ "$(jq -r '. // "null"' <<<"$RV_ORDINARY")" = fail ]; then
+    answer current_fail \
+      "the ordinary verification failed for this exact state, and that result is authenticated and current" \
+      "$EX_CURRENT_FAIL"
+  fi
+  answer reusable_ordinary \
+    "the ordinary verification passed for this state and may be reused; any external guarantee is reported separately" \
+    "$EX_REUSABLE"
 }
 
 main "$@"

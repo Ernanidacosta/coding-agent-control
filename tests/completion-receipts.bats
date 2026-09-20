@@ -35,68 +35,6 @@ receipt_manifest() {
   bash -c '. .claude/hooks/_lib.sh; verification_receipt_source_manifest_json "$1"' _ "${1:-worktree}"
 }
 
-receipt_payload_fingerprint() {
-  bash -c '. .claude/hooks/_lib.sh; verification_receipt_payload_fingerprint_json "$1"' _ "$1"
-}
-
-make_pass_receipt() {
-  local identity="$1" sequence="${2:-1}" checks
-  checks=$(printf '%s' "$identity" | jq -c \
-    '[.requirements.required[] | . + {status:"pass",exit_code:0}]')
-  jq -cn --argjson identity "$identity" --arg sequence "$sequence" --argjson checks "$checks" '
-    {
-      schema:1,
-      scope:$identity.scope,
-      attempt:{issuer:"test-validator-fixture",sequence:$sequence},
-      fingerprints:$identity.fingerprints,
-      status:"pass",
-      checks:$checks,
-      authentication:{format:"fixture-only",value:"not-an-authority"}
-    }
-  '
-}
-
-make_failed_receipt() {
-  local identity="$1" sequence="${2:-2}" checks
-  checks=$(printf '%s' "$identity" | jq -c \
-    '[.requirements.required[] | . + {status:"fail",exit_code:1}]')
-  jq -cn --argjson identity "$identity" --arg sequence "$sequence" --argjson checks "$checks" '
-    {
-      schema:1,
-      scope:$identity.scope,
-      attempt:{issuer:"test-validator-fixture",sequence:$sequence},
-      fingerprints:$identity.fingerprints,
-      status:"fail",
-      checks:$checks,
-      authentication:{format:"fixture-only",value:"not-an-authority"}
-    }
-  '
-}
-
-# This fixture represents the already-trusted output of a future provider
-# validator. It is passed only to the pure state function and is never wired to
-# Stop or treated as a real issuer.
-provider_validation_fixture() {
-  local receipt="$1" latest="${2:-true}" payload
-  payload=$(receipt_payload_fingerprint "$receipt")
-  jq -cn --argjson receipt "$receipt" --argjson latest "$latest" --argjson payload "$payload" '
-    {
-      schema:1,
-      status:"pass",
-      authentic:true,
-      latest:$latest,
-      issuer:$receipt.attempt.issuer,
-      sequence:$receipt.attempt.sequence,
-      payload_fingerprint:$payload
-    }
-  '
-}
-
-receipt_state() {
-  bash -c '. .claude/hooks/_lib.sh; verification_receipt_state_json "$1" "$2" "$3"' \
-    _ "$1" "$2" "$3"
-}
-
 @test "worktree manifest and identity are deterministic" {
   first_manifest=$(receipt_manifest worktree)
   second_manifest=$(receipt_manifest worktree)
@@ -206,58 +144,69 @@ receipt_state() {
     "$(printf '%s' "$staged" | jq -r '.fingerprints.source.value')" ]
 }
 
-@test "receipt validator exposes all five protocol states" {
-  identity=$(receipt_identity worktree)
-  receipt=$(make_pass_receipt "$identity")
-  validation=$(provider_validation_fixture "$receipt" true)
+# The prototype receipt validator that used to live in the core is gone, and
+# these cases went with it. What they were really asserting is now asserted
+# against the artefact the authority actually issues, in
+# tests/authority-receipt-validation.bats:
+#
+#   five protocol states        -> the nine validator statuses, cases 1-2, 26-34
+#   payload tampering invalid   -> cases 8, 9, 13, 14
+#   newer failure supersedes    -> case 26
+#   no external Risk authority  -> case 43
+#
+# What remains here is the reconciliation itself: there must be exactly one
+# receipt protocol, and no second acceptance path.
 
-  [ "$(receipt_state '' "$identity" '' | jq -r '.state')" = absent ]
-  [ "$(receipt_state '{}' "$identity" '{}' | jq -r '.state')" = invalid ]
-  [ "$(receipt_state "$receipt" "$identity" '' | jq -r '.state')" = invalid ]
-  [ "$(receipt_state "$receipt" "$identity" "$validation" | jq -r '.state')" = authentic-current ]
-
-  printf changed > src/app.sh
-  changed_identity=$(receipt_identity worktree)
-  [ "$(receipt_state "$receipt" "$changed_identity" "$validation" | jq -r '.state')" = stale ]
-
-  empty_receipt=$(printf '%s' "$receipt" | jq -c '.checks = []')
-  empty_validation=$(provider_validation_fixture "$empty_receipt" true)
-  [ "$(receipt_state "$empty_receipt" "$identity" "$empty_validation" | jq -r '.state')" = insufficient-coverage ]
+@test "the core carries no second receipt validator" {
+  # A prototype that nothing called was still a second protocol: it described a
+  # different artefact and would have accepted receipts no issuer can produce.
+  local f
+  for f in verification_receipt_state_json verification_receipt_payload_json \
+           verification_receipt_payload_fingerprint_json; do
+    run grep -n "^$f() {" "$BATS_TEST_DIRNAME/../.claude/hooks/_lib.sh"
+    [ "$status" -ne 0 ]
+  done
 }
 
-@test "payload tampering is invalid even when state fingerprints still match" {
-  identity=$(receipt_identity worktree)
-  receipt=$(make_pass_receipt "$identity")
-  validation=$(provider_validation_fixture "$receipt" true)
-  tampered=$(printf '%s' "$receipt" | jq -c '.checks[0].exit_code = 7')
-
-  result=$(receipt_state "$tampered" "$identity" "$validation")
-  printf '%s' "$result" | jq -e '
-    .state == "invalid" and (.reason | contains("does not authenticate"))
-  ' >/dev/null
+@test "the core offers no path that accepts a receipt" {
+  # Nothing in the core decides that a receipt may be reused. That decision has
+  # exactly one implementation, and it is not here.
+  run bash -c "grep -vE '^[[:space:]]*#' '$BATS_TEST_DIRNAME/../.claude/hooks/_lib.sh' \
+    | grep -nE 'authentic-current|insufficient-coverage|pkeyutl|reusable_pass'"
+  [ "$status" -ne 0 ]
 }
 
-@test "latest authenticated failure supersedes an earlier pass for the same identity" {
-  identity=$(receipt_identity worktree)
-  old_pass=$(make_pass_receipt "$identity" 1)
-  old_validation=$(provider_validation_fixture "$old_pass" false)
-  latest_failure=$(make_failed_receipt "$identity" 2)
-  failure_validation=$(provider_validation_fixture "$latest_failure" true)
+@test "the semantics the prototype carried are still here and still shared" {
+  # Removing the prototype must not have removed the rules. The effective
+  # requirements, the four fingerprints and the external-authority rule stay in
+  # the core, and the authority vendors them verbatim.
+  run bash -c '. .claude/hooks/_lib.sh; verification_receipt_identity_json worktree | jq -e "
+    .valid == true and
+    (.fingerprints | keys | sort) == [\"contract\",\"control\",\"mechanism\",\"source\"] and
+    (.requirements | has(\"required\") and has(\"any_of\") and has(\"external\"))"'
+  [ "$status" -eq 0 ]
 
-  [ "$(receipt_state "$old_pass" "$identity" "$old_validation" | jq -r '.state')" = stale ]
-  [ "$(receipt_state "$latest_failure" "$identity" "$failure_validation" | jq -r '.state')" = insufficient-coverage ]
+  # Byte-for-byte the same rule in the vendored copy the validator uses.
+  local core vendored
+  # Anchored to the repository: these cases run inside a temporary fixture repo.
+  local repo="$BATS_TEST_DIRNAME/.."
+  core=$(sed -n '/^verification_receipt_requirements_json() {/,/^}/p' \
+    "$repo/.claude/hooks/_lib.sh" | tail -n +2)
+  vendored=$(sed -n '/^authority_pa_verification_receipt_requirements_json() {/,/^}/p' \
+    "$repo/examples/local-issuer/phase-a-source.sh" | tail -n +2)
+  [ -n "$core" ]
+  [ "$core" = "$vendored" ]
 }
 
-@test "ordinary authentic-current receipt does not claim external Risk authority" {
-  sed -i 's/risk = "low"/risk = "high"/' .project-control.toml
-  identity=$(receipt_identity worktree)
-  receipt=$(make_pass_receipt "$identity")
-  validation=$(provider_validation_fixture "$receipt" true)
-  result=$(receipt_state "$receipt" "$identity" "$validation")
-
-  printf '%s' "$result" | jq -e '
-    .state == "authentic-current" and .coverage.external == ["independent"]
-  ' >/dev/null
+@test "a receipt never satisfies independent verification or human approval" {
+  # The rule the prototype encoded, asserted where it now lives.
+  run bash -c '. .claude/hooks/_lib.sh
+    contract=$(effective_verification_contract_json worktree)
+    control=$(effective_control_requirements_json worktree)
+    verification_receipt_requirements_json "$contract" "$control" \
+      | jq -e "(.required | map(.name) | index(\"independent\")) == null
+               and (.required | map(.name) | index(\"approval\")) == null"'
+  [ "$status" -eq 0 ]
 }
 
 @test "Stop ignores executor-written receipt and keeps full verification fallback" {

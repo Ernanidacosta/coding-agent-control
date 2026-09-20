@@ -108,23 +108,29 @@ rewrite_state() {
 @test "1 a current authenticated pass is reusable" {
   evaluate >/dev/null
   run verify
-  [ "$(jq -r .status <<<"$output")" = reusable_pass ]
+  [ "$(jq -r .status <<<"$output")" = reusable_ordinary ]
   [ "$(jq -r .authentic <<<"$output")" = true ]
   [ "$(jq -r .current <<<"$output")" = true ]
   [ "$(jq -r .applicable <<<"$output")" = true ]
   [ "$(verify_rc)" -eq 0 ]
 }
 
-@test "2 a current authenticated failure is not reusable" {
+@test "2 a current authenticated failure is reusable negative evidence" {
   rm -f "$FLAG"
   evaluate >/dev/null || true
   run verify
   [ "$(jq -r .status <<<"$output")" = current_fail ]
+  [ "$(jq -r .ordinary <<<"$output")" = fail ]
+  # It survived the same conditions a pass must survive, which is what makes
+  # re-running the ordinary checks pointless.
   [ "$(jq -r .authentic <<<"$output")" = true ]
+  [ "$(jq -r .current <<<"$output")" = true ]
+  [ "$(jq -r .applicable <<<"$output")" = true ]
+  # Reusable, but never mistakable for a pass by exit status alone.
   [ "$(verify_rc)" -ne 0 ]
 }
 
-@test "3 only reusable_pass exits zero" {
+@test "3 only a reusable pass exits zero" {
   evaluate >/dev/null
   [ "$(verify_rc)" -eq 0 ]
   printf 'MUTATED\n' > "$WS/marker.txt"
@@ -177,9 +183,9 @@ rewrite_state() {
   evaluate >/dev/null
   rewrite_receipt 1 '.status = "pass" | .run_id = .run_id'
   # A no-op rewrite keeps it valid; a real change must not.
-  [ "$(verify_status)" = reusable_pass ]
+  [ "$(verify_status)" = reusable_ordinary ]
   rewrite_receipt 1 '.attempt.sequence = 1 | .workspace = .workspace + ""'
-  [ "$(verify_status)" = reusable_pass ]
+  [ "$(verify_status)" = reusable_ordinary ]
   rewrite_receipt 1 '.checks[0].exit_code = 0 | .protocol = 2'
   [ "$(verify_status)" = invalid_receipt ]
 }
@@ -229,7 +235,7 @@ rewrite_state() {
   chmod 0000 "$KEYS"
   run verify
   chmod 0700 "$KEYS"
-  [ "$(jq -r .status <<<"$output")" = reusable_pass ]
+  [ "$(jq -r .status <<<"$output")" = reusable_ordinary ]
 }
 
 # --- filesystem trust --------------------------------------------------------
@@ -342,7 +348,7 @@ rewrite_state() {
 
 @test "27 a pending reservation suppresses an otherwise perfect pass" {
   evaluate >/dev/null
-  [ "$(verify_status)" = reusable_pass ]
+  [ "$(verify_status)" = reusable_ordinary ]
   unseal
   bash -c ". '$LIB'; ROOT='$ROOT'; PROGRAM=t; authority_state_reserve '$PID' worktree crash-run" >/dev/null
   seal
@@ -359,7 +365,7 @@ rewrite_state() {
   [ "$(verify_status)" = unresolved_pending ]
   evaluate >/dev/null
   run verify
-  [ "$(jq -r .status <<<"$output")" = reusable_pass ]
+  [ "$(jq -r .status <<<"$output")" = reusable_ordinary ]
 }
 
 @test "29 an orphan receipt is never adopted" {
@@ -382,7 +388,7 @@ rewrite_state() {
   local newest; newest=$(jq -r '.scopes.worktree.last_terminal.sequence' "$(state_file)")
   [ "$newest" -gt "$orphan" ]
   run verify
-  [ "$(jq -r .status <<<"$output")" = reusable_pass ]
+  [ "$(jq -r .status <<<"$output")" = reusable_ordinary ]
   [ "$(jq -r .sequence <<<"$output")" = "$newest" ]
   [ -f "$(receipt_of "$orphan")" ]
 }
@@ -413,7 +419,7 @@ rewrite_state() {
   seal
   run verify
   [ "$(jq -r .sequence <<<"$output")" = "$current" ]
-  [ "$(jq -r .status <<<"$output")" = reusable_pass ]
+  [ "$(jq -r .status <<<"$output")" = reusable_ordinary ]
 }
 
 @test "33 a state naming a receipt outside the receipt store is refused" {
@@ -450,7 +456,7 @@ rewrite_state() {
   printf 'MUTATED\n' > "$WS/marker.txt"
   [ "$(verify_status)" = stale ]
   printf 'ORIGINAL\n' > "$WS/marker.txt"
-  [ "$(verify_status)" = reusable_pass ]
+  [ "$(verify_status)" = reusable_ordinary ]
 }
 
 @test "37 a changed contract makes the receipt stale" {
@@ -497,7 +503,7 @@ rewrite_state() {
 
 @test "42 a check whose command identity does not match is not coverage" {
   evaluate >/dev/null
-  [ "$(verify_status)" = reusable_pass ]
+  [ "$(verify_status)" = reusable_ordinary ]
   # Changing the command changes both the contract fingerprint and the expected
   # identity, so the receipt stops applying.
   printf '[verify]\ntest = "cat %s "\n\n[verify.policy]\nrequired = ["test"]\ntimeout_seconds = 30\ntotal_timeout_seconds = 120\n' \
@@ -506,15 +512,15 @@ rewrite_state() {
   [ "$(jq -r .status <<<"$output")" = stale ]
 }
 
-@test "43 independent and approval are never satisfied by a receipt" {
+@test "43 independent and approval are reported, never satisfied" {
   evaluate >/dev/null
-  [ "$(verify_status)" = reusable_pass ]
-  # Raising the risk to critical adds external requirements a receipt cannot
-  # supply. The contract change makes it stale first, which is also correct;
-  # what matters is that it never becomes reusable.
+  [ "$(verify_status)" = reusable_ordinary ]
+  # Raising the risk changes the control fingerprint, so the existing receipt
+  # goes stale before anything else is considered. A receipt cannot outlive the
+  # Risk level it was issued under.
   printf 'schema = 1\nrisk = "critical"\n' > "$WS/.project-control.toml"
   run verify
-  [ "$(jq -r .status <<<"$output")" != reusable_pass ]
+  [ "$(jq -r .status <<<"$output")" = stale ]
   [ "$(verify_rc)" -ne 0 ]
 }
 
@@ -625,7 +631,7 @@ authority_state_write|authority_publish_receipt|authority_publish_trusted_key|\
   evaluate >/dev/null
   chmod -R a-w "$PROJ" 2>/dev/null || true
   run verify
-  [ "$(jq -r .status <<<"$output")" = reusable_pass ]
+  [ "$(jq -r .status <<<"$output")" = reusable_ordinary ]
   chmod -R u+w "$PROJ" 2>/dev/null || true
 }
 
@@ -635,4 +641,164 @@ authority_state_write|authority_publish_receipt|authority_publish_trusted_key|\
   run verify
   [ "$(jq -r .status <<<"$output")" = unavailable ]
   [ "$(verify_rc)" -ne 0 ]
+}
+
+# --- C4e reconciliation ------------------------------------------------------
+
+@test "57 authenticated v1 is the only receipt protocol the product knows" {
+  # The Phase A prototype validator is gone from the core, so there is no
+  # second shape a receipt could be accepted in.
+  local lib="$BATS_TEST_DIRNAME/../.claude/hooks/_lib.sh"
+  run grep -nE '^verification_receipt_(state|payload|payload_fingerprint)_json\(\)' "$lib"
+  [ "$status" -ne 0 ]
+  run bash -c "grep -vE '^[[:space:]]*#' '$lib' | grep -nE 'authentic-current|insufficient-coverage'"
+  [ "$status" -ne 0 ]
+}
+
+@test "58 the validator is the single acceptance path" {
+  # Exactly one program decides reuse, and nothing else verifies a signature.
+  run bash -c "grep -rlE 'pkeyutl -verify' \
+    '$BATS_TEST_DIRNAME/../.claude' '$BATS_TEST_DIRNAME/../.codex' \
+    '$BATS_TEST_DIRNAME/../.agent-md' '$BATS_TEST_DIRNAME/../.githooks' 2>/dev/null"
+  [ "$status" -ne 0 ]
+}
+
+@test "59 every status is distinct and only reusable_ordinary exits zero" {
+  # The consumer routes on these, so they must not collapse into each other.
+  local s
+  for s in reusable_ordinary current_fail stale unresolved_pending \
+           unauthenticated_terminal invalid_receipt no_evidence unavailable \
+           insufficient_coverage; do
+    run grep -c "answer $s " "$VERIFY"
+    [ "$output" -ge 1 ]
+  done
+  # One exit code per meaning, and zero reserved for reuse alone.
+  run bash -c "grep -oE 'EX_[A-Z_]+=[0-9]+' '$VERIFY' | sort -u | wc -l"
+  [ "$output" -ge 9 ]
+  run bash -c "grep -oE 'EX_[A-Z_]+=0$' '$VERIFY'"
+  [ "$output" = "EX_REUSABLE=0" ]
+}
+
+@test "60 a tampered receipt is reported differently from an absent one" {
+  # An absence and an adulteration are different events; a consumer that warns
+  # on one and not the other needs them distinguishable.
+  evaluate >/dev/null
+  rewrite_receipt 1 '.authentication.value = "AAAA" + (.authentication.value[4:])'
+  local tampered; tampered=$(verify_status)
+  [ "$tampered" = invalid_receipt ]
+
+  # Same project, no receipt at all.
+  chmod -R u+w "$PROJ" 2>/dev/null || true
+  rm -rf "$PROJ/receipts"
+  jq -c '.scopes.worktree.last_terminal = null' "$(state_file)" > "$(state_file).t" \
+    && mv "$(state_file).t" "$(state_file)"
+  seal
+  [ "$(verify_status)" = no_evidence ]
+  [ "$tampered" != "$(verify_status)" ]
+}
+
+@test "61 coverage compares command identity against the current contract" {
+  evaluate >/dev/null
+  [ "$(verify_status)" = reusable_ordinary ]
+  # The receipt carries a digest, never the literal command.
+  run jq -e '.checks | all(.[]; has("command_identity") and (has("command") | not))' "$(receipt_of 1)"
+  [ "$status" -eq 0 ]
+  # And that digest is the digest of the command the contract declares.
+  local expected actual
+  expected=$(printf '%s' "cat $FLAG" | sha256sum | cut -d' ' -f1)
+  actual=$(jq -r '.checks[] | select(.name=="test") | .command_identity' "$(receipt_of 1)")
+  [ "$expected" = "$actual" ]
+}
+
+@test "62 external guarantees are reported without blocking ordinary reuse" {
+  evaluate >/dev/null
+  run verify
+  [ "$(jq -r .status <<<"$output")" = reusable_ordinary ]
+  [ "$(jq -r .ordinary <<<"$output")" = pass ]
+  [ "$(jq -r '.requires_external | type' <<<"$output")" = array ]
+  [ "$(jq -r '.requires_external | length' <<<"$output")" = 0 ]
+  [ "$(verify_rc)" -eq 0 ]
+}
+
+@test "62b a risk that requires independent still permits ordinary reuse" {
+  # The receipt is issued while the risk already requires independent evidence.
+  printf 'schema = 1\nrisk = "high"\n' > "$WS/.project-control.toml"
+  git -C "$WS" add -f .project-control.toml >/dev/null 2>&1
+  git -C "$WS" commit -qm "high risk" >/dev/null 2>&1
+  evaluate >/dev/null
+  run verify
+  [ "$(jq -r .status <<<"$output")" = reusable_ordinary ]
+  [ "$(jq -r .ordinary <<<"$output")" = pass ]
+  [ "$(jq -r '.requires_external | index("independent")' <<<"$output")" != null ]
+  # Exit 0 licenses reusing the ordinary half, never completion as a whole.
+  [ "$(verify_rc)" -eq 0 ]
+}
+
+@test "62c a critical risk reports both external guarantees" {
+  printf 'schema = 1\nrisk = "critical"\n' > "$WS/.project-control.toml"
+  git -C "$WS" add -f .project-control.toml >/dev/null 2>&1
+  git -C "$WS" commit -qm "critical risk" >/dev/null 2>&1
+  evaluate >/dev/null
+  run verify
+  [ "$(jq -r .status <<<"$output")" = reusable_ordinary ]
+  [ "$(jq -r '.requires_external | sort | join(",")' <<<"$output")" = "approval,independent" ]
+}
+
+@test "62d a failure also reports what remains outstanding" {
+  printf 'schema = 1\nrisk = "high"\n' > "$WS/.project-control.toml"
+  git -C "$WS" add -f .project-control.toml >/dev/null 2>&1
+  git -C "$WS" commit -qm "high risk" >/dev/null 2>&1
+  rm -f "$FLAG"
+  evaluate >/dev/null || true
+  run verify
+  [ "$(jq -r .status <<<"$output")" = current_fail ]
+  [ "$(jq -r '.requires_external | index("independent")' <<<"$output")" != null ]
+}
+
+@test "62e a stale failure is not reusable as a current failure" {
+  rm -f "$FLAG"
+  evaluate >/dev/null || true
+  [ "$(verify_status)" = current_fail ]
+  printf 'MUTATED\n' > "$WS/marker.txt"
+  run verify
+  [ "$(jq -r .status <<<"$output")" = stale ]
+  [ "$(jq -r .applicable <<<"$output")" = false ]
+}
+
+@test "63 a receipt never stands in for independent verification" {
+  # The rule, asserted at the layer that enforces it.
+  run bash -c ". '$LIB'; . '$BATS_TEST_DIRNAME/../examples/local-issuer/phase-a-source.sh'
+    contract='{\"valid\":true,\"checks\":[{\"name\":\"test\",\"requirement\":\"required\",\"origin\":\"configured\",\"command\":\"true\"}]}'
+    control='{\"valid\":true,\"effective\":{\"risk\":\"critical\"},\"risk_downgrade\":\"none\",\"downgrade_authority\":\"none\"}'
+    authority_pa_verification_receipt_requirements_json \"\$contract\" \"\$control\" \
+      | jq -e '(.external | sort) == [\"approval\",\"independent\"]'"
+  [ "$status" -eq 0 ]
+}
+
+@test "64 a Risk change makes an existing receipt stale before coverage is judged" {
+  evaluate >/dev/null
+  [ "$(verify_status)" = reusable_ordinary ]
+  printf 'schema = 1\nrisk = "high"\n' > "$WS/.project-control.toml"
+  run verify
+  # The control fingerprint moved, so it never reaches the coverage question.
+  [ "$(jq -r .status <<<"$output")" = stale ]
+  [ "$(jq -r .authentic <<<"$output")" = true ]
+  [ "$(jq -r .applicable <<<"$output")" = false ]
+}
+
+@test "65 validation is far cheaper than full verification" {
+  # Structural guard, not a wall-clock threshold: the validator must do its
+  # work without running any project check. Reuse that re-ran the suite would
+  # be pointless, and a timing assertion here would only be flaky.
+  evaluate >/dev/null
+  run bash -c "grep -vE '^[[:space:]]*#' '$VERIFY' \
+    | grep -nE 'tests/run\.sh|agent-md/bin/verify\.sh|\bbats\b|shellcheck|run-check|agent-md-issuer'"
+  [ "$status" -ne 0 ]
+  # It reaches a verdict with no subprocess of the project's own contract.
+  local marker="$ROOT/CHECK_RAN"
+  printf '[verify]\ntest = "touch %s"\n\n[verify.policy]\nrequired = ["test"]\ntimeout_seconds = 30\ntotal_timeout_seconds = 120\n' \
+    "$marker" > "$WS/agent-md.toml"
+  rm -f "$marker"
+  verify >/dev/null 2>&1 || true
+  [ ! -e "$marker" ]
 }

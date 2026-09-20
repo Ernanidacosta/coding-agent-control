@@ -498,8 +498,8 @@ a future caller routes on structure rather than on prose. Exit 0 means
 
 | status | exit | meaning |
 |---|---|---|
-| `reusable_pass` | 0 | authentic, current, and still applies |
-| `current_fail` | 3 | the current authenticated result is a failure |
+| `reusable_ordinary` | 0 | the ordinary verification passed for this state and may be reused |
+| `current_fail` | 3 | the ordinary verification failed for this state, authenticated and current |
 | `stale` | 4 | authentic, but the workspace has moved since |
 | `unresolved_pending` | 5 | an attempt is outstanding; nothing older is current |
 | `unauthenticated_terminal` | 6 | the current result predates receipts |
@@ -514,6 +514,100 @@ reasons: `authentic` (the signature verifies under the project's trusted key),
 (the live workspace still matches what was signed). A receipt can be authentic
 without being current, and current without being applicable; only all three
 make it reusable.
+
+### What a consumer does with each status
+
+This is fixed policy for the step that wires reuse into completion, recorded
+now so that step implements a decision rather than inventing one.
+
+| status | consumer action | why |
+|---|---|---|
+| `reusable_ordinary` | **reuse** — skip the ordinary checks, then satisfy `requires_external` | authentic, current, applicable and complete |
+| `current_fail` | **reuse the failure** — do not re-run the ordinary checks | the same conditions hold; the answer is simply a failure |
+| `stale` | fall back | authentic, no longer about this tree |
+| `insufficient_coverage` | fall back | does not cover what is required now |
+| `unresolved_pending` | fall back | an attempt is outstanding; nothing older is current |
+| `unauthenticated_terminal` | fall back | predates receipts |
+| `no_evidence` | fall back | nothing was ever issued |
+| `invalid_receipt` | **warn**, then fall back | evidence exists and does not hold up |
+| `unavailable` | **warn**, then fall back | the authority or its store cannot be read safely |
+
+Exit 0 is reserved for `reusable_ordinary` alone. An authenticated failure is
+reusable evidence and keeps its own code, because a caller that routes on the
+exit status by itself must never read a failure as a success. Both are reusable;
+only one is a pass.
+
+Two of those carry a warning rather than silence, and the distinction is
+deliberate: an absent receipt and a tampered one are not the same event. A
+missing receipt is the ordinary case on any machine without an authority. A
+receipt whose signature fails, whose trusted key is writable, or whose state is
+corrupt means something that should not happen has happened, and falling back
+without saying so would hide exactly what the signature exists to reveal.
+
+None of them blocks. Blocking on a bad receipt would trade a stronger guarantee
+for no guarantee: full verification does not depend on the authority at all, is
+always available, and is strictly stronger than reusing a receipt. It would
+also hand anyone who can corrupt a file a way to stop the developer working,
+which is a denial of service dressed up as a security control. The warning
+preserves the signal; the fallback preserves the guarantee.
+
+### What reuse never covers
+
+`reusable_ordinary` means the ordinary checks need not run again. It never
+speaks for independent verification, for human approval, or for completion as a
+whole.
+
+Where the current Risk level requires an external guarantee, that does not
+invalidate the ordinary half: the checks still do not need re-running. The
+requirement is reported in `requires_external` and the caller satisfies it
+itself. This is why the status is named after what it actually licenses, and
+why exit 0 must never be read as "completion passed".
+
+A change to Risk, to a downgrade, or to any policy requirement changes the
+control fingerprint, which makes an existing receipt `stale` before coverage is
+even considered. A receipt therefore cannot outlive the Risk level it was
+issued under.
+
+### Reusing a failure
+
+An authenticated failure is evidence in exactly the way a pass is. When the
+signature verifies, the state names it as current, the live identity still
+matches and the coverage is structurally sound for the current contract, the
+result means "the ordinary verification failed for this exact state", and
+re-running it would only rediscover the same failure.
+
+Coverage is judged slightly differently for a failure: every currently required
+check must still appear, completed, against the same command identity, but the
+exit codes may be non-zero. That is what separates a real failure of this
+contract from a stale or partial run, which stays `stale` or
+`insufficient_coverage` instead.
+
+### How a consumer obtains evidence
+
+This is the contract for the step that wires reuse into completion. It creates
+no new capability: issuing evidence remains something only an authority-side
+evaluation can do.
+
+1. Run the validator.
+2. `reusable_ordinary` — skip the ordinary verification and evaluate only what
+   `requires_external` names.
+3. `current_fail` — reuse the failure; do not re-run the ordinary checks.
+4. `stale`, `no_evidence`, `insufficient_coverage`, `unauthenticated_terminal` —
+   if a local issuer is installed and this workspace is enrolled, run the
+   existing privileged evaluation (`sudo -n … agent-md-issuer evaluate`). That
+   evaluation *is* the fresh verification, and it issues the next receipt.
+   Otherwise run the ordinary full verification.
+5. `unresolved_pending` — attempt the same issuer evaluation, which is also how
+   an abandoned reservation is recovered. If one is already running, or the
+   issuer is unavailable, fall back. Never reuse the terminal result underneath
+   a pending one.
+6. `invalid_receipt`, `unavailable` — warn where a human will see it, then run
+   the full verification. Corruption is never quietly treated as absence.
+
+There is deliberately no `--issue-receipt`, `--refresh-receipt` or `--sign-run`.
+Evidence is produced by running the checks under the authority and nowhere
+else; a command that manufactured a receipt on request would be the signing
+oracle this design exists to avoid.
 
 Freshness comes from the state file, never from the filesystem. The newest file
 name, the highest sequence on disk and the most recent mtime decide nothing: an
