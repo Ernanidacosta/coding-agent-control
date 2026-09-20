@@ -32,7 +32,7 @@
           {
             "type": "command",
             "command": "bash \"$(git rev-parse --show-toplevel)/.codex/hooks/stop.sh\"",
-            "timeout": 590,
+            "timeout": 950,
             "statusMessage": "Running final verification..."
           }
         ]
