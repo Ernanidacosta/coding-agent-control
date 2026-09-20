@@ -2023,9 +2023,212 @@ completion_timeout_utility_available() {
 # This is the shared deadline-aware executor for Stop, verify.sh, and
 # pre-commit. Call completion_evaluation_begin before resolving the context so
 # contract/control resolution consumes the same core deadline as subprocesses.
+# --- Receipt-first completion ------------------------------------------------
+#
+# Completion normally runs the ordinary contract from scratch. When a local
+# authority is installed, an evaluation it already performed can stand in for
+# that work, provided the evaluation is authenticated, still current, and still
+# describes this workspace. Deciding that is not done here: it is one program,
+# receipt-verify.sh, which runs unprivileged and answers with a structured
+# result. This routes on that answer and never re-implements it.
+#
+# The routing in one sentence: reuse what is already proven, ask the authority
+# when nothing is, and fall back to the ordinary path whenever either of those
+# is unavailable or untrustworthy.
+#
+# Nothing here is required. A project with no authority installed takes the
+# legacy path unchanged, which is why every lookup below fails soft.
+
+# Installed locations, fixed and absolute. There is deliberately no environment
+# variable that redirects them: a caller that could point completion at its own
+# validator could also make it say that verification passed.
+COMPLETION_AUTHORITY_LIB_DIR=/usr/local/lib/agent-md
+
+completion_receipt_validator_path() {
+  printf '%s/receipt-verify.sh' "$COMPLETION_AUTHORITY_LIB_DIR"
+}
+
+completion_receipt_issuer_path() {
+  printf '%s/agent-md-issuer' "$COMPLETION_AUTHORITY_LIB_DIR"
+}
+
+completion_receipt_capability_available() {
+  local validator; validator=$(completion_receipt_validator_path)
+  [ -f "$validator" ] && [ -r "$validator" ]
+}
+
+# completion_receipt_decision_json <workspace>
+# The validator's structured answer, or nothing when it could not be consulted.
+completion_receipt_decision_json() {
+  local workspace="$1" out
+  out=$(bash "$(completion_receipt_validator_path)" "$workspace" worktree 2>/dev/null) || true
+  printf '%s' "$out" | jq -e 'type == "object" and (.status | type) == "string"' >/dev/null 2>&1 \
+    || return 1
+  printf '%s' "$out"
+}
+
+# completion_authority_evaluate_json <workspace>
+# Asks the authority to perform an evaluation, which is what produces the next
+# receipt. This is the existing capability and the only one that can create
+# evidence; there is no refresh, issue or sign entry point anywhere.
+#
+# sudo -n throughout: a completion handler must never stop to ask for a
+# password. Without a non-interactive rule this simply fails and the caller
+# falls back.
+completion_authority_evaluate_json() {
+  local workspace="$1" issuer out
+  issuer=$(completion_receipt_issuer_path)
+  [ -f "$issuer" ] || return 1
+  command -v sudo >/dev/null 2>&1 || return 1
+  out=$(printf '{"protocol":1,"scope":"worktree","workspace":"%s"}' "$workspace" \
+    | sudo -n -u "${AUTHORITY_SERVICE_USER:-agentmd}" "$issuer" evaluate 2>/dev/null) || true
+  printf '%s' "$out" | jq -e 'type == "object" and (.status | type) == "string"' >/dev/null 2>&1 \
+    || return 1
+  printf '%s' "$out"
+}
+
+# completion_receipt_verification_json <decision> <contract>
+# Turns a reusable decision into the verification object the rest of completion
+# already understands, so that Risk, the summary and the human output need no
+# special case for a reused result.
+#
+# The per-check detail is read from the receipt the decision names. That is not
+# a second trust decision: the validator has already established that this
+# receipt is authentic, current and applicable, and reusing it is precisely
+# what that conclusion licenses. Reading it faithfully also matters, because
+# Risk looks for a passing runtime or smoke result and would otherwise lose
+# evidence the receipt genuinely carries.
+completion_receipt_verification_json() {
+  local decision="$1" contract="$2" receipt_path receipt results status sequence
+  receipt_path=$(printf '%s' "$decision" | jq -r '.receipt // empty')
+  sequence=$(printf '%s' "$decision" | jq -r '.sequence // empty')
+  [ -n "$receipt_path" ] && [ -f "$receipt_path" ] || return 1
+  receipt=$(cat "$receipt_path" 2>/dev/null) || return 1
+  printf '%s' "$receipt" | jq -e '(.checks | type) == "array"' >/dev/null 2>&1 || return 1
+
+  results=$(printf '%s' "$receipt" | jq -c --arg seq "$sequence" '
+    [ .checks[] |
+      (if .execution == "completed" and .exit_code == 0 then "pass" else "fail" end) as $s |
+      {
+        status: $s,
+        severity: (if $s == "pass" then "info"
+                   elif .requirement == "required" then "error"
+                   else "warning" end),
+        code: (if $s == "pass" then "VERIFY_RECEIPT_REUSED" else "VERIFY_RECEIPT_REUSED_FAILURE" end),
+        message: (if $s == "pass"
+                  then "Reused authenticated evidence for \(.name) from receipt \($seq)."
+                  else "Authenticated evidence records \(.name) as failed for this state (receipt \($seq))."
+                  end),
+        suggestion: (if $s == "pass" then ""
+                     else "Fix the failing check; the next completion re-evaluates it." end),
+        check: .name,
+        requirement: .requirement,
+        origin: "authenticated receipt",
+        command: "",
+        evidence: "",
+        truncated: false
+      } + (if .exit_code == null then {} else {exit_code: .exit_code} end) ]')
+
+  status=pass
+  printf '%s' "$results" | jq -e 'any(.[]; .requirement == "required" and .status != "pass")' \
+    >/dev/null 2>&1 && status=fail
+
+  jq -cn --arg status "$status" --argjson contract "$contract" --argjson results "$results" \
+    '{status:$status, contract:$contract, results:$results}'
+}
+
+# A note that survives into the human summary, so a reused result never looks
+# like a run that happened now.
+completion_receipt_notice_result_json() {
+  local decision="$1" severity="$2" code="$3" message="$4" suggestion="$5"
+  jq -cn --arg severity "$severity" --arg code "$code" \
+    --arg message "$message" --arg suggestion "$suggestion" \
+    --argjson external "$(printf '%s' "$decision" | jq -c '.requires_external // []')" '
+      {status:(if $severity == "info" then "pass" else "warn" end),
+       severity:$severity, code:$code, message:$message, suggestion:$suggestion,
+       check:"receipt", requirement:"optional", origin:"authenticated receipt",
+       command:"", evidence:"", truncated:false,
+       requires_external:$external}'
+}
+
+# run_receipt_first_verification_contract <contract> <workspace>
+#
+# Prints the verification object when an authenticated evaluation could stand in
+# for the ordinary contract, and prints nothing when the caller should run the
+# ordinary contract itself. Never blocks on its own: the strongest answer it can
+# give is "run the real thing", which is what the caller already does.
+run_receipt_first_verification_contract() {
+  local contract="$1" workspace="$2" decision status verification notice issued
+
+  completion_receipt_capability_available || return 1
+  decision=$(completion_receipt_decision_json "$workspace") || return 1
+  status=$(printf '%s' "$decision" | jq -r '.status')
+
+  case "$status" in
+    reusable_ordinary|current_fail)
+      ;;
+    stale|no_evidence|insufficient_coverage|unauthenticated_terminal|unresolved_pending)
+      # Nothing reusable exists yet. Asking the authority to evaluate is the
+      # fresh verification: it runs the ordinary checks once, under its own
+      # boundary, and issues the receipt that the next completion will reuse.
+      # A pending reservation takes this path too, which is also how an
+      # abandoned one is recovered; the terminal result underneath it is never
+      # reused.
+      issued=$(completion_authority_evaluate_json "$workspace") || return 1
+      case "$(printf '%s' "$issued" | jq -r '.status')" in
+        authenticated_pass|authenticated_fail) ;;
+        *)
+          # identity_changed, a refusal, or anything the authority could not
+          # complete. One attempt only: retrying a workspace that moves under
+          # the evaluation would loop.
+          return 1 ;;
+      esac
+      decision=$(completion_receipt_decision_json "$workspace") || return 1
+      status=$(printf '%s' "$decision" | jq -r '.status')
+      case "$status" in
+        reusable_ordinary|current_fail) ;;
+        *) return 1 ;;
+      esac
+      ;;
+    invalid_receipt|unavailable)
+      # Evidence exists and does not hold up, or the store cannot be read
+      # safely. This is not the same event as having no receipt, and falling
+      # back in silence would hide exactly what the signature exists to reveal.
+      # It does not block: the ordinary contract is stronger than any receipt
+      # and is always available, so blocking would trade a real guarantee for
+      # none and hand anyone who can corrupt a file a way to stop the work.
+      printf 'WARNING [%s] %s\n' "$(printf '%s' "$decision" | jq -r '.status')" \
+        "$(printf '%s' "$decision" | jq -r '.reason')" >&2
+      printf 'Falling back to full verification. The authenticated receipt for this workspace was not trustworthy.\n' >&2
+      return 1
+      ;;
+    *)
+      return 1 ;;
+  esac
+
+  verification=$(completion_receipt_verification_json "$decision" "$contract") || return 1
+
+  if [ "$status" = current_fail ]; then
+    notice=$(completion_receipt_notice_result_json "$decision" warning VERIFY_RECEIPT_CURRENT_FAIL \
+      "Ordinary verification already failed for this exact state; it was not run again." \
+      "Change the workspace and complete again to trigger a fresh evaluation.")
+  else
+    notice=$(completion_receipt_notice_result_json "$decision" info VERIFY_RECEIPT_REUSED \
+      "Ordinary verification was reused from an authenticated receipt; the checks did not run again." \
+      "")
+  fi
+  printf '%s' "$verification" | jq -c --argjson notice "$notice" '.results += [$notice]'
+}
+
+# run_completion_evaluation <context> [boundary] [receipt_mode]
+#
+# receipt_mode is "receipt-first" only where reuse is wanted. The Stop handler
+# passes it; verify.sh and the pre-commit hook deliberately do not, because
+# asking for verification explicitly should verify rather than consult a cache.
 run_completion_evaluation() {
-  local context="$1" boundary="${2:-completion}"
+  local context="$1" boundary="${2:-completion}" receipt_mode="${3:-off}"
   local contract control budget verification risk summary timeout_result remaining
+  local reused
   contract=$(printf '%s' "$context" | jq -c '.contract')
   control=$(printf '%s' "$context" | jq -c '.control')
   budget=$(printf '%s' "$context" | jq -c '.budget')
@@ -2043,7 +2246,22 @@ run_completion_evaluation() {
     risk=$(jq -cn --arg risk "$(printf '%s' "$control" | jq -r '.effective.risk // empty')" \
       '{status:"pass",risk:(if $risk == "" then null else $risk end),current_status:null,observed_signals:[],results:[]}')
   else
-    verification=$(run_resolved_verification_contract "$contract")
+    # An authenticated evaluation that already covers this exact state stands
+    # in for running the ordinary contract again. When there is none, or it
+    # cannot be trusted, this produces nothing and the ordinary path runs
+    # exactly as it always has.
+    reused=""
+    if [ "$receipt_mode" = receipt-first ] \
+      && [ "$(printf '%s' "$context" | jq -r '.scope')" = worktree ]; then
+      # stderr is deliberately not redirected: a receipt that does not hold up
+      # warns there, and swallowing it would turn corruption into silence.
+      reused=$(run_receipt_first_verification_contract "$contract" "$PWD") || reused=""
+    fi
+    if [ -n "$reused" ]; then
+      verification="$reused"
+    else
+      verification=$(run_resolved_verification_contract "$contract")
+    fi
     if printf '%s' "$verification" | jq -e \
       'any(.results[]; .code == "VERIFY_TOTAL_TIMEOUT")' >/dev/null; then
       risk=$(jq -cn --arg risk "$(printf '%s' "$control" | jq -r '.effective.risk // empty')" \

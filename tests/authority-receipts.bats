@@ -656,17 +656,18 @@ JSON
   [ "$status" -ne 0 ]
 }
 
-@test "50 nothing in the product reuses a receipt yet" {
-  # A validator exists from C4d, but reuse is a separate step: no hook and no
-  # verification entry point consults it, so an ordinary Stop still runs the
-  # full contract.
-  # Comments are stripped first: the core explains where the decision now lives,
-  # and naming a program is not calling one.
-  run bash -c "cat '$BATS_TEST_DIRNAME/../.claude/hooks/'*.sh \
-      '$BATS_TEST_DIRNAME/../.agent-md/bin/'*.sh \
-      '$BATS_TEST_DIRNAME/../.codex/hooks/'*.sh \
-      '$BATS_TEST_DIRNAME/../.githooks/'* 2>/dev/null \
+@test "50 the product reuses a receipt only through the validator" {
+  # Reuse arrived with receipt-first completion. What must stay true is that no
+  # hook verifies a signature, resolves latest, or judges coverage itself: the
+  # decision has exactly one implementation and everything else consumes it.
+  local hooks="$BATS_TEST_DIRNAME/../.claude/hooks"
+  run bash -c "cat '$hooks/'*.sh '$BATS_TEST_DIRNAME/../.codex/hooks/'*.sh \
+      '$BATS_TEST_DIRNAME/../.githooks/'* '$BATS_TEST_DIRNAME/../.agent-md/bin/'*.sh 2>/dev/null \
     | grep -vE '^[[:space:]]*#' \
-    | grep -nE 'authority_verify_receipt_signature|trusted-keys|receipt-verify'"
+    | grep -nE 'pkeyutl|authority_verify_receipt_signature|last_terminal|trusted-keys/'"
   [ "$status" -ne 0 ]
+
+  # The one place completion consults is the validator, by its installed path.
+  run bash -c "grep -vE '^[[:space:]]*#' '$hooks/_lib.sh' | grep -c 'receipt-verify.sh'"
+  [ "$output" = "1" ]
 }

@@ -117,6 +117,9 @@ timeout_seconds = 8
 total_timeout_seconds = 3
 TOML
 
+mkdir -p "$PAYLOAD/hosts"
+cp "$ROOT_DIR/.claude/settings.json" "$PAYLOAD/hosts/settings.json"
+
 cat > "$PAYLOAD/setup.sh" <<'SETUP'
 #!/bin/bash
 # Production layout with three real principals. Runs as root inside the
@@ -630,6 +633,124 @@ row dev validator "reads the private key" "unprivileged by construction" "$(grep
 install -o dev -g dev -m 0644 /it/agent-md.toml /home/dev/repo/agent-md.toml
 enroll_project >/dev/null
 
+header "8f. receipt-first completion, real accounts"
+# The developer's repository gets the real hook library and Stop handler, so
+# what runs here is the shipped completion path and not a stand-in.
+install -d -o dev -g dev -m 0755 /home/dev/repo/.claude/hooks
+for f in _lib.sh stop-verify.sh; do
+  install -o dev -g dev -m 0755 "/hooks/$f" "/home/dev/repo/.claude/hooks/$f"
+done
+# The handler refuses to run when the host envelope cannot be read, so the
+# settings the installer would have materialized have to be present too.
+install -o dev -g dev -m 0644 /hosts/settings.json /home/dev/repo/.claude/settings.json
+install -o dev -g dev -m 0644 /it/flagged.toml /home/dev/repo/agent-md.toml
+enroll_project >/dev/null
+PROJ=/var/lib/agent-md/projects/$PID
+printf 'ok\n' > /srv/flag; chmod 0644 /srv/flag
+
+# The ordinary contract appends a mark every time it actually executes, so a
+# completion that reuses evidence can be told apart from one that re-ran it.
+# A boolean would not distinguish "ran once under the authority" from "ran
+# again afterwards", which is the invariant that matters here.
+cat > /home/dev/repo/agent-md.toml <<'TOML'
+[verify]
+test = "printf x >> /srv/RUNS; cat /home/dev/repo/gate"
+
+[verify.policy]
+required = ["test"]
+timeout_seconds = 60
+total_timeout_seconds = 300
+TOML
+chown dev:dev /home/dev/repo/agent-md.toml
+sudo -u dev bash -c 'printf "ok\n" > /home/dev/repo/gate'
+enroll_project >/dev/null
+PROJ=/var/lib/agent-md/projects/$PID
+
+run_stop() {
+  sudo -u dev env -i HOME=/home/dev PATH=/usr/local/bin:/usr/bin:/bin \
+    bash -c 'cd /home/dev/repo && printf "{}" | bash .claude/hooks/stop-verify.sh' 2>/dev/null
+}
+run_stop_stderr() {
+  sudo -u dev env -i HOME=/home/dev PATH=/usr/local/bin:/usr/bin:/bin \
+    bash -c 'cd /home/dev/repo && printf "{}" | bash .claude/hooks/stop-verify.sh' 2>&1 >/dev/null
+}
+runs() { [ -f /srv/RUNS ] && wc -c < /srv/RUNS | tr -d ' ' || printf 0; }
+
+: > /srv/RUNS; chmod 0666 /srv/RUNS
+
+T0=$(date +%s); OUT1=$(run_stop); T1=$(date +%s)
+R1=$(runs)
+row dev completion "first run issues a receipt" "authority on miss" \
+  "$([ -n "$(ls "$PROJ/receipts/worktree" 2>/dev/null)" ] && printf issued || printf none)" issued
+row dev completion "ordinary ran exactly once" "no double verification" "$R1" 1
+
+T2=$(date +%s); OUT2=$(run_stop); T3=$(date +%s)
+row dev completion "second run re-runs nothing" "receipt-first" "$(runs)" "$R1"
+row dev completion "second run is not slower" "receipt-first" \
+  "$([ $(( T3-T2 )) -le $(( T1-T0 )) ] && printf faster || printf slower)" faster
+echo "   timing: first=$(( T1-T0 ))s second=$(( T3-T2 ))s"
+
+BEFORE=$(runs)
+sudo -u dev bash -c 'printf "CHANGED\n" >> /home/dev/repo/marker.txt'
+run_stop >/dev/null
+row dev completion "a source change re-evaluates once" "staleness" "$(runs)" "$(( BEFORE + 1 ))"
+
+BEFORE=$(runs)
+sudo -u dev bash -c 'printf "" > /home/dev/repo/gate; printf "FAILNOW\n" >> /home/dev/repo/marker.txt'
+sudo -u dev bash -c 'mv /home/dev/repo/gate /home/dev/repo/gate.hidden'
+OUTF=$(run_stop)
+row dev completion "a failure is recorded" "negative evidence" \
+  "$(jq -r '.scopes.worktree.last_terminal.status' "$PROJ/state.json")" candidate_fail
+row dev completion "the failing run executed once" "no double verification" "$(runs)" "$(( BEFORE + 1 ))"
+row dev completion "the failure blocks completion" "non-success preserved" \
+  "$(printf '%s' "$OUTF" | jq -r '.decision // "none"')" block
+
+BEFORE=$(runs)
+OUTF2=$(run_stop)
+row dev completion "a known failure is not re-run" "negative cache" "$(runs)" "$BEFORE"
+row dev completion "a known failure still blocks" "non-success preserved" \
+  "$(printf '%s' "$OUTF2" | jq -r '.decision // "none"')" block
+
+BEFORE=$(runs)
+sudo -u dev bash -c 'mv /home/dev/repo/gate.hidden /home/dev/repo/gate; printf "FIXED\n" >> /home/dev/repo/marker.txt'
+run_stop >/dev/null
+row dev completion "a fix re-evaluates" "staleness" "$(runs)" "$(( BEFORE + 1 ))"
+row dev completion "and passes again" "negative cache cleared" \
+  "$(jq -r '.scopes.worktree.last_terminal.status' "$PROJ/state.json")" candidate_pass
+
+CURSEQ=$(jq -r '.scopes.worktree.last_terminal.sequence' "$PROJ/state.json")
+chmod u+w "$PROJ/receipts/worktree" "$PROJ/receipts/worktree/$CURSEQ.json"
+jq -cS '.authentication.value = "AAAA" + (.authentication.value[4:])' \
+  "$PROJ/receipts/worktree/$CURSEQ.json" > /tmp/t.json && mv /tmp/t.json "$PROJ/receipts/worktree/$CURSEQ.json"
+chmod 0444 "$PROJ/receipts/worktree/$CURSEQ.json"; chmod 0555 "$PROJ/receipts/worktree"
+BEFORE=$(runs)
+WARN=$(run_stop_stderr)
+row dev completion "a tampered receipt warns" "corruption is visible" \
+  "$(printf '%s' "$WARN" | grep -qi 'WARNING' && printf warned || printf silent)" warned
+row dev completion "a tampered receipt is never reused" "fail closed" \
+  "$([ "$(runs)" -gt "$BEFORE" ] && printf ran-anyway || printf reused)" ran-anyway
+
+mv /usr/local/lib/agent-md/receipt-verify.sh /usr/local/lib/agent-md/receipt-verify.sh.off
+BEFORE=$(runs)
+run_stop >/dev/null
+row dev completion "no validator installed" "legacy fallback" \
+  "$([ "$(runs)" -gt "$BEFORE" ] && printf ran || printf skipped)" ran
+mv /usr/local/lib/agent-md/receipt-verify.sh.off /usr/local/lib/agent-md/receipt-verify.sh
+
+sudo -u dev bash -c 'mkdir -p /home/dev/solo/.claude/hooks && cd /home/dev/solo && git init -q'
+for f in _lib.sh stop-verify.sh; do
+  install -o dev -g dev -m 0755 "/hooks/$f" "/home/dev/solo/.claude/hooks/$f"
+done
+install -o dev -g dev -m 0644 /hosts/settings.json /home/dev/solo/.claude/settings.json
+sudo -u dev bash -c 'printf "[verify]\ntest = \"touch /srv/SOLO_RAN\"\n\n[verify.policy]\nrequired = [\"test\"]\ntimeout_seconds = 60\ntotal_timeout_seconds = 300\n" > /home/dev/solo/agent-md.toml'
+sudo -u dev env -i HOME=/home/dev PATH=/usr/local/bin:/usr/bin:/bin \
+  bash -c 'cd /home/dev/solo && printf "{}" | bash .claude/hooks/stop-verify.sh' >/dev/null 2>&1
+row dev completion "an unenrolled workspace" "legacy fallback" \
+  "$([ -e /srv/SOLO_RAN ] && printf ran || printf skipped)" ran
+
+install -o dev -g dev -m 0644 /it/agent-md.toml /home/dev/repo/agent-md.toml
+enroll_project >/dev/null
+
 header "9. C3a boundaries still hold"
 P=/var/lib/agent-md/projects/$PID
 row agentmd-runner "private key" read "DAC 0600 agentmd" "$(try sudo -u agentmd-runner cat "$PRIV")" denied
@@ -676,5 +797,7 @@ chmod +x "$PAYLOAD"/*.sh
 docker run --rm \
   --cap-add=SYS_PTRACE --security-opt seccomp=unconfined \
   -v "$ROOT_DIR/examples/local-issuer:/src:ro" \
+  -v "$ROOT_DIR/.claude/hooks:/hooks:ro" \
+  -v "$PAYLOAD/hosts:/hosts:ro" \
   -v "$PAYLOAD:/it:ro" \
   "$IMAGE" bash -c '/it/setup.sh && /it/matrix.sh'

@@ -45,7 +45,10 @@ if [ "$(printf '%s' "$HOST_PREFLIGHT" | jq -r '.valid')" != true ]; then
   exit 0
 fi
 
-EVALUATION=$(run_completion_evaluation "$CONTEXT" completion)
+# receipt-first: an authenticated evaluation that already covers this state is
+# reused instead of running the ordinary contract again. Codex reaches this
+# same handler, so both hosts get one semantics and not two.
+EVALUATION=$(run_completion_evaluation "$CONTEXT" completion receipt-first)
 SUMMARY=$(printf '%s' "$EVALUATION" | jq -c '.summary')
 STATUS=$(printf '%s' "$SUMMARY" | jq -r '.status')
 
