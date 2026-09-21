@@ -59,7 +59,10 @@ USAGE
 
 new_uuid() { authority_new_id || die "no source of unique identifiers is available"; }
 
-AUTHORITY_INSTALLED_FILES="authority-lib.sh phase-a-source.sh agent-md-authority agent-md-issuer run-check"
+# receipt-verify.sh belongs here as much as the rest: completion looks for it at
+# its installed path, and an installation without it silently degrades to
+# running the full contract every time.
+AUTHORITY_INSTALLED_FILES="authority-lib.sh phase-a-source.sh agent-md-authority agent-md-issuer run-check receipt-verify.sh"
 
 cmd_install() {
   local user=agentmd dry_run=0
@@ -85,6 +88,7 @@ cmd_install() {
   local name
   if [ "$dry_run" -eq 1 ]; then
     note "would ensure service account: $user"
+    note "would ensure execution account: $AUTHORITY_RUNNER_USER"
     note "would create $lib (root, 0755)"
     note "would create $state (root, 0755)"
     note "would create $projects ($user, 0755)"
@@ -92,6 +96,7 @@ cmd_install() {
     for name in $AUTHORITY_INSTALLED_FILES; do
       note "would install $lib/$name (root, 0755)"
     done
+    note "would create $ROOT$AUTHORITY_SCRATCH_ROOT ($AUTHORITY_RUNNER_USER, 0700)"
     return 0
   fi
 
@@ -103,8 +108,29 @@ cmd_install() {
     else
       note "service account $user already present"
     fi
+
+    # The execution account is as much a part of the installation as the
+    # authority itself. Without it a clean host installs something that cannot
+    # run a single check: the authority would have nobody to drop to, and the
+    # separation between deciding and executing would exist only on paper.
+    #
+    # It is deliberately given no home and no shell. It must not reach the
+    # authority's state, and every check it runs is handed an ephemeral HOME
+    # by run-check rather than one it owns.
+    if ! getent passwd "$AUTHORITY_RUNNER_USER" >/dev/null 2>&1; then
+      useradd --system --no-create-home --home-dir /nonexistent \
+        --shell /usr/sbin/nologin "$AUTHORITY_RUNNER_USER" \
+        || die "cannot create execution account $AUTHORITY_RUNNER_USER"
+      note "created execution account $AUTHORITY_RUNNER_USER"
+    else
+      note "execution account $AUTHORITY_RUNNER_USER already present"
+    fi
+
+    if [ "$user" = "$AUTHORITY_RUNNER_USER" ]; then
+      die "the service account and the execution account must be different users"
+    fi
   else
-    note "staging root in use; service account $user is not created"
+    note "staging root in use; service and execution accounts are not created"
   fi
 
   mkdir -p "$lib" "$state" "$projects" "$keys" || die "cannot create authority directories"
@@ -133,8 +159,9 @@ cmd_install() {
   # outside the snapshot. It is wiped per run, so nothing has to survive.
   mkdir -p "$ROOT$AUTHORITY_SCRATCH_ROOT" || die "cannot create the runner scratch root"
   chmod 0700 "$ROOT$AUTHORITY_SCRATCH_ROOT"
-  if is_real_root_prefix && getent passwd "$AUTHORITY_RUNNER_USER" >/dev/null 2>&1; then
-    chown "$AUTHORITY_RUNNER_USER":"$AUTHORITY_RUNNER_USER" "$ROOT$AUTHORITY_SCRATCH_ROOT"
+  if is_real_root_prefix; then
+    chown "$AUTHORITY_RUNNER_USER":"$AUTHORITY_RUNNER_USER" "$ROOT$AUTHORITY_SCRATCH_ROOT" \
+      || die "cannot give the execution account its scratch directory"
   fi
 
   printf '%s\n' "$AUTHORITY_SCHEMA" | atomic_write "$state/schema" 0644

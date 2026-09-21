@@ -137,17 +137,17 @@ echo "HOME_MODE_DEFAULT: $(stat -c %a /home/dev)"
 chmod 0755 /home/dev
 useradd -m -s /bin/bash dev2
 chmod 0755 /home/dev2
-useradd -r -M -s /usr/sbin/nologin -d /var/lib/agent-md agentmd
-useradd -r -M -s /usr/sbin/nologin -d /nonexistent agentmd-runner
 
-install -d -o root -g root -m 0755 /usr/local/lib/agent-md
-for f in authority-lib.sh phase-a-source.sh agent-md-authority agent-md-issuer run-check receipt-verify.sh; do
-  install -o root -g root -m 0755 "/src/$f" "/usr/local/lib/agent-md/$f"
-done
-install -d -o agentmd -g agentmd -m 0755 /var/lib/agent-md
-install -d -o agentmd -g agentmd -m 0755 /var/lib/agent-md/projects
-install -d -o agentmd -g agentmd -m 0700 /var/lib/agent-md/keys
-install -d -o agentmd-runner -g agentmd-runner -m 0700 /var/tmp/agent-md-runner
+# The installation is performed by the program that ships it, on a host where
+# neither service account exists yet. Provisioning them by hand here would have
+# hidden the fact that install did not create them, which is exactly the defect
+# this harness is meant to catch.
+bash /src/agent-md-authority install >/tmp/install.log 2>&1 \
+  || { echo "SETUP-FAIL: authority install"; cat /tmp/install.log; exit 1; }
+grep -q 'created execution account agentmd-runner' /tmp/install.log \
+  || { echo "SETUP-FAIL: install did not create the execution account"; cat /tmp/install.log; exit 1; }
+getent passwd agentmd >/dev/null || { echo "SETUP-FAIL: no agentmd"; exit 1; }
+getent passwd agentmd-runner >/dev/null || { echo "SETUP-FAIL: no agentmd-runner"; exit 1; }
 # Trigger files for the state-machine rows. They sit outside every workspace on
 # purpose: steering an outcome must not change the workspace identity.
 install -d -o root -g root -m 0777 /srv

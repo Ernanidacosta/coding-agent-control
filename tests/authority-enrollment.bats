@@ -244,3 +244,68 @@ enrollment_file() {
     and all(.scopes[]; .next_sequence == 1 and .pending == null and .last_terminal == null)' \
     "$state" >/dev/null
 }
+
+# --- what a clean host gets ---------------------------------------------------
+#
+# Installing has to leave a host able to actually run a check. An installation
+# that creates the authority but not the account it drops to looks complete and
+# cannot execute anything.
+
+@test "19 install declares both accounts it will provision" {
+  run bash "$AUTHORITY" install --root "$ROOT" --dry-run
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"service account: agentmd"* ]]
+  [[ "$output" == *"execution account: agentmd-runner"* ]]
+}
+
+@test "20 install ships every program the authority needs at runtime" {
+  local lib="$ROOT/usr/local/lib/agent-md" name
+  for name in authority-lib.sh phase-a-source.sh agent-md-authority \
+              agent-md-issuer run-check receipt-verify.sh; do
+    [ -f "$lib/$name" ] || { printf 'missing: %s\n' "$name" >&2; return 1; }
+    [ -x "$lib/$name" ]
+  done
+}
+
+@test "21 the validator completion looks for is installed where it looks" {
+  # Completion resolves the validator by its installed path. Shipping the
+  # authority without it degrades every completion to a full run in silence.
+  local expected
+  expected=$(bash -c '. "$1/.claude/hooks/_lib.sh"; completion_receipt_validator_path' \
+    _ "$BATS_TEST_DIRNAME/.." 2>/dev/null)
+  [ "$expected" = /usr/local/lib/agent-md/receipt-verify.sh ]
+  [ -f "$ROOT/usr/local/lib/agent-md/receipt-verify.sh" ]
+}
+
+@test "22 install creates the execution scratch root" {
+  [ -d "$ROOT/var/tmp/agent-md-runner" ]
+  [ "$(stat -c %a "$ROOT/var/tmp/agent-md-runner")" = 700 ]
+}
+
+@test "23 the execution account is never the authority itself" {
+  # Two accounts that are one account are no separation at all.
+  run bash -c ". '$BATS_TEST_DIRNAME/../examples/local-issuer/authority-lib.sh'
+    [ \"\$AUTHORITY_SERVICE_USER\" != \"\$AUTHORITY_RUNNER_USER\" ]"
+  [ "$status" -eq 0 ]
+  run grep -n 'the service account and the execution account must be different' "$AUTHORITY"
+  [ "$status" -eq 0 ]
+}
+
+@test "24 the execution account is provisioned with no home and no shell" {
+  # It must not own a home the authority state could leak into, and it is never
+  # meant to be logged into; run-check hands each check an ephemeral HOME.
+  run bash -c "grep -A1 'useradd --system --no-create-home' '$AUTHORITY'"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"--home-dir /nonexistent"* ]]
+  [[ "$output" == *"nologin"* ]]
+  # And exactly one account is created that way.
+  run bash -c "grep -c 'useradd --system --no-create-home' '$AUTHORITY'"
+  [ "$output" = "1" ]
+}
+
+@test "25 a staging install creates no accounts at all" {
+  # --root is for tests and staging; it must never touch the host's user table.
+  run bash "$AUTHORITY" install --root "$ROOT"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"accounts are not created"* ]]
+}
