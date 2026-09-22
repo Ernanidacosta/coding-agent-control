@@ -245,3 +245,47 @@ Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>"
   [ "$(git log -1 --pretty='%an <%ae>')" = "A Developer <dev@example.com>" ]
   [ -z "$(git log -1 --pretty='%b')" ]
 }
+
+@test "setup_repo isolates an inherited Git context without clearing unrelated environment" {
+  local outer="$REPO_DIR/outer" before
+  git init -q "$outer"
+  git -C "$outer" config user.name "Outer Developer"
+  git -C "$outer" config user.email outer@example.com
+  printf 'outer\n' > "$outer/outer.txt"
+  git -C "$outer" add outer.txt
+  cp "$outer/.git/index" "$outer/alternate-index"
+  before=$(sha256sum "$outer/.git/config" "$outer/.git/index" "$outer/alternate-index")
+
+  run env GIT_DIR="$outer/.git" GIT_WORK_TREE="$outer" \
+    GIT_COMMON_DIR="$outer/.git" GIT_OBJECT_DIRECTORY="$outer/.git/objects" \
+    GIT_INDEX_FILE="$outer/alternate-index" \
+    GIT_CONFIG_COUNT=2 GIT_CONFIG_KEY_0=user.name GIT_CONFIG_VALUE_0="Inherited Developer" \
+    GIT_CONFIG_KEY_1=user.email GIT_CONFIG_VALUE_1=inherited@example.com \
+    GIT_AUTHOR_NAME="Inherited Author" GIT_AUTHOR_EMAIL=author@example.com \
+    GIT_COMMITTER_NAME="Inherited Committer" GIT_COMMITTER_EMAIL=committer@example.com \
+    FIXTURE_CONTEXT_MARKER="keep this value" \
+    bash -c '
+      set -e
+      export BATS_TEST_DIRNAME="$1"
+      . "$BATS_TEST_DIRNAME/helpers.bash"
+      setup_repo
+      trap teardown_repo EXIT
+      printf "scratch Git directory: %s\n" "$(git rev-parse --absolute-git-dir)"
+      [ "$(git rev-parse --absolute-git-dir)" = "$REPO_DIR/.git" ]
+      [ "$(git rev-parse --show-toplevel)" = "$REPO_DIR" ]
+      [ "$(git config user.name)" = t ]
+      [ "$(git config user.email)" = t@t ]
+      [[ "$(git var GIT_AUTHOR_IDENT)" == "t <t@t> "* ]]
+      [[ "$(git var GIT_COMMITTER_IDENT)" == "t <t@t> "* ]]
+      [ "$FIXTURE_CONTEXT_MARKER" = "keep this value" ]
+      printf "scratch\n" > scratch.txt
+      git add scratch.txt
+      [ "$(realpath "$(git rev-parse --git-path index)")" = "$REPO_DIR/.git/index" ]
+      [ "$(git ls-files)" = scratch.txt ]
+    ' _ "$BATS_TEST_DIRNAME"
+  [ "$status" -eq 0 ]
+  [ "$(sha256sum "$outer/.git/config" "$outer/.git/index" "$outer/alternate-index")" = "$before" ]
+  [ "$(git -C "$outer" config user.name)" = "Outer Developer" ]
+  [ "$(git -C "$outer" config user.email)" = outer@example.com ]
+  [ "$(git -C "$outer" ls-files)" = outer.txt ]
+}

@@ -1,6 +1,16 @@
 # tests/helpers.bash — shared setup for bats suites.
 
 setup_repo() {
+  local git_local_vars git_local_var
+  git_local_vars=$(git rev-parse --local-env-vars) || return 1
+  while IFS= read -r git_local_var; do
+    unset "$git_local_var" || return 1
+  done <<< "$git_local_vars"
+  # Commit hooks also inherit identity outside Git's repository-local list.
+  for git_local_var in "${!GIT_AUTHOR_@}" "${!GIT_COMMITTER_@}"; do
+    unset "$git_local_var" || return 1
+  done
+
   # Creates a scratch git repo in a temp dir, copies .claude/ from the
   # parent repo, cds into it. Stores the path in $REPO_DIR.
   REPO_DIR="$(mktemp -d)"
@@ -8,7 +18,7 @@ setup_repo() {
   cp -r "$BATS_TEST_DIRNAME/../.claude" "$REPO_DIR/"
   cp -r "$BATS_TEST_DIRNAME/../.codex" "$REPO_DIR/" 2>/dev/null || true
   cp -r "$BATS_TEST_DIRNAME/../.githooks" "$REPO_DIR/" 2>/dev/null || true
-  cd "$REPO_DIR"
+  cd "$REPO_DIR" || return 1
   git init -q
   git config user.email t@t
   git config user.name t

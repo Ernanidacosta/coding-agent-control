@@ -130,10 +130,19 @@ decision_json() {
 # --- capability and legacy ---------------------------------------------------
 
 @test "8 without an installed authority the router declines and legacy runs" {
-  # This machine has no authority installed, which is the ordinary case.
-  run lib completion_receipt_capability_available
+  # Isolate absence from a dogfooding host's real installation. This override
+  # exists only in the test shell, after loading the unchanged fixed paths.
+  without_authority() {
+    bash -c '
+      . "$1/.claude/hooks/_lib.sh"
+      COMPLETION_AUTHORITY_LIB_DIR="$2/not-installed"
+      shift 2
+      "$@"
+    ' _ "$REPO" "$WORK" "$@"
+  }
+  run without_authority completion_receipt_capability_available
   [ "$status" -ne 0 ]
-  run lib run_receipt_first_verification_contract "$(contract_json)" "$WORK"
+  run without_authority run_receipt_first_verification_contract "$(contract_json)" "$WORK"
   [ "$status" -ne 0 ]
   [ -z "$output" ]
 }

@@ -309,3 +309,93 @@ enrollment_file() {
   [ "$status" -eq 0 ]
   [[ "$output" == *"accounts are not created"* ]]
 }
+
+@test "26 staging enrollment never chowns host accounts and keeps modes" {
+  run bash -c '
+    chown() { touch "$MARKER"; return 1; }
+    export -f chown
+    bash "$AUTHORITY" enroll "$WS" --root "$ROOT" --yes
+  '
+  [ "$status" -eq 0 ]
+  [ ! -e "$MARKER" ]
+  local record dir
+  record=$(enrollment_file); dir=${record%/*}
+  [ "$(stat -c %a "$dir")" = 755 ]
+  [ "$(stat -c %a "$record")" = 644 ]
+  [ "$(stat -c %a "$dir/state.json")" = 644 ]
+  [ "$(stat -c %u "$dir")" = "$(id -u)" ]
+  [ "$(find "$dir" -name '.agent-md-*' | wc -l)" -eq 0 ]
+}
+
+@test "27 duplicate enrollment leaves existing sequence state byte-identical" {
+  run_authority enroll "$WS" --root "$ROOT" --yes
+  [ "$status" -eq 0 ]
+  local record dir before
+  record=$(enrollment_file); dir=${record%/*}
+  jq '.scopes.worktree.next_sequence = 42 | .scopes.staged.next_sequence = 9' \
+    "$dir/state.json" > "$dir/advanced.json"
+  mv "$dir/advanced.json" "$dir/state.json"
+  before=$(sha256sum "$dir/state.json" "$record")
+  run_authority enroll "$WS" --root "$ROOT" --yes
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"already enrolled"* ]]
+  [ "$(sha256sum "$dir/state.json" "$record")" = "$before" ]
+}
+
+@test "28 production chown failure leaves no published enrollment or success claim" {
+  run bash -c '
+    fixture_root=$ROOT
+    set -- --help
+    . "$AUTHORITY"
+    ROOT=$fixture_root
+    is_real_root_prefix() { return 0; }
+    projects_dir() { printf "%s/var/lib/agent-md/projects" "$ROOT"; }
+    authority_workspace_traversal_reasons() { printf "[]"; }
+    chown() { return 1; }
+    cmd_enroll "$WS" --root "$ROOT" --yes
+  ' "$AUTHORITY"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"cannot assign enrollment ownership to agentmd"* ]]
+  [[ "$output" != *$'\nenrolled '* ]]
+  [ "$(find "$ROOT/var/lib/agent-md/projects" -name enrollment.json | wc -l)" -eq 0 ]
+  [ "$(find "$ROOT/var/lib/agent-md/projects" -name '.agent-md-*' | wc -l)" -eq 0 ]
+}
+
+@test "29 production ownership normalization never rewrites existing state" {
+  local dir="$ROOT/var/lib/agent-md/projects/preserved-state"
+  mkdir "$dir"
+  printf '{"schema":2,"scopes":{"worktree":{"next_sequence":42},"staged":{"next_sequence":9}}}\n' > "$dir/state.json"
+  local before
+  before=$(sha256sum "$dir/state.json")
+  run bash -c '
+    fixture_root=$ROOT
+    set -- --help
+    . "$AUTHORITY"
+    ROOT=$fixture_root
+    is_real_root_prefix() { return 0; }
+    projects_dir() { printf "%s/var/lib/agent-md/projects" "$ROOT"; }
+    authority_workspace_traversal_reasons() { printf "[]"; }
+    new_uuid() { printf preserved-state; }
+    chown() { printf "%s\n" "$@" > "$MARKER"; }
+    cmd_enroll "$WS" --root "$ROOT" --yes
+  ' "$AUTHORITY"
+  [ "$status" -eq 0 ]
+  [ "$(sha256sum "$dir/state.json")" = "$before" ]
+  [ "$(sed -n '1p' "$MARKER")" = agentmd:agentmd ]
+  [ "$(sed -n '2p' "$MARKER")" = "$dir" ]
+  [ "$(sed -n '3p' "$MARKER")" = "$dir/state.json" ]
+  [[ "$(sed -n '4p' "$MARKER")" == "$dir/.agent-md-enrollment."* ]]
+  [ "$(wc -l < "$MARKER")" -eq 4 ]
+  [ -f "$dir/enrollment.json" ]
+}
+
+@test "30 staging enrollment does not probe host runtime accounts" {
+  run bash -c '
+    runuser() { touch "$MARKER"; return 1; }
+    export -f runuser
+    bash "$AUTHORITY" enroll "$WS" --root "$ROOT" --exec-path /usr/bin:/bin --yes
+  '
+  [ "$status" -eq 0 ]
+  [ ! -e "$MARKER" ]
+  jq -e '.status == "eligible"' "$(enrollment_file)" >/dev/null
+}

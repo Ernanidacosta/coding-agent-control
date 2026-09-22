@@ -551,3 +551,41 @@ assert_parity() {
   ! grep -qE 'atomic_write|openssl' "$RUNCHECK"
   [ "$(stat -c %a "$ROOT/var/lib/agent-md/keys")" = "700" ]
 }
+
+@test "50 staging executes as its caller even when the host has a runner account" {
+  getent() {
+    if [ "$1" = passwd ] && [ "${2:-}" = agentmd-runner ]; then
+      printf 'agentmd-runner:x:424242:424242::/nonexistent:/usr/sbin/nologin\n'
+    else
+      command getent "$@"
+    fi
+  }
+  export -f getent
+  write_contract 'printf staging-ok'
+  approve
+  run_check_capture
+  printf '%s\n' "$(cat "$RC_ERR")" >&2
+  [ "$RC_STATUS" -eq 0 ]
+  [ "$(cat "$RC_OUT")" = staging-ok ]
+  [ "$(jq -r .execution.uid "$(job_file)")" = "$(id -u)" ]
+}
+
+@test "51 production resolves the service runner instead of its caller" {
+  run bash -c '
+    . "$1/authority-lib.sh"
+    getent() { printf "agentmd-runner:x:424242:424242::/nonexistent:/usr/sbin/nologin\n"; }
+    authority_runner_identity
+  ' _ "${AUTHORITY%/*}"
+  [ "$status" -eq 0 ]
+  jq -e '.user == "agentmd-runner" and .uid == 424242' <<<"$output" >/dev/null
+}
+
+@test "52 production refuses a missing runner without falling back to its caller" {
+  run bash -c '
+    . "$1/authority-lib.sh"
+    getent() { return 2; }
+    authority_runner_identity
+  ' _ "${AUTHORITY%/*}"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"agentmd-runner service account does not exist"* ]]
+}

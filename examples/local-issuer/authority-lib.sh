@@ -129,6 +129,33 @@ uid_of_user() { passwd_field "$1" 3; }
 home_of_user() { passwd_field "$1" 6; }
 gids_of_user() { id -G "$1" 2>/dev/null; }
 
+# Root can probe both runtime principals without granting either more sudo
+# capability. An unprivileged authority can only probe its own live access.
+authority_workspace_traversal_reasons() {
+  local workspace="$1" caller_uid user reason reasons='[]'
+  is_real_root_prefix || { printf '[]'; return 0; }
+  caller_uid=$(id -u)
+  for user in "$AUTHORITY_SERVICE_USER" "$AUTHORITY_RUNNER_USER"; do
+    reason=""
+    if [ "$caller_uid" = 0 ]; then
+      if ! command -v runuser >/dev/null 2>&1; then
+        reason="cannot validate workspace traversal as $user: runuser is unavailable"
+      elif ! runuser -u "$user" -- /usr/bin/test -x "$workspace" 2>/dev/null; then
+        reason="$user cannot traverse workspace $workspace or its parent directories"
+      fi
+    elif [ "$caller_uid" = "$(uid_of_user "$user")" ]; then
+      [ -x "$workspace" ] \
+        || reason="$user cannot traverse workspace $workspace or its parent directories"
+    else
+      continue
+    fi
+    if [ -n "$reason" ]; then
+      reasons=$(jq -c --arg reason "$reason" '. + [$reason]' <<<"$reasons")
+    fi
+  done
+  printf '%s' "$reasons"
+}
+
 # --- PATH eligibility --------------------------------------------------------
 # A PATH entry the execution user can write is a way to replace a real tool with
 # one that exits 0, collect an authenticated PASS and put the real tool back.
@@ -745,18 +772,18 @@ authority_snapshot_manifest() {
 # access is what disqualifies a PATH entry, and they stay in the enrollment for
 # that. They are not the account a check runs as.
 #
-# A staging root has no service accounts, so it falls back to the current user
-# and says so. Production resolves the real runner and nothing else.
+# Staging executes directly as its caller, regardless of host service accounts.
+# Production resolves the real runner and nothing else.
 authority_runner_identity() {
   local user uid
-  if getent passwd "$AUTHORITY_RUNNER_USER" >/dev/null 2>&1; then
+  if ! is_real_root_prefix; then
+    user=$(id -un); uid=$(id -u)
+  elif getent passwd "$AUTHORITY_RUNNER_USER" >/dev/null 2>&1; then
     user="$AUTHORITY_RUNNER_USER"
     uid=$(passwd_field "$user" 3) || return 1
-  elif is_real_root_prefix; then
+  else
     printf 'the %s service account does not exist' "$AUTHORITY_RUNNER_USER"
     return 1
-  else
-    user=$(id -un); uid=$(id -u)
   fi
   jq -nc --arg u "$user" --argjson i "$uid" '{user:$u,uid:$i}'
 }

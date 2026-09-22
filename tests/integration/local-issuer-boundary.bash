@@ -132,8 +132,8 @@ apt-get install -y -qq jq sudo strace python3 git procps util-linux openssl >/de
 
 useradd -m -s /bin/bash dev
 echo "HOME_MODE_DEFAULT: $(stat -c %a /home/dev)"
-# Debian creates homes 0700 and the authority cannot traverse that, so
-# enrollment fails closed. Relaxed here only so the rest can be exercised.
+# Debian creates homes 0700. The restricted-parent regression below exercises
+# that boundary; this fixture is accessible so the full chain can also run.
 chmod 0755 /home/dev
 useradd -m -s /bin/bash dev2
 chmod 0755 /home/dev2
@@ -216,7 +216,8 @@ header() {
 enroll_project() {
   chmod -R u+w /var/lib/agent-md/projects 2>/dev/null
   rm -rf /var/lib/agent-md/projects/* 2>/dev/null
-  sudo -u agentmd "$LIB/agent-md-authority" enroll /home/dev/repo --exec-user dev --yes >/dev/null 2>&1
+  "$LIB/agent-md-authority" enroll /home/dev/repo --exec-user dev --yes >/tmp/enroll.log 2>&1 \
+    || { cat /tmp/enroll.log; return 1; }
   PID=$(sudo -u agentmd "$LIB/agent-md-authority" show --workspace /home/dev/repo 2>/dev/null | awk '/^project id:/{print $3}')
   [ -n "$PID" ] || return 1
   rm -f /etc/sudoers.d/agent-md-*
@@ -233,8 +234,86 @@ evaluate_as() {
 prepare() { sudo -u agentmd "$LIB/agent-md-authority" prepare-run "$PID" --check "$1" >/dev/null 2>/tmp/prep.err; }
 run_job() { sudo -u agentmd sudo -n -u agentmd-runner "$LIB/run-check" "$PID" "$1" >/tmp/rc.out 2>/tmp/rc.err; echo $?; }
 
+header "0a. inaccessible workspace parents"
+install -d -o dev -g dev -m 0700 /home/dev/private
+cp -a /home/dev/repo /home/dev/private/repo
+BEFORE=$(stat -c '%U:%G:%a' /home/dev/private /home/dev/private/repo)
+"$LIB/agent-md-authority" enroll /home/dev/private/repo --exec-user dev --yes >/tmp/private-enroll.log 2>&1
+PRIVATE_ID=$("$LIB/agent-md-authority" show --workspace /home/dev/private/repo | awk '/^project id:/{print $3}')
+PRIVATE_RECORD=/var/lib/agent-md/projects/$PRIVATE_ID/enrollment.json
+row root "private parent" "enrollment eligibility" "runtime traversal" \
+  "$(jq -r .status "$PRIVATE_RECORD")" ineligible
+for PRINCIPAL in agentmd agentmd-runner; do
+  row "$PRINCIPAL" "private parent" "diagnostic names account" "runtime traversal" \
+    "$(jq -r --arg user "$PRINCIPAL" 'any(.reasons[]; startswith($user + " cannot traverse workspace"))' "$PRIVATE_RECORD")" true
+done
+row root workspace "permissions left intact" "no automatic chmod or ACL" \
+  "$(stat -c '%U:%G:%a' /home/dev/private /home/dev/private/repo)" "$BEFORE"
+
+header "0b. ownership failure cannot publish enrollment"
+cp -a /home/dev/repo /home/dev/chown-failure
+BEFORE=$(find /var/lib/agent-md/projects -name enrollment.json | wc -l)
+(
+  chown() { return 1; }
+  export -f chown
+  bash "$LIB/agent-md-authority" enroll /home/dev/chown-failure --exec-user dev --yes
+) >/tmp/chown-failure.log 2>&1
+CHOWN_STATUS=$?
+row root chown "failure exit" "fail closed" "$CHOWN_STATUS" 1
+row root enrollment "no success announcement" "fail closed" \
+  "$(grep -c '^enrolled ' /tmp/chown-failure.log)" 0
+row root enrollment "no published record" "fail closed" \
+  "$(find /var/lib/agent-md/projects -name enrollment.json | wc -l)" "$BEFORE"
+row root enrollment "explicit ownership error" "fail closed" \
+  "$(grep -c 'cannot assign enrollment ownership to agentmd' /tmp/chown-failure.log)" 1
+
+header "0c. direct authority enrollment and state migration"
+cp -a /home/dev/repo /home/dev/service-repo
+row agentmd enrollment "direct service caller" "supported enrollment" \
+  "$(try sudo -u agentmd "$LIB/agent-md-authority" enroll /home/dev/service-repo --exec-user dev --yes)" allowed
+SERVICE_ID=$("$LIB/agent-md-authority" show --workspace /home/dev/service-repo | awk '/^project id:/{print $3}')
+SERVICE_PROJECT=/var/lib/agent-md/projects/$SERVICE_ID
+for ARTIFACT in "$SERVICE_PROJECT" "$SERVICE_PROJECT/enrollment.json" "$SERVICE_PROJECT/state.json"; do
+  row agentmd "${ARTIFACT##*/}" owner "authority custody" \
+    "$(stat -c %U:%G "$ARTIFACT")" agentmd:agentmd
+done
+row agentmd enrollment eligible "accessible workspace" \
+  "$(jq -r .status "$SERVICE_PROJECT/enrollment.json")" eligible
+sudo -u agentmd bash -c '
+  . "$1/authority-lib.sh"
+  state=$(authority_state_read "$2") || exit 1
+  jq ".schema = 2 | .scopes.worktree.next_sequence = 42 | .scopes.staged.next_sequence = 9" <<<"$state" > "$3/state.json"
+' _ "$LIB" "$SERVICE_ID" "$SERVICE_PROJECT"
+BEFORE=$(sha256sum "$SERVICE_PROJECT/state.json" "$SERVICE_PROJECT/enrollment.json")
+row root enrollment "duplicate refused" "preserve sequence state" \
+  "$(try "$LIB/agent-md-authority" enroll /home/dev/service-repo --exec-user dev --yes)" denied
+row root state "duplicate keeps exact bytes" "preserve sequence state" \
+  "$(sha256sum "$SERVICE_PROJECT/state.json" "$SERVICE_PROJECT/enrollment.json")" "$BEFORE"
+row agentmd state "migrate and persist" "authority write access" \
+  "$(try sudo -u agentmd bash -c '. "$1/authority-lib.sh"; state=$(authority_state_read "$2") && authority_state_write "$2" "$state"' _ "$LIB" "$SERVICE_ID")" allowed
+row agentmd state "migration keeps sequences" "no reset" \
+  "$(jq -c '[.schema, .scopes.worktree.next_sequence, .scopes.staged.next_sequence]' "$SERVICE_PROJECT/state.json")" '[3,42,9]'
+
 echo "=== ENROLL + SUDOERS ==="
 enroll_project || { echo "ABORT: enrollment failed"; exit 1; }
+header "0. root enrollment leaves authority-owned state"
+PROJECT=/var/lib/agent-md/projects/$PID
+for ARTIFACT in "$PROJECT" "$PROJECT/enrollment.json" "$PROJECT/state.json"; do
+  row root "${ARTIFACT##*/}" owner "enroll normalizes owner" \
+    "$(stat -c %U:%G "$ARTIFACT")" agentmd:agentmd
+done
+row root project mode "enroll permissions" "$(stat -c %a "$PROJECT")" 755
+for ARTIFACT in enrollment.json state.json; do
+  row root "$ARTIFACT" mode "enroll permissions" "$(stat -c %a "$PROJECT/$ARTIFACT")" 644
+done
+row agentmd state.json "atomic state update" "authority write access" \
+  "$(try sudo -u agentmd bash -c '. "$1/authority-lib.sh"; state=$(authority_state_read "$2") && authority_state_write "$2" "$state"' _ "$LIB" "$PID")" allowed
+row root workspace owner "developer custody" "$(stat -c %U:%G /home/dev/repo)" dev:dev
+for PRINCIPAL in dev agentmd-runner; do
+  row "$PRINCIPAL" project "create file" "no project-store write" \
+    "$(try sudo -u "$PRINCIPAL" touch "$PROJECT/unauthorized")" denied
+done
+[ "$FAIL" -eq 0 ] || { echo "ABORT: root enrollment regression"; exit 1; }
 visudo -cf "/etc/sudoers.d/agent-md-$PID"
 visudo -c >/dev/null && echo "global sudoers: valid"
 grep -Ev '^(#|$)' "/etc/sudoers.d/agent-md-$PID"

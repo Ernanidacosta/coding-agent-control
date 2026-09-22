@@ -237,6 +237,14 @@ cmd_enroll() {
     reasons=$(printf '%s' "$path_report" | jq -c '[.[] | select(.status != "eligible")
       | "PATH entry \(.entry): \(.reason)"]')
   fi
+  local traversal_reasons
+  traversal_reasons=$(authority_workspace_traversal_reasons "$canonical") \
+    || die "cannot validate workspace traversal"
+  reasons=$(jq -c --argjson traversal "$traversal_reasons" '. + $traversal' <<<"$reasons")
+  [ "$reasons" = '[]' ] || status=ineligible
+  if is_real_root_prefix && [ "$(id -u)" != 0 ]; then
+    note "workspace traversal: only the current account was tested; agentmd-runner access was not probed by this unprivileged enrollment"
+  fi
 
   local project_id; project_id=$(new_uuid)
   local record
@@ -285,15 +293,33 @@ cmd_enroll() {
 
   local dir="$projects/$project_id"
   mkdir -p "$dir" || die "cannot create $dir"
-  chmod 0755 "$dir"
-  printf '%s\n' "$record" | atomic_write "$dir/enrollment.json" 0644
+  chmod 0755 "$dir" || die "cannot set project directory mode"
   # A fresh project starts with empty sequence lines, never with a pending and
   # never with a terminal result. Re-enrolling an existing project keeps its
   # state: the sequence must not restart, or a stale receipt from before the
   # re-enrollment could match a number issued after it.
   if [ ! -e "$dir/state.json" ]; then
-    authority_state_new_json | atomic_write "$dir/state.json" 0644
+    authority_state_new_json | atomic_write "$dir/state.json" 0644 \
+      || die "cannot create initial project state"
   fi
+  # Publish enrollment only after its ownership and the writable state boundary
+  # are ready. In particular, sudo enrollment must not leave a root-owned store.
+  local pending_enrollment
+  pending_enrollment=$(mktemp "$dir/.agent-md-enrollment.XXXXXX") \
+    || die "cannot create pending enrollment"
+  if ! printf '%s\n' "$record" | atomic_write "$pending_enrollment" 0644; then
+    rm -f "$pending_enrollment"
+    die "cannot write enrollment"
+  fi
+  if is_real_root_prefix; then
+    if ! chown "$AUTHORITY_SERVICE_USER:$AUTHORITY_SERVICE_USER" \
+        "$dir" "$dir/state.json" "$pending_enrollment"; then
+      rm -f "$pending_enrollment"
+      die "cannot assign enrollment ownership to $AUTHORITY_SERVICE_USER; enrollment was not published"
+    fi
+  fi
+  mv -f "$pending_enrollment" "$dir/enrollment.json" \
+    || { rm -f "$pending_enrollment"; die "cannot publish enrollment"; }
   note ""
   note "enrolled $canonical as $project_id ($status)"
 }

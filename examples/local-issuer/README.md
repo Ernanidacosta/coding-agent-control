@@ -117,6 +117,30 @@ the execution environment and the PATH verdict — and writes nothing until a
 human confirms. `--yes` accepts non-interactively; it is a command-line flag on
 purpose, so no environment variable can silently approve an enrollment.
 
+Production enrollment accepts root (including `sudo`) or `agentmd`. The project
+directory, `enrollment.json` and `state.json` belong to `agentmd:agentmd`, with
+modes `0755`, `0644` and `0644`. Ownership is normalized explicitly before the
+enrollment is published; a failed `chown` aborts without announcing success or
+publishing a record. The developer and runner receive no write access to this
+store, and workspace ownership is untouched. `--root PREFIX` stages files under
+the caller's ownership without changing host accounts or probing their access.
+Staged jobs execute as that caller even when the host has a production runner
+account; production always requires the separate `agentmd-runner` account.
+An existing enrollment is refused without rewriting its record or sequence
+state. Previously enrolled stores are not automatically repaired.
+
+Workspace parent directories must allow runtime traversal even when root can
+read the repository. Production enrollment as root
+uses `runuser` to test actual traversal as both `agentmd` and `agentmd-runner`,
+including ACL effects. A denied traversal, missing account or unavailable probe
+makes the enrollment **ineligible**, with an account-specific reason. Direct
+enrollment as `agentmd` tests its own access and explicitly reports that runner
+access was not probed; it cannot assume the runner's identity. The authority
+reads the live workspace; checks execute against the sealed snapshot. These
+are enrollment-time probes, not guarantees that permissions remain unchanged.
+The installer and enrollment never change home permissions or add ACLs; choose
+an accessible workspace location or have its owner review access separately.
+
 Review it later with:
 
 ```bash
@@ -383,8 +407,8 @@ transient substitution becomes a fallback rather than a forgery.
 
 Enumeration is the one place a repository's own Git configuration is read, so
 it crosses into the execution-only account first. A repository that manages to
-execute code through `.git/config` reaches the runner, never the authority. A
-staging root has no such account and says so rather than hiding the gap.
+execute code through `.git/config` reaches the runner, never the authority.
+Staging does not switch accounts and announces that limitation.
 
 ### What the child gets
 
