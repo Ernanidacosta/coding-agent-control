@@ -364,6 +364,62 @@ visudo -cf "/etc/sudoers.d/agent-md-$PID"
 visudo -c >/dev/null && echo "global sudoers: valid"
 grep -Ev '^(#|$)' "/etc/sudoers.d/agent-md-$PID"
 
+header "0f. root reapproval keeps signed history and the literal sudo rule"
+FIRST_EV=$(evaluate_as dev)
+row dev issuer "first signed evaluation" "reapproval baseline" \
+  "$(jq -r .status <<<"$FIRST_EV")" authenticated_pass
+REAPPROVAL_STATE_BEFORE=$(sha256sum "$PROJECT/state.json")
+REAPPROVAL_RECEIPT_BEFORE=$(sha256sum "$PROJECT/receipts/worktree/1.json")
+REAPPROVAL_SUDOERS_BEFORE=$(sha256sum "/etc/sudoers.d/agent-md-$PID")
+REAPPROVAL_KEY_BEFORE=$(cat /var/lib/agent-md/keys/current)
+REAPPROVAL_TRUSTED_BEFORE=$(sha256sum "$PROJECT/trusted-keys/$KEY_ID.pub")
+REAPPROVAL_MECHANISM_BEFORE=$(jq -r '.approved_mechanism[] | select(.path == ".claude/hooks/_lib.sh") | .digest' "$PROJECT/enrollment.json")
+sudo -u dev bash -c 'printf "# reviewed mechanism update\n" >> /home/dev/repo/.claude/hooks/_lib.sh'
+BLOCKED_EV=$(evaluate_as dev)
+row dev issuer "changed mechanism refused" "pin remains strict" \
+  "$(jq -r .reason_code <<<"$BLOCKED_EV")" REFUSED_MECHANISM_CHANGED
+row dev authority "reapprove directly" "root-only administration" \
+  "$(try sudo -u dev "$LIB/agent-md-authority" reapprove /home/dev/repo --yes)" denied
+row agentmd-runner authority "reapprove directly" "root-only administration" \
+  "$(try sudo -u agentmd-runner "$LIB/agent-md-authority" reapprove /home/dev/repo --yes)" denied
+row agentmd authority "root alias cannot reapprove" "canonical admin gate" \
+  "$(try sudo -u agentmd "$LIB/agent-md-authority" reapprove /home/dev/repo --root /tmp/.. --yes)" denied
+row dev agentmd "reapprove through sudo" "no administrative sudo rule" \
+  "$(try sudo -u dev sudo -n -u agentmd "$LIB/agent-md-authority" reapprove /home/dev/repo --yes)" denied
+"$LIB/agent-md-authority" reapprove /home/dev/repo --yes >/tmp/reapprove.log 2>&1 \
+  || { cat /tmp/reapprove.log; exit 1; }
+row root enrollment "same project id" "in-place reapproval" \
+  "$(jq -r .project_id "$PROJECT/enrollment.json")" "$PID"
+row root state "byte-identical at publication" "sequence preserved" \
+  "$(sha256sum "$PROJECT/state.json")" "$REAPPROVAL_STATE_BEFORE"
+row root receipt "old signature preserved" "history retained" \
+  "$(sha256sum "$PROJECT/receipts/worktree/1.json")" "$REAPPROVAL_RECEIPT_BEFORE"
+row root sudoers "literal rule unchanged" "same check set" \
+  "$(sha256sum "/etc/sudoers.d/agent-md-$PID")" "$REAPPROVAL_SUDOERS_BEFORE"
+row root key "active key unchanged" "key custody" \
+  "$(cat /var/lib/agent-md/keys/current)" "$REAPPROVAL_KEY_BEFORE"
+row root trusted-keys "public key unchanged" "key custody" \
+  "$(sha256sum "$PROJECT/trusted-keys/$KEY_ID.pub")" "$REAPPROVAL_TRUSTED_BEFORE"
+row root runs "first run history retained" "no cleanup" \
+  "$([ -d "$PROJECT/runs/$(jq -r .run_id <<<"$FIRST_EV")" ] && echo yes || echo no)" yes
+row root enrollment "authority ownership" "atomic publication" \
+  "$(stat -c %U:%G "$PROJECT/enrollment.json")" agentmd:agentmd
+row root enrollment "new mechanism digest" "explicit approval" \
+  "$(jq -r '.approved_mechanism[] | select(.path == ".claude/hooks/_lib.sh") | .digest' "$PROJECT/enrollment.json" | grep -c -v "$REAPPROVAL_MECHANISM_BEFORE")" 1
+OLD_VALIDATION=$(sudo -u dev "$LIB/receipt-verify.sh" /home/dev/repo worktree 2>/dev/null)
+row dev validator "old PASS stays stale" "new mechanism identity" \
+  "$(jq -r .status <<<"$OLD_VALIDATION")" stale
+row dev validator "old signature still authentic" "history retained" \
+  "$(jq -r .authentic <<<"$OLD_VALIDATION")" true
+SECOND_EV=$(evaluate_as dev)
+row dev issuer "evaluation after reapproval" "new pin accepted" \
+  "$(jq -r .status <<<"$SECOND_EV")" authenticated_pass
+cp /home/dev/repo/.claude/hooks/_lib.sh /tmp/reapprove-approved-mechanism
+row root state "sequence keeps advancing" "no reset" \
+  "$(jq -r .scopes.worktree.next_sequence "$PROJECT/state.json")" 3
+row root receipt "old file still present" "history retained" \
+  "$([ -f "$PROJECT/receipts/worktree/1.json" ] && echo yes || echo no)" yes
+
 header "0e. workspace identity larger than one exec argument"
 sudo -u dev python3 - <<'PY'
 from pathlib import Path
@@ -467,7 +523,7 @@ done
 header "5. revalidation refuses before execution"
 sudo -u dev bash -c 'printf "#!/bin/bash\n# tampered\n" > ~/repo/.claude/hooks/_lib.sh'
 row dev mechanism "tamper then evaluate" "approved digests" "$(evaluate_as dev | jq -r .reason_code 2>/dev/null)" REFUSED_MECHANISM_CHANGED
-sudo -u dev bash -c 'printf "#!/bin/bash\n" > ~/repo/.claude/hooks/_lib.sh'
+sudo -u dev cp /tmp/reapprove-approved-mechanism /home/dev/repo/.claude/hooks/_lib.sh
 row dev "not enrolled path" "evaluate elsewhere" "authority binding" "$(sudo -u dev env -i PATH=/usr/bin:/bin sudo -n -u agentmd "$LIB/agent-md-issuer" evaluate <<<'{"protocol":1,"scope":"worktree","workspace":"/tmp"}' 2>/dev/null | jq -r .reason_code 2>/dev/null)" REFUSED_WORKSPACE_UNSUPPORTED
 
 header "6. one snapshot per evaluation"

@@ -421,3 +421,112 @@ enrollment_file() {
   jq -e 'any(.reasons[]; contains("tracked-private.txt"))' "$record" >/dev/null
   [ "$(stat -c %a "$WS/tracked-private.txt")" = 0 ]
 }
+
+@test "32 reapproval cancellation keeps the old enrollment and state byte-identical" {
+  bash "$AUTHORITY" enroll "$WS" --root "$ROOT" --yes >/dev/null
+  local record dir before
+  record=$(enrollment_file); dir=${record%/*}
+  before=$(sha256sum "$record" "$dir/state.json")
+  printf '# updated\n' >> "$WS/.claude/hooks/_lib.sh"
+
+  run bash -c 'printf "n\n" | bash "$AUTHORITY" reapprove "$WS" --root "$ROOT"'
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"reapprove declined"* ]]
+  [ "$(sha256sum "$record" "$dir/state.json")" = "$before" ]
+  [ "$(find "$dir" -name '.agent-md-enrollment.*' | wc -l)" -eq 0 ]
+}
+
+@test "33 a failed atomic publication keeps the old enrollment and state" {
+  bash "$AUTHORITY" enroll "$WS" --root "$ROOT" --yes >/dev/null
+  local record dir before
+  record=$(enrollment_file); dir=${record%/*}
+  before=$(sha256sum "$record" "$dir/state.json")
+  printf '# updated\n' >> "$WS/.claude/hooks/_lib.sh"
+  export FAIL_DEST="$record"
+
+  run bash -c '
+    mv() {
+      local dest=${!#}
+      [ "$dest" != "$FAIL_DEST" ] || return 1
+      command mv "$@"
+    }
+    export -f mv
+    bash "$AUTHORITY" reapprove "$WS" --root "$ROOT" --yes
+  '
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"cannot publish enrollment"* ]]
+  [ "$(sha256sum "$record" "$dir/state.json")" = "$before" ]
+  [ "$(find "$dir" -name '.agent-md-enrollment.*' | wc -l)" -eq 0 ]
+}
+
+@test "34 an unresolved pending reservation blocks reapproval" {
+  bash "$AUTHORITY" enroll "$WS" --root "$ROOT" --yes >/dev/null
+  local record dir before
+  record=$(enrollment_file); dir=${record%/*}
+  jq '.scopes.worktree.next_sequence = 2 |
+      .scopes.worktree.pending = {sequence:1,run_id:"pending-run",scope:"worktree"}' \
+    "$dir/state.json" > "$dir/new-state.json"
+  mv "$dir/new-state.json" "$dir/state.json"
+  before=$(sha256sum "$record" "$dir/state.json")
+
+  run_authority reapprove "$WS" --root "$ROOT" --yes
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"evaluation is pending"* ]]
+  [ "$(sha256sum "$record" "$dir/state.json")" = "$before" ]
+}
+
+@test "35 a changed check set requires sudoers refresh before publication" {
+  bash "$AUTHORITY" enroll "$WS" --root "$ROOT" --yes >/dev/null
+  local record dir before
+  record=$(enrollment_file); dir=${record%/*}
+  before=$(sha256sum "$record" "$dir/state.json")
+  sed -i '/^test =/a runtime = "exit 0"' "$WS/agent-md.toml"
+
+  run_authority reapprove "$WS" --root "$ROOT" --yes
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"sudoers refresh required"* ]]
+  [ "$(sha256sum "$record" "$dir/state.json")" = "$before" ]
+}
+
+@test "36 an active evaluation lock blocks reapproval" {
+  bash "$AUTHORITY" enroll "$WS" --root "$ROOT" --yes >/dev/null
+  local record dir before lock_fd
+  record=$(enrollment_file); dir=${record%/*}
+  before=$(sha256sum "$record" "$dir/state.json")
+  exec {lock_fd}>>"$dir/.evaluation.lock"
+  flock "$lock_fd"
+
+  run_authority reapprove "$WS" --root "$ROOT" --yes
+  flock -u "$lock_fd"
+  exec {lock_fd}>&-
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"evaluation is in progress"* ]]
+  [ "$(sha256sum "$record" "$dir/state.json")" = "$before" ]
+}
+
+@test "37 environment-only reapproval cannot keep an old PASS current" {
+  bash "$AUTHORITY" enroll "$WS" --root "$ROOT" --yes >/dev/null
+  local record dir before
+  record=$(enrollment_file); dir=${record%/*}
+  before=$(sha256sum "$record" "$dir/state.json")
+
+  run_authority reapprove "$WS" --root "$ROOT" --env REVIEWED=1 --yes
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"old PASS could remain current"* ]]
+  [ "$(sha256sum "$record" "$dir/state.json")" = "$before" ]
+}
+
+@test "38 reapproval dry-run writes no locks or enrollment artifacts" {
+  bash "$AUTHORITY" enroll "$WS" --root "$ROOT" --yes >/dev/null
+  local record dir before
+  record=$(enrollment_file); dir=${record%/*}
+  before=$(sha256sum "$record" "$dir/state.json")
+
+  run_authority reapprove "$WS" --root "$ROOT" --dry-run
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"dry run: nothing was written"* ]]
+  [ "$(sha256sum "$record" "$dir/state.json")" = "$before" ]
+  [ ! -e "$dir/.evaluation.lock" ]
+  [ ! -e "$dir/.lock" ]
+  [ "$(stat -c %a "$dir")" = 755 ]
+}

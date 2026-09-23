@@ -6,8 +6,8 @@
 # their behalf. A repository can request capability; it can never grant
 # capability to itself.
 #
-# install, enroll and show only. Issuing receipts, executing checks, signing
-# and sequence allocation live in later slices and are absent here on purpose.
+# Administrative enrollment and run preparation live here. Issuing receipts,
+# executing checks and signing remain in the issuer and runner.
 
 # PROGRAM and ROOT are consumed by authority-lib.sh. shellcheck only follows a
 # sourced file when invoked with -x, so these directives keep the program
@@ -34,6 +34,9 @@ Usage:
   agent-md-authority enroll  WORKSPACE [--root PREFIX] [--exec-user NAME]
                              [--exec-path VALUE] [--env NAME=VALUE]...
                              [--yes] [--dry-run]
+  agent-md-authority reapprove WORKSPACE [--root PREFIX] [--exec-user NAME]
+                             [--exec-path VALUE] [--env NAME=VALUE]...
+                             [--yes] [--dry-run]
   agent-md-authority show    (PROJECT_ID | --workspace PATH) [--root PREFIX]
   agent-md-authority prepare-run PROJECT_ID [--check NAME] [--run-id ID]
                                  [--root PREFIX]
@@ -46,7 +49,7 @@ Usage:
 Options:
   --root PREFIX   Operate under an alternate filesystem root. Intended for
                   tests and staging; the real installation uses /.
-  --yes           Accept the presented enrollment without prompting. This is a
+  --yes           Accept the presented review without prompting. This is a
                   command-line flag on purpose; no environment variable
                   approves an enrollment.
 
@@ -168,7 +171,11 @@ cmd_install() {
   note "authority ready under $state"
 }
 
-cmd_enroll() {
+cmd_enroll() { cmd_enrollment enroll "$@"; }
+cmd_reapprove() ( cmd_enrollment reapprove "$@"; )
+
+cmd_enrollment() {
+  local mode="$1"; shift
   local workspace="" exec_user="" exec_path="" assume_yes=0 dry_run=0
   local extra_env=()
   while [ $# -gt 0 ]; do
@@ -180,13 +187,18 @@ cmd_enroll() {
       --yes) assume_yes=1; shift ;;
       --dry-run) dry_run=1; shift ;;
       -h|--help) usage; return 0 ;;
-      -*) die "unknown enroll option: $1" ;;
+      -*) die "unknown $mode option: $1" ;;
       *) [ -z "$workspace" ] || die "only one workspace may be enrolled at a time"; workspace="$1"; shift ;;
     esac
   done
-  [ -n "$workspace" ] || die "enroll requires a workspace path"
-  [ -n "$exec_user" ] || exec_user=${SUDO_USER:-$(id -un)}
-  [ -n "$exec_path" ] || exec_path="$AUTHORITY_DEFAULT_EXEC_PATH"
+  [ -n "$workspace" ] || die "$mode requires a workspace path"
+  if [ "$mode" = reapprove ] && [ -n "$ROOT" ]; then
+    ROOT=$(realpath -m -- "$ROOT") || die "cannot resolve staging root"
+    [ "$ROOT" != / ] || ROOT=""
+  fi
+  if [ "$mode" = reapprove ] && is_real_root_prefix && [ "$(id -u)" != 0 ]; then
+    die "reapprove is administrative and must run as root; use sudo"
+  fi
 
   local projects; projects=$(projects_dir)
   [ -d "$projects" ] || die "authority is not installed under $(state_dir); run install first"
@@ -202,8 +214,71 @@ cmd_enroll() {
     *) die "workspace is not a Git repository: $canonical" ;;
   esac
 
-  local existing; existing=$(find_project_by_workspace "$canonical")
-  [ -z "$existing" ] || die "workspace is already enrolled as $existing; revoke it before enrolling again"
+  local existing old_record="" dir="" project_id=""
+  existing=$(authority_find_projects "$canonical")
+  case "$mode" in
+    enroll)
+      [ -z "$existing" ] || die "workspace is already enrolled as $existing; use reapprove $canonical to review updated authority"
+      [ -n "$exec_user" ] || exec_user=${SUDO_USER:-$(id -un)}
+      [ -n "$exec_path" ] || exec_path="$AUTHORITY_DEFAULT_EXEC_PATH"
+      project_id=$(new_uuid)
+      ;;
+    reapprove)
+      [ -n "$existing" ] || die "workspace is not enrolled: $canonical"
+      case "$existing" in *$'\n'*) die "workspace has ambiguous enrollments; reapproval refused" ;; esac
+      project_id="$existing"
+      case "$project_id" in ""|*[!a-zA-Z0-9-]*|.|..) die "existing project id is invalid" ;; esac
+      dir="$projects/$project_id"
+      assert_safe_dir "$dir"
+      [ -L "$dir/enrollment.json" ] && die "enrollment path is a symlink"
+      [ -f "$dir/enrollment.json" ] || die "existing enrollment is missing"
+      if is_real_root_prefix; then
+        [ "$(stat -c %U:%G "$dir")" = "$AUTHORITY_SERVICE_USER:$AUTHORITY_SERVICE_USER" ] \
+          || die "project store ownership is not $AUTHORITY_SERVICE_USER:$AUTHORITY_SERVICE_USER"
+      fi
+
+      if [ "$dry_run" -eq 0 ]; then
+        REAPPROVE_DIR="$dir"
+        REAPPROVE_MODE=$(mode_of "$dir") || die "cannot read project directory mode"
+        trap 'chmod "$REAPPROVE_MODE" "$REAPPROVE_DIR" >/dev/null 2>&1' EXIT
+        chmod u+w "$dir" || die "cannot open project directory for reapproval"
+        local lock
+        for lock in "$(authority_evaluation_lock "$project_id")" "$(authority_project_lock "$project_id")"; do
+          [ -L "$lock" ] && die "project lock is a symlink: $lock"
+          if [ ! -e "$lock" ]; then
+            if is_real_root_prefix; then
+              # shellcheck disable=SC2016 # The child shell receives the lock as $1.
+              runuser -u "$AUTHORITY_SERVICE_USER" -- /bin/bash -c 'umask 077; : > "$1"' _ "$lock" \
+                || die "cannot create authority-owned project lock"
+            else
+              (umask 077; : > "$lock") || die "cannot create project lock"
+            fi
+          fi
+          [ -f "$lock" ] || die "project lock is not a regular file: $lock"
+        done
+        exec 8>>"$(authority_evaluation_lock "$project_id")" || die "cannot open evaluation lock"
+        flock -n 8 || die "reapproval refused: evaluation is in progress"
+        exec 9>>"$(authority_project_lock "$project_id")" || die "cannot open project lock"
+        flock -n 9 || die "reapproval refused: project preparation is in progress"
+      fi
+
+      local state
+      state=$(authority_state_read "$project_id") || die "existing state is unusable: $state"
+      jq -e 'all(.scopes[]; .pending == null)' >/dev/null <<<"$state" \
+        || die "reapproval refused: an evaluation is pending"
+      old_record=$(cat "$dir/enrollment.json") || die "cannot read existing enrollment"
+      jq -e --arg id "$project_id" --arg ws "$canonical" --argjson schema "$AUTHORITY_SCHEMA" '
+        .schema == $schema and .project_id == $id and .workspace == $ws and
+        (.execution.user | type) == "string" and
+        (.approved_contract.checks | type) == "array" and
+        (.approved_environment | type) == "array" and
+        (.metadata.created | type) == "string"
+      ' >/dev/null <<<"$old_record" || die "existing enrollment is invalid"
+      [ -n "$exec_user" ] || exec_user=$(jq -r '.execution.user' <<<"$old_record")
+      [ -n "$exec_path" ] || exec_path=$(jq -r '.approved_environment[] | select(.name == "PATH") | .value' <<<"$old_record")
+      [ -n "$exec_path" ] || die "existing enrollment has no approved PATH"
+      ;;
+  esac
 
   local uid home gids
   uid=$(uid_of_user "$exec_user") || die "unknown execution user: $exec_user"
@@ -226,7 +301,26 @@ cmd_enroll() {
   local tools; tools=$(authority_discover_tools "$uid" "$gids") \
     || die "no trusted runtime tool set could be approved: $tools"
 
-  local environment; environment=$(build_environment "$home" "$exec_path" "${extra_env[@]+"${extra_env[@]}"}") || exit 1
+  local environment pair name value
+  if [ "$mode" = reapprove ]; then
+    environment=$(jq -cS --arg home "$home" --arg path "$exec_path" '
+      .approved_environment | map(if .name == "HOME" then .value = $home
+        elif .name == "PATH" then .value = $path else . end) | sort_by(.name)
+    ' <<<"$old_record") || die "cannot preserve approved environment"
+    for pair in "${extra_env[@]+"${extra_env[@]}"}"; do
+      case "$pair" in *=*) ;; *) die "--env expects NAME=VALUE, got: $pair" ;; esac
+      name=${pair%%=*}; value=${pair#*=}
+      env_name_is_forbidden "$name" && die "refusing to record forbidden environment variable $name"
+      case "$name" in HOME|PATH) die "use --exec-user or --exec-path to change $name" ;; esac
+      environment=$(jq -cS --arg name "$name" --arg value "$value" '
+        if any(.[]; .name == $name) then
+          map(if .name == $name then .value = $value else . end)
+        else . + [{name:$name,value:$value}] end | sort_by(.name)
+      ' <<<"$environment") || die "cannot update approved environment"
+    done
+  else
+    environment=$(build_environment "$home" "$exec_path" "${extra_env[@]+"${extra_env[@]}"}") || exit 1
+  fi
   local path_report; path_report=$(build_path_report "$exec_path" "$uid" "$gids")
   local path_ok; path_ok=$(printf '%s' "$path_report" | jq 'all(.[]; .status == "eligible")')
 
@@ -252,7 +346,6 @@ cmd_enroll() {
     note "workspace traversal and source: only the current account was tested; agentmd-runner access was not probed by this unprivileged enrollment"
   fi
 
-  local project_id; project_id=$(new_uuid)
   local record
   record=$(jq -n \
     --argjson schema "$AUTHORITY_SCHEMA" \
@@ -268,7 +361,7 @@ cmd_enroll() {
     --argjson tools "$tools" \
     --arg status "$status" \
     --argjson reasons "$reasons" \
-    --arg created "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+    --arg created "$(if [ "$mode" = reapprove ]; then jq -r '.metadata.created' <<<"$old_record"; else date -u +%Y-%m-%dT%H:%M:%SZ; fi)" \
     '{
       schema: $schema,
       project_id: $project_id,
@@ -287,24 +380,52 @@ cmd_enroll() {
 
   present_enrollment "$record"
 
+  if [ "$mode" = reapprove ] && [ "$status" != eligible ]; then
+    die "reapproval is ineligible; existing enrollment was not changed"
+  fi
+  if [ "$mode" = reapprove ]; then
+    local old_checks new_checks old_user runtime_changed identity_changed
+    old_checks=$(jq -c '[.approved_contract.checks[].name] | sort' <<<"$old_record")
+    new_checks=$(jq -c '[.approved_contract.checks[].name] | sort' <<<"$record")
+    old_user=$(jq -r '.execution.user' <<<"$old_record")
+    if [ "$old_checks" != "$new_checks" ] || [ "$old_user" != "$exec_user" ]; then
+      die "sudoers refresh required: check names or execution user changed; existing enrollment was not changed"
+    fi
+    runtime_changed=$(printf '%s\n%s\n' "$old_record" "$record" | jq -sc '
+      .[0] as $old | .[1] as $new |
+      $old.approved_environment != $new.approved_environment or
+      $old.approved_tools != $new.approved_tools or
+      $old.path_eligibility != $new.path_eligibility or
+      $old.execution != $new.execution')
+    identity_changed=$(printf '%s\n%s\n' "$old_record" "$record" | jq -sc '
+      .[0] as $old | .[1] as $new |
+      $old.approved_contract_fingerprint != $new.approved_contract_fingerprint or
+      $old.approved_mechanism != $new.approved_mechanism')
+    if [ "$runtime_changed" = true ] && [ "$identity_changed" != true ]; then
+      die "reapproval refused: environment or tools changed without a contract or mechanism identity change; an old PASS could remain current"
+    fi
+  fi
+
   if [ "$dry_run" -eq 1 ]; then
     note ""; note "dry run: nothing was written."
     return 0
   fi
   if [ "$assume_yes" -ne 1 ]; then
-    printf '\nApprove this enrollment? [y/N] '
+    printf '\nApprove this %s? [y/N] ' "$mode"
     local answer; read -r answer
-    case "$answer" in y|Y|yes|YES) ;; *) die "enrollment declined; nothing was written" ;; esac
+    case "$answer" in y|Y|yes|YES) ;; *) die "$mode declined; existing enrollment was not changed" ;; esac
   fi
 
-  local dir="$projects/$project_id"
-  mkdir -p "$dir" || die "cannot create $dir"
-  chmod 0755 "$dir" || die "cannot set project directory mode"
+  dir="$projects/$project_id"
+  if [ "$mode" = enroll ]; then
+    mkdir -p "$dir" || die "cannot create $dir"
+    chmod 0755 "$dir" || die "cannot set project directory mode"
+  fi
   # A fresh project starts with empty sequence lines, never with a pending and
   # never with a terminal result. Re-enrolling an existing project keeps its
   # state: the sequence must not restart, or a stale receipt from before the
   # re-enrollment could match a number issued after it.
-  if [ ! -e "$dir/state.json" ]; then
+  if [ "$mode" = enroll ] && [ ! -e "$dir/state.json" ]; then
     authority_state_new_json | atomic_write "$dir/state.json" 0644 \
       || die "cannot create initial project state"
   fi
@@ -318,8 +439,9 @@ cmd_enroll() {
     die "cannot write enrollment"
   fi
   if is_real_root_prefix; then
-    if ! chown "$AUTHORITY_SERVICE_USER:$AUTHORITY_SERVICE_USER" \
-        "$dir" "$dir/state.json" "$pending_enrollment"; then
+    local ownership_paths=("$pending_enrollment")
+    if [ "$mode" = enroll ]; then ownership_paths=("$dir" "$dir/state.json" "$pending_enrollment"); fi
+    if ! chown "$AUTHORITY_SERVICE_USER:$AUTHORITY_SERVICE_USER" "${ownership_paths[@]}"; then
       rm -f "$pending_enrollment"
       die "cannot assign enrollment ownership to $AUTHORITY_SERVICE_USER; enrollment was not published"
     fi
@@ -327,13 +449,18 @@ cmd_enroll() {
   mv -f "$pending_enrollment" "$dir/enrollment.json" \
     || { rm -f "$pending_enrollment"; die "cannot publish enrollment"; }
   note ""
-  note "enrolled $canonical as $project_id ($status)"
+  if [ "$mode" = reapprove ]; then
+    note "reapproved $canonical as $project_id ($status); state and receipts preserved"
+  else
+    note "enrolled $canonical as $project_id ($status)"
+  fi
 }
 
 present_enrollment() {
   local record="$1"
   note "Enrollment for review"
   note "---------------------"
+  note "approval id:    $(printf '%s' "$record" | jq -r '.project_id')"
   note "workspace:      $(printf '%s' "$record" | jq -r '.workspace')"
   note "execution user: $(printf '%s' "$record" | jq -r '.execution.user') (uid $(printf '%s' "$record" | jq -r '.execution.uid'))"
   note ""
@@ -397,7 +524,7 @@ cmd_prepare_run() {
   path_has_symlink "$file" && die "enrollment path traverses a symlink"
   record=$(cat "$file")
   [ "$(printf '%s' "$record" | jq -r '.schema')" = "$AUTHORITY_SCHEMA" ] \
-    || die "enrollment uses an unsupported schema; re-enroll"
+    || die "enrollment uses an unsupported schema; administrative migration is required"
   [ "$(printf '%s' "$record" | jq -r '.status')" = eligible ] \
     || die "enrollment is not eligible; refusing to prepare a run"
 
@@ -937,6 +1064,7 @@ case "$subcommand" in
   show-key) cmd_show_key "$@" ;;
   rotate-key) cmd_rotate_key "$@" ;;
   enroll) cmd_enroll "$@" ;;
+  reapprove) cmd_reapprove "$@" ;;
   show) cmd_show "$@" ;;
   enumerate) cmd_enumerate "$@" ;;
   identity) cmd_identity "$@" ;;

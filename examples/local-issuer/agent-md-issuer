@@ -293,7 +293,7 @@ issuer_check_eligibility() {
     refuse REFUSED_ENROLLMENT_CORRUPT "enrollment record does not match the authority schema" "$EX_ENROLLMENT_CORRUPT"
   fi
   if [ "$(printf '%s' "$record" | jq -r '.schema')" != "$AUTHORITY_SCHEMA" ]; then
-    refuse REFUSED_ENROLLMENT_CORRUPT "enrollment uses schema $(printf '%s' "$record" | jq -r '.schema'); re-enroll with this authority version" "$EX_ENROLLMENT_CORRUPT"
+    refuse REFUSED_ENROLLMENT_CORRUPT "enrollment uses schema $(printf '%s' "$record" | jq -r '.schema'); administrative migration is required" "$EX_ENROLLMENT_CORRUPT"
   fi
   if [ "$(printf '%s' "$record" | jq -r '.workspace')" != "$canonical" ]; then
     refuse REFUSED_ENROLLMENT_CORRUPT "enrollment workspace does not match its own binding" "$EX_ENROLLMENT_CORRUPT"

@@ -128,6 +128,34 @@ rewrite_state() {
     '.status == "reusable_ordinary" and .authentic == true and .current == true and .applicable == true' >/dev/null
 }
 
+@test "1c reapproval pins the new mechanism without resetting signed receipt history" {
+  evaluate >/dev/null
+  local original_state original_receipt project_id old_mechanism
+  original_state=$(cat "$PROJ/state.json")
+  original_receipt=$(cat "$(receipt_of 1)")
+  project_id=$(jq -r .project_id "$PROJ/enrollment.json")
+  old_mechanism=$(jq -r '.approved_mechanism[] | select(.path == ".claude/hooks/_lib.sh") | .digest' "$PROJ/enrollment.json")
+
+  printf '# approved update\n' >> "$WS/.claude/hooks/_lib.sh"
+  run evaluate
+  [ "$status" -ne 0 ]
+  printf '%s' "$output" | jq -e '.reason_code == "REFUSED_MECHANISM_CHANGED"' >/dev/null
+
+  run bash "$AUTHORITY" reapprove "$WS" --root "$ROOT" --env REVIEWED=1 --yes
+  [ "$status" -eq 0 ]
+  [ "$(cat "$PROJ/state.json")" = "$original_state" ]
+  [ "$(cat "$(receipt_of 1)")" = "$original_receipt" ]
+  [ "$(jq -r .project_id "$PROJ/enrollment.json")" = "$project_id" ]
+  jq -e 'any(.approved_environment[]; .name == "REVIEWED" and .value == "1")' "$PROJ/enrollment.json" >/dev/null
+  [ "$(jq -r '.approved_mechanism[] | select(.path == ".claude/hooks/_lib.sh") | .digest' "$PROJ/enrollment.json")" != "$old_mechanism" ]
+
+  evaluate >/dev/null
+  jq -e '.scopes.worktree.next_sequence == 3 and .scopes.worktree.last_terminal.sequence == 2' "$PROJ/state.json" >/dev/null
+  [ -f "$(receipt_of 1)" ]
+  [ -f "$(receipt_of 2)" ]
+  [ "$(verify_status)" = reusable_ordinary ]
+}
+
 @test "2 a current authenticated failure is reusable negative evidence" {
   rm -f "$FLAG"
   evaluate >/dev/null || true

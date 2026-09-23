@@ -126,8 +126,34 @@ store, and workspace ownership is untouched. `--root PREFIX` stages files under
 the caller's ownership without changing host accounts or probing their access.
 Staged jobs execute as that caller even when the host has a production runner
 account; production always requires the separate `agentmd-runner` account.
-An existing enrollment is refused without rewriting its record or sequence
-state. Previously enrolled stores are not automatically repaired.
+An existing enrollment is refused by `enroll`. After an approved mechanism,
+contract command, or environment change, an administrator can review the same
+project again:
+
+```bash
+sudo ./examples/local-issuer/agent-md-authority reapprove /path/to/repo
+```
+
+`reapprove` presents the full enrollment review and requires confirmation;
+`--yes` is an explicit administrative approval for noninteractive use. It keeps
+the project id, state bytes and sequence, signed receipts, trusted keys and run
+history. Only `enrollment.json` is replaced atomically after eligibility and
+ownership checks. An active evaluation or unresolved pending reservation blocks
+reapproval. Old receipts remain signed history, but their fingerprints cannot
+make a previous PASS current for the new identity.
+
+The command accepts the existing execution user, PATH and extra environment as
+defaults; explicit `--exec-path` and `--env` values appear in the new review.
+It runs as root on a production host. If the execution user or literal check
+names change, it refuses without publishing and reports `sudoers refresh
+required`: the existing rule cannot authorize the proposed enrollment. This
+flow does not silently widen or rewrite sudoers. Keep those names unchanged for
+in-place reapproval; a changed rule needs a separately reviewed administrative
+update before it can be operational.
+An environment, tool or PATH resolution change also needs a changed contract
+or mechanism identity. Otherwise a previously signed PASS could still match
+all four receipt fingerprints after reapproval, so the command refuses that
+proposal rather than claiming a new approval has invalidated it.
 
 Workspace parent directories must allow runtime traversal even when root can
 read the repository. Production enrollment as root
@@ -355,7 +381,7 @@ accelerates.
 
 C2 changed the canonical contract representation, so the record carries
 `schema: 2`. A schema-1 enrollment written by C1 is refused with a clear
-instruction to re-enroll rather than being silently reinterpreted.
+diagnostic requiring administrative migration rather than being silently reinterpreted.
 
 `approved_contract` now records `excluded_conditional` — `independent` and
 `approval` commands that are configured but which the issuer must never run,
