@@ -156,6 +156,56 @@ authority_workspace_traversal_reasons() {
   printf '%s' "$reasons"
 }
 
+# A production root can ask the real runner for the same Phase A source view
+# used by identity. A direct service enrollment can only prove its own view;
+# it does not gain a new sudo capability to impersonate the runner.
+authority_workspace_source_reasons() {
+  local workspace="$1" source_file user="$AUTHORITY_RUNNER_USER" reasons result
+  is_real_root_prefix || { printf '[]'; return 0; }
+  source_file=$(mktemp "${TMPDIR:-/tmp}/agent-md-enroll-source.XXXXXX") || return 1
+  if [ "$(id -u)" = 0 ]; then
+    # shellcheck disable=SC2016 # The child shell receives these as positional arguments.
+    if ! command -v runuser >/dev/null 2>&1 ||
+      ! runuser -u "$user" -- /bin/bash -c '
+        . "$1"; . "$2"
+        cd "$3" || exit 1
+        authority_export_git_workspace_env "$3"
+        authority_pa_verification_receipt_source_manifest_json worktree
+      ' _ "$(lib_dir)/authority-lib.sh" "$(lib_dir)/phase-a-source.sh" "$workspace" \
+        > "$source_file" 2>/dev/null; then
+      rm -f "$source_file"
+      return 1
+    fi
+  else
+    user=$(id -un)
+    if ! ( cd "$workspace" && authority_export_git_workspace_env "$workspace" &&
+      authority_pa_verification_receipt_source_manifest_json worktree ) \
+        > "$source_file" 2>/dev/null; then
+      rm -f "$source_file"
+      return 1
+    fi
+  fi
+  if ! jq -e -s 'length == 1 and (.[0] | type) == "object" and
+    (.[0].valid | type) == "boolean"' "$source_file" >/dev/null 2>&1; then
+    rm -f "$source_file"
+    return 1
+  fi
+  reasons=$(jq -c --arg user "$user" '
+    [.entries[]? | select(.valid != true) |
+      "\($user) cannot use source path \(.path): \(.worktree.error // .index.error // .error // "unusable source entry")"] as $bad
+    | if .valid == true then []
+      elif ($bad | length) == 0 then
+        ["\($user) cannot compute source identity: \(.error // "unusable source manifest")"]
+      else $bad[:8] + (if ($bad | length) > 8
+        then ["\($user) has \(($bad | length) - 8) more unusable source paths"]
+        else [] end)
+      end' "$source_file")
+  result=$?
+  rm -f "$source_file"
+  [ "$result" -eq 0 ] || return "$result"
+  printf '%s' "$reasons"
+}
+
 # --- PATH eligibility --------------------------------------------------------
 # A PATH entry the execution user can write is a way to replace a real tool with
 # one that exits 0, collect an authenticated PASS and put the real tool back.

@@ -276,7 +276,7 @@ copy_file() {
 
 copy_with_agent_body() {
   # dst, label, header
-  local dst="$1" label="$2" header="$3" body="$SCRIPT_DIR/AGENT.md" staged
+  local dst="$1" label="$2" header="$3" body="$SCRIPT_DIR/AGENT.md" staged mode_bits
   skip_existing "$dst" && return 0
   if same_file "$body" "$dst"; then
     report_same_file "$label"
@@ -298,6 +298,14 @@ copy_with_agent_body() {
     rm -f "$staged"
     echo "  · already current  $label"
     return 0
+  fi
+  # New local rules remain private; replacing an existing regular file keeps
+  # the mode its owner chose, just like the hook transport configurations.
+  if [ -f "$dst" ] && [ ! -L "$dst" ]; then
+    mode_bits=$(stat -c '%a' "$dst" 2>/dev/null || stat -f '%Lp' "$dst" 2>/dev/null) \
+      || { rm -f "$staged"; echo "Error: cannot read mode of $dst" >&2; exit 1; }
+    chmod "$mode_bits" "$staged" \
+      || { rm -f "$staged"; echo "Error: cannot preserve mode of $dst" >&2; exit 1; }
   fi
   backup_if_exists "$dst"
   mv "$staged" "$dst"
@@ -681,9 +689,8 @@ else
   echo "  → would populate  memory/ (only missing files)"
 fi
 
-# Fresh-install working state is private by default. Use the repository-local
-# exclude file rather than a committed .gitignore entry: this avoids publishing
-# evidence of agent usage and does not affect legacy files already tracked.
+# Local working state and host wiring stay untracked by default. Git's local
+# exclude never hides paths already in the index from Phase A source identity.
 if [ "$DRY_RUN" -eq 0 ] && git -C "$TARGET" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
   GIT_DIR=$(git -C "$TARGET" rev-parse --absolute-git-dir 2>/dev/null || true)
   if [ -n "$GIT_DIR" ]; then
@@ -697,7 +704,19 @@ if [ "$DRY_RUN" -eq 0 ] && git -C "$TARGET" rev-parse --is-inside-work-tree >/de
       grep -qxF "$LOCAL_STATE_PATH" "$LOCAL_EXCLUDE" 2>/dev/null \
         || printf '%s\n' "$LOCAL_STATE_PATH" >> "$LOCAL_EXCLUDE"
     done
-    echo "  ✓ local Git exclude (working memory stays unversioned by default)"
+    LOCAL_MARKER='# local host wiring added by coding-agent-control'
+    if ! grep -qF "$LOCAL_MARKER" "$LOCAL_EXCLUDE" 2>/dev/null; then
+      printf '%s\n' "$LOCAL_MARKER" >> "$LOCAL_EXCLUDE"
+    fi
+    for LOCAL_STATE_PATH in \
+      '/.claude/settings.json' '/.claude/settings.json.bak*' \
+      '/.codex/hooks.json' '/.codex/hooks.json.bak*' \
+      '/.cursor/rules/agent-md.mdc' '/.cursor/rules/agent-md.mdc.bak*' \
+      '/.windsurf/rules/agent-md.md' '/.windsurf/rules/agent-md.md.bak*'; do
+      grep -qxF "$LOCAL_STATE_PATH" "$LOCAL_EXCLUDE" 2>/dev/null \
+        || printf '%s\n' "$LOCAL_STATE_PATH" >> "$LOCAL_EXCLUDE"
+    done
+    echo "  ✓ local Git exclude (working memory and host wiring stay unversioned by default)"
   fi
 fi
 

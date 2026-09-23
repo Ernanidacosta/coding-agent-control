@@ -135,7 +135,11 @@ uses `runuser` to test actual traversal as both `agentmd` and `agentmd-runner`,
 including ACL effects. A denied traversal, missing account or unavailable probe
 makes the enrollment **ineligible**, with an account-specific reason. Direct
 enrollment as `agentmd` tests its own access and explicitly reports that runner
-access was not probed; it cannot assume the runner's identity. The authority
+access was not probed; it cannot assume the runner's identity. Root also has
+the runner compute the live Phase A source manifest during enrollment. An
+unreadable tracked file makes enrollment ineligible with its path in the
+diagnostic. Direct `agentmd` enrollment checks its own source view and reports
+the runner limitation. The authority
 reads the live workspace; checks execute against the sealed snapshot. These
 are enrollment-time probes, not guarantees that permissions remain unchanged.
 The installer and enrollment never change home permissions or add ACLs; choose

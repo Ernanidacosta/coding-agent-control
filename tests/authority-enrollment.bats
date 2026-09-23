@@ -399,3 +399,25 @@ enrollment_file() {
   [ ! -e "$MARKER" ]
   jq -e '.status == "eligible"' "$(enrollment_file)" >/dev/null
 }
+
+@test "31 service enrollment diagnoses an unreadable tracked source without changing its mode" {
+  [ "$(id -u)" -ne 0 ] || skip "the real root/runner case is exercised by the integration harness"
+  printf 'private tracked source\n' > "$WS/tracked-private.txt"
+  git -C "$WS" add tracked-private.txt
+  chmod 0000 "$WS/tracked-private.txt"
+  run bash -c '
+    fixture_root=$ROOT
+    set -- --help
+    . "$AUTHORITY" >/dev/null
+    ROOT=$fixture_root
+    is_real_root_prefix() { return 0; }
+    chown() { return 0; }
+    cmd_enroll "$WS" --root "$ROOT" --yes
+  ' "$AUTHORITY"
+  [ "$status" -eq 0 ]
+  local record
+  record=$(enrollment_file)
+  [ "$(jq -r .status "$record")" = ineligible ]
+  jq -e 'any(.reasons[]; contains("tracked-private.txt"))' "$record" >/dev/null
+  [ "$(stat -c %a "$WS/tracked-private.txt")" = 0 ]
+}

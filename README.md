@@ -517,6 +517,12 @@ before anything is touched, so a reinstall that changes nothing writes nothing
 and leaves no backup, and a real change costs exactly one. `skip` and `replace`
 remain explicit options.
 
+Host wiring in `.claude/settings.json`, `.codex/hooks.json`, the Cursor and
+Windsurf `agent-md` rules, and their backups is listed in the
+repository-local `.git/info/exclude`. Untracked copies therefore stay out of
+the project's source identity; files already tracked remain in that identity.
+The installer preserves existing file modes, including private `0600` configs.
+
 `skip`, `replace` and `--no-overwrite` all answer the same question: what
 happens to a host config that **already exists**. On a target that has none
 there is nothing for them to protect, so the file is created complete under

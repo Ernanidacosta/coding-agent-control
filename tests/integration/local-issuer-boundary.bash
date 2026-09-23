@@ -294,6 +294,52 @@ row agentmd state "migrate and persist" "authority write access" \
 row agentmd state "migration keeps sequences" "no reset" \
   "$(jq -c '[.schema, .scopes.worktree.next_sequence, .scopes.staged.next_sequence]' "$SERVICE_PROJECT/state.json")" '[3,42,9]'
 
+header "0d. private host wiring and tracked source readability"
+cp -a /home/dev/repo /home/dev/host-repo
+sudo -u dev bash /package/install.sh --agent=all --no-githooks /home/dev/host-repo >/tmp/host-install.log 2>&1 \
+  || { cat /tmp/host-install.log; exit 1; }
+sudo -u dev bash -c '
+  cd /home/dev/host-repo || exit 1
+  for path in .claude/settings.json .codex/hooks.json; do
+    chmod 0600 "$path"
+    cp -p "$path" "$path.bak"
+    cp -p "$path" "$path.bak.1"
+  done
+  chmod 0600 .cursor/rules/agent-md.mdc .windsurf/rules/agent-md.md
+'
+"$LIB/agent-md-authority" enroll /home/dev/host-repo --exec-user dev --yes >/tmp/host-enroll.log 2>&1 \
+  || { cat /tmp/host-enroll.log; exit 1; }
+HOST_ID=$("$LIB/agent-md-authority" show --workspace /home/dev/host-repo | awk '/^project id:/ {print $3}')
+row root "host wiring" "enrollment eligibility" "local Git exclude" \
+  "$(jq -r .status "/var/lib/agent-md/projects/$HOST_ID/enrollment.json")" eligible
+runuser -u agentmd-runner -- "$LIB/agent-md-authority" identity "$HOST_ID" > /tmp/host-identity.json
+row runner "host wiring" "private files in source" "Phase A" \
+  "$(jq '[.source.entries[].path | select(test("^(\\.claude/settings\\.json|\\.codex/hooks\\.json|\\.cursor/rules/agent-md\\.mdc|\\.windsurf/rules/agent-md\\.md)"))] | length' /tmp/host-identity.json)" 0
+row root "host wiring" "private mode remains" "no chmod widening" \
+  "$(stat -c %a /home/dev/host-repo/.claude/settings.json)" 600
+
+cp -a /home/dev/host-repo /home/dev/tracked-repo
+sudo -u dev bash -c '
+  git -C /home/dev/tracked-repo add -f .claude/settings.json
+'
+"$LIB/agent-md-authority" enroll /home/dev/tracked-repo --exec-user dev --yes >/tmp/tracked-enroll.log 2>&1 \
+  || { cat /tmp/tracked-enroll.log; exit 1; }
+TRACKED_ID=$("$LIB/agent-md-authority" show --workspace /home/dev/tracked-repo | awk '/^project id:/ {print $3}')
+TRACKED_RECORD="/var/lib/agent-md/projects/$TRACKED_ID/enrollment.json"
+row runner tracked "cannot hash 0600 file" "real account" \
+  "$(try runuser -u agentmd-runner -- sha256sum /home/dev/tracked-repo/.claude/settings.json)" denied
+row root tracked "enrollment eligibility" "source readability" \
+  "$(jq -r .status "$TRACKED_RECORD")" ineligible
+row root tracked "diagnostic names path" "source readability" \
+  "$(jq -r 'any(.reasons[]; contains(".claude/settings.json"))' "$TRACKED_RECORD")" true
+runuser -u agentmd-runner -- "$LIB/agent-md-authority" identity "$TRACKED_ID" > /tmp/tracked-identity.json
+row runner tracked "indexed path remains in source" "Git index wins" \
+  "$(jq -r 'any(.source.entries[]; .path == ".claude/settings.json" and .index.state == "present")' /tmp/tracked-identity.json)" true
+row runner tracked "source identity stays invalid" "fail closed" \
+  "$(jq -r .source.valid /tmp/tracked-identity.json)" false
+row root tracked "mode remains private" "no chmod widening" \
+  "$(stat -c %a /home/dev/tracked-repo/.claude/settings.json)" 600
+
 echo "=== ENROLL + SUDOERS ==="
 enroll_project || { echo "ABORT: enrollment failed"; exit 1; }
 header "0. root enrollment leaves authority-owned state"
@@ -906,6 +952,7 @@ chmod +x "$PAYLOAD"/*.sh
 docker run --rm \
   --cap-add=SYS_PTRACE --security-opt seccomp=unconfined \
   -v "$ROOT_DIR/examples/local-issuer:/src:ro" \
+  -v "$ROOT_DIR:/package:ro" \
   -v "$ROOT_DIR/.claude/hooks:/hooks:ro" \
   -v "$PAYLOAD/hosts:/hosts:ro" \
   -v "$PAYLOAD:/it:ro" \

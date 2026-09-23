@@ -241,9 +241,15 @@ cmd_enroll() {
   traversal_reasons=$(authority_workspace_traversal_reasons "$canonical") \
     || die "cannot validate workspace traversal"
   reasons=$(jq -c --argjson traversal "$traversal_reasons" '. + $traversal' <<<"$reasons")
+  local source_reasons
+  if [ "$traversal_reasons" = '[]' ]; then
+    source_reasons=$(authority_workspace_source_reasons "$canonical") \
+      || die "cannot validate workspace source readability"
+    reasons=$(jq -c --argjson source "$source_reasons" '. + $source' <<<"$reasons")
+  fi
   [ "$reasons" = '[]' ] || status=ineligible
   if is_real_root_prefix && [ "$(id -u)" != 0 ]; then
-    note "workspace traversal: only the current account was tested; agentmd-runner access was not probed by this unprivileged enrollment"
+    note "workspace traversal and source: only the current account was tested; agentmd-runner access was not probed by this unprivileged enrollment"
   fi
 
   local project_id; project_id=$(new_uuid)
