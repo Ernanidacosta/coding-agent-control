@@ -318,6 +318,36 @@ visudo -cf "/etc/sudoers.d/agent-md-$PID"
 visudo -c >/dev/null && echo "global sudoers: valid"
 grep -Ev '^(#|$)' "/etc/sudoers.d/agent-md-$PID"
 
+header "0e. workspace identity larger than one exec argument"
+sudo -u dev python3 - <<'PY'
+from pathlib import Path
+bulk = Path('/home/dev/repo/identity-bulk')
+bulk.mkdir()
+for i in range(400):
+    (bulk / f'{i}-{"0" * 200}.txt').write_text('same content\n')
+PY
+sudo -u agentmd sudo -n -u agentmd-runner "$LIB/agent-md-authority" identity "$PID" \
+  > /tmp/large-identity.json 2>/tmp/large-identity.err
+row agentmd runner "large identity hop exit" "file transport" "$?" 0
+jq -c .source /tmp/large-identity.json > /tmp/large-source.json
+LARGE_SIZE=$(wc -c < /tmp/large-source.json)
+echo "source manifest bytes=$LARGE_SIZE ARG_MAX=$(getconf ARG_MAX) PAGESIZE=$(getconf PAGESIZE)"
+row root manifest "exceeds single argv limit" "large fixture" "$([ "$LARGE_SIZE" -gt 131072 ] && echo yes || echo no)" yes
+bash -c 'jq -nc --argjson source "$(cat /tmp/large-source.json)" "$1"' _ '{source:$source}' \
+  >/tmp/old-identity.out 2>/tmp/old-identity.err
+row root "old transport" "exec rejects manifest" "ARG_MAX regression" "$?" 126
+row root "old transport" "E2BIG diagnostic" "ARG_MAX regression" \
+  "$(grep -c 'Argument list too long' /tmp/old-identity.err)" 1
+LARGE_EV=$(evaluate_as dev); LARGE_RC=$?
+row dev issuer "large evaluation exit" "full chain" "$LARGE_RC" 0
+row dev issuer "large evaluation result" "full chain" "$(jq -r .status <<<"$LARGE_EV")" authenticated_pass
+sudo -u dev "$LIB/receipt-verify.sh" /home/dev/repo worktree >/tmp/large-validation.json 2>/tmp/large-validation.err
+row dev validator "large live identity exit" "file transport" "$?" 0
+row dev validator "large receipt reusable" "exact fingerprints" "$(jq -r .status /tmp/large-validation.json)" reusable_ordinary
+row root temporaries "identity directories remain" "cleanup" \
+  "$(find /tmp -maxdepth 1 -name 'agent-md-identity-parts.*' | wc -l)" 0
+sudo -u dev rm -rf /home/dev/repo/identity-bulk
+
 echo
 echo "=== FULL CHAIN: dev -> agentmd -> agentmd-runner ==="
 EV=$(evaluate_as dev); EVCODE=$?

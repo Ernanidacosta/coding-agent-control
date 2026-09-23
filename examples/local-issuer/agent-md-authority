@@ -504,11 +504,11 @@ cmd_prepare_run() {
   fingerprints=$(authority_identity_fingerprints "$identity")
   source_fingerprint=$(jq -r '.source.value' <<<"$fingerprints")
   jq -nc --argjson schema "$AUTHORITY_SCHEMA" \
-    --argjson manifests "$(cat "$identity")" \
+    --slurpfile manifests "$identity" \
     --argjson fingerprints "$fingerprints" '
       {schema: $schema,
        fingerprints: $fingerprints,
-       manifests: $manifests}' | atomic_write "$run_dir/identity.json" 0444
+       manifests: $manifests[0]}' | atomic_write "$run_dir/identity.json" 0444
   rm -f "$identity"
 
   manifest=$(authority_snapshot_manifest "$run_dir/snapshot/src") || die "cannot fingerprint the snapshot"
@@ -594,12 +594,7 @@ authority_identity_for() {
     return $?
   fi
   note "staging root: computing identities without the runner hop" >&2
-  ( cd "$workspace" && jq -nc \
-      --argjson source "$(authority_pa_verification_receipt_source_manifest_json worktree)" \
-      --argjson contract "$(authority_pa_effective_verification_contract_json worktree)" \
-      --argjson control "$(authority_pa_effective_control_requirements_json worktree)" \
-      --argjson mechanism "$(authority_pa_verification_receipt_mechanism_manifest_json worktree)" \
-      '{source: $source, contract: $contract, control: $control, mechanism: $mechanism}' )
+  ( cd "$workspace" && authority_workspace_identity_json worktree )
 }
 
 authority_enumerate_for() {
@@ -720,12 +715,7 @@ cmd_identity() {
   [ -d "$workspace" ] || die "enrollment workspace is not a directory"
   cd "$workspace" || die "cannot enter the enrollment workspace"
   authority_export_git_workspace_env "$workspace"
-  jq -nc \
-    --argjson source "$(authority_pa_verification_receipt_source_manifest_json worktree)" \
-    --argjson contract "$(authority_pa_effective_verification_contract_json worktree)" \
-    --argjson control "$(authority_pa_effective_control_requirements_json worktree)" \
-    --argjson mechanism "$(authority_pa_verification_receipt_mechanism_manifest_json worktree)" \
-    '{source: $source, contract: $contract, control: $control, mechanism: $mechanism}'
+  authority_workspace_identity_json worktree
 }
 
 # The four fingerprints of the workspace as it is right now, through the same

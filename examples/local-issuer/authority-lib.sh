@@ -1451,6 +1451,29 @@ authority_state_latest() {
     else {state: "none"} end' <<<"$json"
 }
 
+# Keep workspace-sized manifests out of exec arguments. The subshell owns all
+# temporary files (including those of the producers), without changing caller
+# traps, umask or TMPDIR. Emit nothing until all four producers and JSON pass.
+authority_workspace_identity_json() (
+  local scope="${1:-worktree}" identity_tmp
+  umask 077
+  identity_tmp=$(mktemp -d "${TMPDIR:-/tmp}/agent-md-identity-parts.XXXXXX") || return 1
+  trap 'rm -rf -- "$identity_tmp"' EXIT
+  trap 'exit 1' HUP INT TERM
+  TMPDIR="$identity_tmp" authority_pa_verification_receipt_source_manifest_json "$scope" > "$identity_tmp/source.json" || return 1
+  TMPDIR="$identity_tmp" authority_pa_effective_verification_contract_json "$scope" > "$identity_tmp/contract.json" || return 1
+  TMPDIR="$identity_tmp" authority_pa_effective_control_requirements_json "$scope" > "$identity_tmp/control.json" || return 1
+  TMPDIR="$identity_tmp" authority_pa_verification_receipt_mechanism_manifest_json "$scope" > "$identity_tmp/mechanism.json" || return 1
+  jq -nec \
+    --slurpfile source "$identity_tmp/source.json" \
+    --slurpfile contract "$identity_tmp/contract.json" \
+    --slurpfile control "$identity_tmp/control.json" \
+    --slurpfile mechanism "$identity_tmp/mechanism.json" '
+      if all([$source,$contract,$control,$mechanism][]; length == 1)
+      then {source:$source[0],contract:$contract[0],control:$control[0],mechanism:$mechanism[0]}
+      else error("each identity manifest must contain exactly one JSON value") end'
+)
+
 # authority_identity_fingerprints <identity-file>
 # The four fingerprints of one identity document. Shared so that the value bound
 # into a run and the value revalidated before a terminal result are produced by

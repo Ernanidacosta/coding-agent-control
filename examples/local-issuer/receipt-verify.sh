@@ -411,12 +411,7 @@ rv_check_bindings() {
 rv_live_identity() {
   ( cd "$RV_CANONICAL" || exit 1
     authority_export_git_workspace_env "$RV_CANONICAL"
-    jq -nc \
-      --argjson source "$(authority_pa_verification_receipt_source_manifest_json "$RV_SCOPE_NAME")" \
-      --argjson contract "$(authority_pa_effective_verification_contract_json "$RV_SCOPE_NAME")" \
-      --argjson control "$(authority_pa_effective_control_requirements_json "$RV_SCOPE_NAME")" \
-      --argjson mechanism "$(authority_pa_verification_receipt_mechanism_manifest_json "$RV_SCOPE_NAME")" \
-      '{source:$source,contract:$contract,control:$control,mechanism:$mechanism}' )
+    authority_workspace_identity_json "$RV_SCOPE_NAME" )
 }
 
 rv_check_applicable() {
