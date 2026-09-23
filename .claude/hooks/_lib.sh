@@ -685,6 +685,8 @@ verification_receipt_manifest_jq() {
 verification_receipt_source_manifest_json() {
   local scope="${1:-worktree}" head="" inert=false path oid digest
   local raw filtered paths index records pairs shaout modified resolved plan manifest
+  local GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 GIT_ATTR_NOSYSTEM=1
+  export GIT_CONFIG_GLOBAL GIT_CONFIG_NOSYSTEM GIT_ATTR_NOSYSTEM
   case "$scope" in
     worktree|staged) ;;
     *)

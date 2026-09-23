@@ -236,3 +236,63 @@ seed() {
   chmod -R u+w "$snap" 2>/dev/null || true
   rm -rf "$snap" "$snap.json"
 }
+
+@test "19 global excludes cannot change source identity across developer and runner homes" {
+  seed
+  git config --unset core.excludesFile
+  mkdir -p .agent-md "$REPO/runner-home"
+  printf 'local source\n' > .agent-md/README.md
+  printf '.agent-md/\n' > "$REPO/global-ignore"
+  printf '[core]\n\texcludesFile = %s\n' "$REPO/global-ignore" > "$REPO/developer.gitconfig"
+
+  local developer runner
+  developer=$(GIT_CONFIG_GLOBAL="$REPO/developer.gitconfig" core_manifest)
+  runner=$(HOME="$REPO/runner-home" GIT_CONFIG_GLOBAL=/dev/null authority_manifest)
+  [ "$(printf '%s' "$developer" | fingerprint)" = "$(printf '%s' "$runner" | fingerprint)" ]
+  printf '%s' "$developer" | jq -e 'any(.entries[]; .path == ".agent-md/README.md")' >/dev/null
+}
+
+@test "20 local info/exclude still excludes untracked host wiring" {
+  seed
+  git config --unset core.excludesFile
+  mkdir -p .codex
+  printf 'host config\n' > .codex/hooks.json
+  printf '/.codex/hooks.json\n' >> .git/info/exclude
+  printf '[core]\n\texcludesFile = %s\n' "$REPO/global-ignore" > "$REPO/developer.gitconfig"
+  printf 'unrelated-global-only\n' > "$REPO/global-ignore"
+
+  local developer runner
+  developer=$(GIT_CONFIG_GLOBAL="$REPO/developer.gitconfig" core_manifest)
+  runner=$(GIT_CONFIG_GLOBAL=/dev/null authority_manifest)
+  [ "$(printf '%s' "$developer" | fingerprint)" = "$(printf '%s' "$runner" | fingerprint)" ]
+  printf '%s' "$developer" | jq -e 'all(.entries[]; .path != ".codex/hooks.json")' >/dev/null
+}
+
+@test "21 a tracked path remains in the identity despite global exclusion" {
+  seed
+  git config --unset core.excludesFile
+  mkdir -p .agent-md
+  printf 'tracked source\n' > .agent-md/README.md
+  git add -f .agent-md/README.md
+  printf '.agent-md/\n' > "$REPO/global-ignore"
+  printf '[core]\n\texcludesFile = %s\n' "$REPO/global-ignore" > "$REPO/developer.gitconfig"
+
+  local developer runner
+  developer=$(GIT_CONFIG_GLOBAL="$REPO/developer.gitconfig" core_manifest)
+  runner=$(GIT_CONFIG_GLOBAL=/dev/null authority_manifest)
+  [ "$(printf '%s' "$developer" | fingerprint)" = "$(printf '%s' "$runner" | fingerprint)" ]
+  printf '%s' "$developer" | jq -e 'any(.entries[]; .path == ".agent-md/README.md" and .index.state == "present")' >/dev/null
+}
+
+@test "22 global autocrlf and attributes cannot change receipt identity" {
+  seed
+  printf 'worktree\r\n' > tracked.txt
+  printf '*.txt text eol=crlf\n' > "$REPO/global-attributes"
+  printf '[core]\n\tautocrlf = true\n\tattributesFile = %s\n' "$REPO/global-attributes" > "$REPO/developer.gitconfig"
+
+  local developer runner
+  developer=$(GIT_CONFIG_GLOBAL="$REPO/developer.gitconfig" core_manifest)
+  runner=$(GIT_CONFIG_GLOBAL=/dev/null authority_manifest)
+  [ "$(printf '%s' "$developer" | fingerprint)" = "$(printf '%s' "$runner" | fingerprint)" ]
+  [ "$(printf '%s' "$developer" | jq -cS .)" = "$(printf '%s' "$runner" | jq -cS .)" ]
+}

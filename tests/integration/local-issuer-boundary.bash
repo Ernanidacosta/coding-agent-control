@@ -727,6 +727,32 @@ RV="sudo -u dev $LIB/receipt-verify.sh /home/dev/repo worktree"
 row dev "private key dir" "readable at all" "DAC 0700 agentmd" "$(try sudo -u dev ls /var/lib/agent-md/keys)" denied
 row dev validator "before any evaluation" "state is source of truth" "$($RV 2>/dev/null | jq -r .status)" no_evidence
 
+sudo -u dev bash -c '
+  mkdir -p /home/dev/repo/.agent-md
+  printf "local source\n" > /home/dev/repo/.agent-md/README.md
+  printf ".agent-md/\n" > /home/dev/.gitignore_global
+  printf "*.txt text eol=crlf\n" > /home/dev/.gitattributes_global
+  printf "[core]\n\texcludesFile = /home/dev/.gitignore_global\n\tautocrlf = true\n\tattributesFile = /home/dev/.gitattributes_global\n" > /home/dev/.gitconfig
+'
+row dev Git "global excludes source path" "affiliate reproduction" \
+  "$(sudo -u dev git -C /home/dev/repo check-ignore -v .agent-md/README.md | grep -c '/home/dev/.gitignore_global')" 1
+row agentmd-runner Git "global exclude absent" "isolated Git home" \
+  "$(runuser -u agentmd-runner -- env GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 git -C /home/dev/repo -c safe.directory=/home/dev/repo check-ignore .agent-md/README.md | wc -l)" 0
+# shellcheck disable=SC2024 # The root-owned harness captures unprivileged output in /tmp.
+sudo -u dev bash -c '
+  cd /home/dev/repo || exit 1
+  . /package/.claude/hooks/_lib.sh
+  verification_receipt_source_manifest_json worktree
+' > /tmp/developer-source.json
+# shellcheck disable=SC2024 # The root-owned harness captures unprivileged output in /tmp.
+sudo -u agentmd sudo -n -u agentmd-runner "$LIB/agent-md-authority" identity "$PID" > /tmp/runner-identity.json
+DEVELOPER_SOURCE_FP=$(jq -cS . /tmp/developer-source.json | sha256sum | cut -d' ' -f1)
+RUNNER_SOURCE_FP=$(jq -cS .source /tmp/runner-identity.json | sha256sum | cut -d' ' -f1)
+echo "developer source=$DEVELOPER_SOURCE_FP runner source=$RUNNER_SOURCE_FP"
+row dev runner "Phase A source fingerprint" "global Git ignored" "$DEVELOPER_SOURCE_FP" "$RUNNER_SOURCE_FP"
+row dev core "global-ignored path present" "same source set" \
+  "$(jq -r 'any(.entries[]; .path == ".agent-md/README.md")' /tmp/developer-source.json)" true
+
 evaluate_as dev >/dev/null
 RVOUT=$($RV 2>/dev/null); RVRC=$?
 row dev validator "after an authenticated pass" "C4d validation" "$(printf '%s' "$RVOUT" | jq -r .status)" reusable_ordinary

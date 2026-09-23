@@ -522,6 +522,10 @@ Windsurf `agent-md` rules, and their backups is listed in the
 repository-local `.git/info/exclude`. Untracked copies therefore stay out of
 the project's source identity; files already tracked remain in that identity.
 The installer preserves existing file modes, including private `0600` configs.
+Receipt source identity uses repository-local Git rules and the index, but
+ignores system and user-global Git configuration. A developer's global ignore
+patterns or line-ending settings therefore cannot make a receipt appear stale
+when the authority reads the same workspace.
 
 `skip`, `replace` and `--no-overwrite` all answer the same question: what
 happens to a host config that **already exists**. On a target that has none

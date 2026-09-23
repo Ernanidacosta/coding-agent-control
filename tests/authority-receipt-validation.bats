@@ -115,6 +115,19 @@ rewrite_state() {
   [ "$(verify_rc)" -eq 0 ]
 }
 
+@test "1b a receipt issued without developer global excludes remains immediately applicable" {
+  mkdir -p "$WS/.agent-md"
+  printf 'local source\n' > "$WS/.agent-md/README.md"
+  printf '.agent-md/\n' > "$ROOT/global-ignore"
+  printf '[core]\n\texcludesFile = %s\n' "$ROOT/global-ignore" > "$ROOT/developer.gitconfig"
+
+  GIT_CONFIG_GLOBAL=/dev/null evaluate >/dev/null
+  local result
+  result=$(GIT_CONFIG_GLOBAL="$ROOT/developer.gitconfig" verify)
+  printf '%s' "$result" | jq -e \
+    '.status == "reusable_ordinary" and .authentic == true and .current == true and .applicable == true' >/dev/null
+}
+
 @test "2 a current authenticated failure is reusable negative evidence" {
   rm -f "$FLAG"
   evaluate >/dev/null || true

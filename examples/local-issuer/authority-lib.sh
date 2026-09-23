@@ -718,7 +718,7 @@ authority_enumerate_paths() {
   # canonicalised and approved, and the guard's purpose -- not trusting a
   # stranger's repository configuration -- is what the containment hop and the
   # hardening flags below are for.
-  GIT_CONFIG_NOSYSTEM=1 GIT_ATTR_NOSYSTEM=1 HOME=/nonexistent \
+  GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 GIT_ATTR_NOSYSTEM=1 HOME=/nonexistent \
   git -C "$workspace" --no-pager --no-optional-locks \
     -c "safe.directory=$workspace" \
     -c core.fsmonitor=false \
@@ -954,6 +954,7 @@ authority_snapshot_matches_identity() {
 # check for a path the authority already approved.
 authority_export_git_workspace_env() {
   local workspace="$1"
+  export GIT_CONFIG_GLOBAL=/dev/null
   export GIT_CONFIG_NOSYSTEM=1
   export GIT_ATTR_NOSYSTEM=1
   export GIT_CONFIG_COUNT=5
