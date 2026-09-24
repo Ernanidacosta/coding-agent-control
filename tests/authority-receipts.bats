@@ -38,7 +38,8 @@ setup() {
   PUB="$KEYS/issuer-$KEY_ID.pub"
   export KEYS KEY_ID PRIV PUB
 
-  FLAG="$ROOT/flag"; SLOW="$ROOT/slow"; MUTATE="$ROOT/mutate"; RUNNING="$ROOT/running"
+  CONTROLS=$(fixture_controls)
+  FLAG="$CONTROLS/flag"; SLOW="$CONTROLS/slow"; MUTATE="$CONTROLS/mutate"; RUNNING=""
   export FLAG SLOW MUTATE RUNNING
   printf 'ok\n' > "$FLAG"
 }
@@ -50,7 +51,7 @@ teardown() {
 
 steerable_contract() {
   printf '[verify]\ntest = "%s"\n\n[verify.policy]\nrequired = ["test"]\ntimeout_seconds = 60\ntotal_timeout_seconds = 180\n' \
-    "touch $RUNNING; cat $FLAG || exit 1; if [ -e $MUTATE ]; then printf x >> $WS/marker.txt; fi; if [ -e $SLOW ]; then sleep 40; fi; true" \
+    "touch /runtime/running; cat $FLAG || exit 1; if [ -e $MUTATE ]; then mkfifo /runtime/mutation; cat /runtime/mutation >/dev/null; fi; if [ -e $SLOW ]; then sleep 40; fi; true" \
     > "$WS/agent-md.toml"
 }
 
@@ -58,6 +59,8 @@ enroll() {
   bash "$AUTHORITY" enroll "$WS" --root "$ROOT" --exec-path "$EXEC_PATH" --yes >/dev/null
   PID=$(ls "$ROOT/var/lib/agent-md/projects" | head -1)
   export PID
+  RUNNING="$ROOT/var/tmp/agent-md-runner/$PID/test/running"
+  export RUNNING
   PROJ="$ROOT/var/lib/agent-md/projects/$PID"
   export PROJ
   [ "$(jq -r .status "$PROJ/enrollment.json")" = eligible ] || {
@@ -65,7 +68,7 @@ enroll() {
 }
 
 request() { printf '{"protocol":1,"scope":"worktree","workspace":"%s"}' "$WS"; }
-evaluate() { request | bash "$ISSUER" evaluate --root "$ROOT" 2>/dev/null; }
+evaluate() { fixture_evaluate; }
 state_file() { printf '%s/state.json' "$PROJ"; }
 receipt_of() { printf '%s/receipts/worktree/%s.json' "$PROJ" "$1"; }
 terminal() { jq -c --arg k "$1" '.scopes.worktree.last_terminal[$k]' "$(state_file)"; }

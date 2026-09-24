@@ -44,7 +44,8 @@ setup() {
   KEY_ID=$(cat "$KEYS/current")
   export KEYS KEY_ID
 
-  FLAG="$ROOT/flag"; export FLAG
+  CONTROLS=$(fixture_controls)
+  FLAG="$CONTROLS/flag"; export FLAG
   printf 'ok\n' > "$FLAG"
   printf '[verify]\ntest = "cat %s"\n\n[verify.policy]\nrequired = ["test"]\ntimeout_seconds = 30\ntotal_timeout_seconds = 120\n' \
     "$FLAG" > "$WS/agent-md.toml"

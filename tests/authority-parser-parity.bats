@@ -45,7 +45,8 @@ core_projection() {
       | select(.name != "independent" and .name != "approval")
       | .name] | sort,
     timeout_seconds: (.timeout_seconds // null),
-    total_timeout_seconds: (.total_timeout_seconds // null)
+    total_timeout_seconds: (.total_timeout_seconds // null),
+    preparation: (.preparation // null)
   }'
 }
 
@@ -54,7 +55,8 @@ authority_projection() {
     checks: (.checks | sort_by(.name)),
     required: (.required | sort),
     timeout_seconds: .timeout_seconds,
-    total_timeout_seconds: .total_timeout_seconds
+    total_timeout_seconds: .total_timeout_seconds,
+    preparation: (.preparation // null)
   }'
 }
 
@@ -89,6 +91,36 @@ test = "bats tests/"
 required = ["lint", "test"]'
   assert_parity
   [ "$(authority_projection | jq -r '.checks | length')" -eq 2 ]
+}
+
+@test "1a approved Poetry preparation has exact core and authority parity" {
+  write_toml '[verify]
+lint = "poetry run ruff check ."
+
+[verify.policy]
+required = ["lint"]
+timeout_seconds = 20
+
+[verify.preparation]
+provider = "poetry"
+command = "poetry sync --no-root"
+timeout_seconds = 30'
+  assert_parity
+  authority_contract | jq -e '.preparation == {provider:"poetry",command:"poetry sync --no-root",timeout_seconds:30}' >/dev/null
+}
+
+@test "1b preparation alone cannot satisfy required ordinary coverage" {
+  write_toml '[verify.policy]
+required = ["lint"]
+timeout_seconds = 20
+
+[verify.preparation]
+provider = "poetry"
+command = "poetry sync --no-root"
+timeout_seconds = 10'
+  run authority_contract
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"no configured command"* || "$output" == *"no ordinary verification command"* ]]
 }
 
 @test "2 every ordinary check name agrees" {

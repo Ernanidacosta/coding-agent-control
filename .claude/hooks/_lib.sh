@@ -1290,6 +1290,7 @@ verification_contract_json() {
   local required_declared=0 timeout_value="" total_timeout_value="" rows='[]' check command origin requirement
   local seen_required="" value row trusted_values trusted_status trusted_files
   local capability_values capability_status capabilities
+  local preparation='null' preparation_command="" preparation_timeout="" preparation_provider=""
 
   required_values=$(read_toml_array "$config" verify.policy required)
   required_status=$?
@@ -1348,6 +1349,35 @@ EOF
         return 0
         ;;
     esac
+  fi
+
+  if toml_key_present "$config" verify.preparation command \
+    || toml_key_present "$config" verify.preparation timeout_seconds \
+    || toml_key_present "$config" verify.preparation provider; then
+    preparation_command=$(read_toml "$config" verify.preparation command)
+    preparation_timeout=$(read_toml "$config" verify.preparation timeout_seconds)
+    preparation_provider=$(read_toml "$config" verify.preparation provider)
+    case "$preparation_timeout" in
+      ''|*[!0-9]*|0)
+        verification_invalid_contract_json \
+          "Invalid ${config}: verify.preparation.timeout_seconds must be a positive integer."
+        return 0 ;;
+    esac
+    if [ -z "$preparation_command" ] || [ -z "$preparation_provider" ] \
+      || ! bash -n -c "$preparation_command" >/dev/null 2>&1; then
+      verification_invalid_contract_json \
+        "Invalid ${config}: verify.preparation requires a provider and a valid nonempty command."
+      return 0
+    fi
+    preparation=$(jq -cn --arg provider "$preparation_provider" \
+      --arg command "$preparation_command" --argjson timeout "$preparation_timeout" \
+      '{provider:$provider,command:$command,timeout_seconds:$timeout}')
+    if [ -n "$total_timeout_value" ] \
+      && [ "$preparation_timeout" -gt "$total_timeout_value" ]; then
+      verification_invalid_contract_json \
+        "Invalid ${config}: preparation timeout exceeds the total evaluation budget."
+      return 0
+    fi
   fi
 
   while IFS= read -r check; do
@@ -1467,6 +1497,7 @@ EOF
 
   jq -cn \
     --argjson checks "$rows" \
+    --argjson preparation "$preparation" \
     --arg timeout "$timeout_value" \
     --arg total_timeout "$total_timeout_value" \
     --arg mode "$(if [ "$required_declared" -eq 1 ]; then printf explicit; else printf legacy; fi)" '
@@ -1477,6 +1508,7 @@ EOF
         total_timeout_seconds: (if $total_timeout == "" then null else ($total_timeout | tonumber) end),
         checks: $checks
       }
+      | if $preparation == null then . else .preparation = $preparation end
     '
 }
 
@@ -1539,6 +1571,7 @@ merge_verification_contracts() {
         baseline_contract: $baseline,
         proposal_contract: $proposal
       }
+      | if $proposal.preparation == null then . else .preparation = $proposal.preparation end
   '
 }
 
@@ -2904,9 +2937,10 @@ effective_control_requirements_json() {
 # ceiling so the core can fail structurally before the host transport does.
 completion_budget_json() {
   local contract="$1" control="$2" context="${3:-standalone}"
-  local explicit per_check stage_count overhead seconds source bounded=true
+  local explicit per_check preparation stage_count overhead seconds source bounded=true
   explicit=$(printf '%s' "$contract" | jq -r '.total_timeout_seconds // empty')
   per_check=$(printf '%s' "$contract" | jq -r '.timeout_seconds // empty')
+  preparation=$(printf '%s' "$contract" | jq -r '.preparation.timeout_seconds // 0')
   stage_count=$(jq -cn --argjson contract "$contract" --argjson control "$control" '
     ($control.effective.risk // null) as $risk
     | ([ $contract.checks[] |
@@ -2929,7 +2963,7 @@ completion_budget_json() {
     source=explicit
   elif [ -n "$per_check" ]; then
     overhead=$(completion_legacy_overhead_seconds)
-    seconds=$((stage_count * per_check + overhead))
+    seconds=$((stage_count * (per_check + preparation) + overhead))
     source="legacy-derived"
   elif [ "$context" = host ]; then
     seconds=$(completion_legacy_stop_budget_seconds)

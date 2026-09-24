@@ -1,5 +1,5 @@
 #!/bin/bash
-# run-check — executes one authority-approved command as the enrolled developer.
+# run-check — executes one authority-approved command as the isolated runner.
 #
 # This is the descending half of the execution boundary. The authority runs as
 # its own service account and cannot become the developer on its own, so it
@@ -14,15 +14,10 @@
 # can influence. Which evaluation run they refer to is resolved from
 # authority-owned state, never passed in.
 #
-# Every validation happens before any project code starts. The last thing this
-# program does is exec the approved command, so nothing trusted is left running
-# under the same uid as hostile code, and the status the supervisor observes is
-# the one the kernel reports through sudo.
-#
-# A refusal exits 125. A check may also legitimately exit 125, and in this
-# slice that collision is acceptable: both are non-zero, both are fail-closed,
-# and neither can become an authenticated PASS. Diagnostics can improve later
-# without being mixed into trust.
+# Every validation precedes project code. Each stage enters private user,
+# mount and PID namespaces. The outer bubblewrap monitor reports setup and
+# kernel exit status on a descriptor closed before launching project code;
+# project stdout/stderr cannot manufacture an infrastructure success.
 
 set -u
 
@@ -117,6 +112,13 @@ if ! printf '%s' "$JOB_JSON" | jq -e '
   (.environment | type) == "array" and
   all(.environment[]; (.name | type) == "string" and (.value | type) == "string") and
   (.timeout_seconds | type) == "number" and
+  (.execution_boundary | type) == "string" and
+  (.supervised | type) == "boolean" and
+  ((.preparation == null) or
+    ((.preparation | type) == "object" and
+     (.preparation.provider | type) == "string" and
+     (.preparation.command | type) == "string" and
+     (.preparation.timeout_seconds | type) == "number")) and
   (.tools | type) == "array" and
   all(.tools[]; (.name | type) == "string" and (.path | type) == "string")
 ' >/dev/null 2>&1; then
@@ -124,7 +126,8 @@ if ! printf '%s' "$JOB_JSON" | jq -e '
 fi
 EXTRA=$(printf '%s' "$JOB_JSON" | jq -r '
   ["schema","project_id","run_id","workspace","snapshot","snapshot_fingerprint",
-    "execution","developer","check","command","environment","timeout_seconds","tools"] as $allowed
+    "execution","developer","check","command","environment","timeout_seconds","preparation","tools",
+    "execution_boundary","supervised"] as $allowed
   | [keys_unsorted[] | select(IN($allowed[]) | not)] | join(", ")')
 [ -z "$EXTRA" ] || refuse "job carries unexpected fields: $EXTRA"
 
@@ -208,17 +211,61 @@ tool_path() {
 BASH_PATH=$(tool_path bash)
 TIMEOUT_PATH=$(tool_path timeout)
 ENV_PATH=$(tool_path env)
-for tool_name in bash timeout env; do
+BWRAP_PATH=$(tool_path bwrap)
+[ "$(jq -r '.execution_boundary // empty' <<<"$JOB_JSON")" = "$AUTHORITY_EXECUTION_BOUNDARY" ] \
+  || refuse "execution capability requires administrative reapprove"
+SUPERVISED=$(jq -r '.supervised // false' <<<"$JOB_JSON")
+case "$SUPERVISED" in true|false) ;; *) refuse "invalid execution reporting mode" ;; esac
+for tool_name in bash timeout env bwrap; do
   case "$tool_name" in
     bash) tool_value="$BASH_PATH" ;;
     timeout) tool_value="$TIMEOUT_PATH" ;;
     env) tool_value="$ENV_PATH" ;;
+    bwrap) tool_value="$BWRAP_PATH" ;;
   esac
   [ -n "$tool_value" ] || refuse "job declares no $tool_name"
   if ! reason=$(authority_tool_trust "$tool_value" "$(id -u)" "$GIDS"); then
     refuse "$tool_name at $tool_value $reason"
   fi
 done
+[ ! -u "$BWRAP_PATH" ] || refuse "bwrap must be unprivileged, not setuid"
+[ ! -w "$BWRAP_PATH" ] && [ ! -w "$(dirname "$BWRAP_PATH")" ] \
+  || refuse "bwrap is writable by the execution account"
+
+PREPARATION=$(printf '%s' "$JOB_JSON" | jq -c '.preparation // null')
+if [ "$PREPARATION" != null ]; then
+  if printf '%s' "$JOB_JSON" | jq -e '
+    any(.environment[].name; test("^(POETRY_|PIP_|UV_|XDG_|PYTHON)|^(VIRTUAL_ENV|RUFF_CACHE_DIR|PYTEST_ADDOPTS|COVERAGE_FILE)$"))
+  ' >/dev/null; then
+    refuse "approved environment may not override isolated package or Python settings"
+  fi
+  [ "$(printf '%s' "$PREPARATION" | jq -r '.provider')" = poetry ] \
+    || refuse "unsupported runtime preparation provider"
+  PREP_COMMAND=$(printf '%s' "$PREPARATION" | jq -r '.command')
+  case "$PREP_COMMAND" in
+    'poetry sync --no-root'|'poetry sync --no-root --no-interaction'|\
+    'poetry sync --no-root --all-groups'|'poetry sync --no-root --all-groups --no-interaction') ;;
+    *) refuse "unsupported Poetry preparation command" ;;
+  esac
+  PREP_TIMEOUT=$(printf '%s' "$PREPARATION" | jq -r '.timeout_seconds')
+  case "$PREP_TIMEOUT" in ''|*[!0-9]*|0) refuse "invalid preparation timeout" ;; esac
+  POETRY_PATH=$(tool_path poetry)
+  [ -n "$POETRY_PATH" ] || refuse "job declares no Poetry tool"
+  if ! reason=$(authority_tool_trust "$POETRY_PATH" "$(id -u)" "$GIDS"); then
+    refuse "Poetry at $POETRY_PATH $reason"
+  fi
+  APPROVED_POETRY=""
+  old_ifs=$IFS
+  IFS=:
+  for path_entry in $APPROVED_PATH; do
+    [ -x "$path_entry/poetry" ] || continue
+    APPROVED_POETRY=$(realpath "$path_entry/poetry" 2>/dev/null) || break
+    break
+  done
+  IFS=$old_ifs
+  [ "$APPROVED_POETRY" = "$POETRY_PATH" ] \
+    || refuse "approved PATH no longer resolves the approved Poetry tool"
+fi
 
 COMMAND=$(printf '%s' "$JOB_JSON" | jq -r '.command')
 [ -n "$COMMAND" ] || refuse "job declares an empty command"
@@ -230,19 +277,59 @@ COMMAND=$(printf '%s' "$JOB_JSON" | jq -r '.command')
 # run afterwards and nothing may be left to accumulate.
 SCRATCH="$ROOT$AUTHORITY_SCRATCH_ROOT/$PROJECT_ID/$CHECK_NAME"
 rm -rf "$SCRATCH" 2>/dev/null
-mkdir -p "$SCRATCH/home" "$SCRATCH/tmp" || refuse "cannot prepare the scratch directory"
+mkdir -p "$SCRATCH/home" "$SCRATCH/tmp" "$SCRATCH/shm" \
+  || refuse "cannot prepare the scratch directory"
 chmod 0700 "$SCRATCH"
-ENV_PAIRS+=("HOME=$SCRATCH/home" "TMPDIR=$SCRATCH/tmp")
+ENV_PAIRS+=("HOME=/runtime/home" "TMPDIR=/runtime/tmp")
 # An interpreter reached through the approved PATH can still widen itself
 # through per-user package directories. The ephemeral HOME already moves those
 # out of reach; this states the intent explicitly for the interpreter that
 # offers a switch. Where an interpreter offers no such switch, isolation is not
 # proven and the limitation is documented rather than assumed away.
 ENV_PAIRS+=("PYTHONNOUSERSITE=1")
+if [ "$PREPARATION" != null ]; then
+  # --no-root avoids project build hooks; imports resolve only from the sealed
+  # snapshot, never from a caller-provided PYTHONPATH or live worktree.
+  ENV_PAIRS+=("PYTHONPATH=/workspace"
+    "PYTHONDONTWRITEBYTECODE=1"
+    "XDG_CACHE_HOME=/runtime/cache"
+    "RUFF_CACHE_DIR=/runtime/ruff-cache"
+    "PYTEST_ADDOPTS=-o cache_dir=/runtime/pytest-cache"
+    "COVERAGE_FILE=/runtime/coverage"
+    "POETRY_CACHE_DIR=/runtime/cache"
+    "POETRY_CONFIG_DIR=/runtime/config"
+    "POETRY_DATA_DIR=/runtime/data"
+    "POETRY_VIRTUALENVS_PATH=/runtime/venvs"
+    "POETRY_VIRTUALENVS_IN_PROJECT=false"
+    "POETRY_VIRTUALENVS_CREATE=true")
+fi
 
 # --- execute -----------------------------------------------------------------
 cd "$CANONICAL" || refuse "cannot enter the snapshot"
 [ "$(pwd -P)" = "$CANONICAL" ] || refuse "working directory changed while entering the snapshot"
+authority_sandbox_arguments "$CANONICAL" "$SCRATCH" "$APPROVED_PATH" \
+  || refuse "cannot construct the approved sandbox view"
+
+# Only bubblewrap's monitor outside the PID namespace writes this channel.
+# bubblewrap closes its status descriptor before launching sandboxed code.
+STATUS_ARGS=()
+if [ "$SUPERVISED" = true ]; then STATUS_ARGS=(--json-status-fd 3); fi
+
+if [ "$PREPARATION" != null ]; then
+  [ -f poetry.lock ] && [ -f pyproject.toml ] \
+    || refuse "Poetry preparation requires pyproject.toml and poetry.lock in the snapshot"
+  [ "$SUPERVISED" != true ] || printf '{"stage":"preparation"}\n'
+  if "$ENV_PATH" -i "${ENV_PAIRS[@]}" \
+    "$TIMEOUT_PATH" -k "${AUTHORITY_TIMEOUT_GRACE_SECONDS}s" "${PREP_TIMEOUT}s" \
+    "$BWRAP_PATH" "${AUTHORITY_SANDBOX_ARGS[@]}" "${STATUS_ARGS[@]}" \
+    -- "$BASH_PATH" -c "$PREP_COMMAND" 3>&1 1>&2 </dev/null; then
+    :
+  else
+    preparation_exit=$?
+    printf 'run-check: runtime preparation failed for %s (exit %s)\n' "$CHECK_NAME" "$preparation_exit" >&2
+    exit "$preparation_exit"
+  fi
+fi
 
 # The approved string is handed to the shell exactly as approved. It is never
 # tokenised and rebuilt, so quoting, pipelines and expansion behave as the core
@@ -260,6 +347,14 @@ cd "$CANONICAL" || refuse "cannot enter the snapshot"
 # a single code would need work after the command finishes, which is exactly
 # what exec forbids here; a supervisor running as its own account can classify
 # them later.
+if [ "$SUPERVISED" = true ]; then
+  printf '{"stage":"check"}\n'
+  exec "$ENV_PATH" -i "${ENV_PAIRS[@]}" \
+    "$TIMEOUT_PATH" -k "${AUTHORITY_TIMEOUT_GRACE_SECONDS}s" "${TIMEOUT_SECONDS}s" \
+    "$BWRAP_PATH" "${AUTHORITY_SANDBOX_ARGS[@]}" "${STATUS_ARGS[@]}" \
+    -- "$BASH_PATH" -c "$COMMAND" 3>&1 1>&2 </dev/null
+fi
 exec "$ENV_PATH" -i "${ENV_PAIRS[@]}" \
   "$TIMEOUT_PATH" -k "${AUTHORITY_TIMEOUT_GRACE_SECONDS}s" "${TIMEOUT_SECONDS}s" \
-  "$BASH_PATH" -c "$COMMAND" </dev/null
+  "$BWRAP_PATH" "${AUTHORITY_SANDBOX_ARGS[@]}" \
+  -- "$BASH_PATH" -c "$COMMAND" 3>&- </dev/null

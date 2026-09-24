@@ -29,6 +29,7 @@ usage() {
 Usage:
   agent-md-authority install [--root PREFIX] [--user NAME] [--dry-run]
   agent-md-authority install-key [--root PREFIX] [--user NAME] [--dry-run]
+  agent-md-authority doctor [--root PREFIX]
   agent-md-authority show-key [--root PREFIX]
   agent-md-authority rotate-key [--root PREFIX]
   agent-md-authority enroll  WORKSPACE [--root PREFIX] [--exec-user NAME]
@@ -100,6 +101,12 @@ cmd_install() {
       note "would install $lib/$name (root, 0755)"
     done
     note "would create $ROOT$AUTHORITY_SCRATCH_ROOT ($AUTHORITY_RUNNER_USER, 0700)"
+    local capability_reason
+    if ! capability_reason=$(authority_sandbox_capability); then
+      note "execution capability unavailable: $capability_reason"
+    else
+      note "execution capability ready: bubblewrap and unprivileged namespaces"
+    fi
     return 0
   fi
 
@@ -168,7 +175,39 @@ cmd_install() {
   fi
 
   printf '%s\n' "$AUTHORITY_SCHEMA" | atomic_write "$state/schema" 0644
+  local capability_reason
+  if ! capability_reason=$(authority_sandbox_capability); then
+    note "execution capability unavailable: $capability_reason; enroll/evaluate will refuse until resolved"
+  fi
   note "authority ready under $state"
+}
+
+cmd_doctor() {
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --root) ROOT=${2%/}; shift 2 ;;
+      -h|--help) usage; return 0 ;;
+      *) die "unknown doctor option: $1" ;;
+    esac
+  done
+  local uid gids reason capability
+  if is_real_root_prefix; then
+    uid=$(uid_of_user "$AUTHORITY_RUNNER_USER") || die "runner account $AUTHORITY_RUNNER_USER is absent"
+    gids=$(gids_of_user "$AUTHORITY_RUNNER_USER") || die "cannot resolve runner groups"
+  else
+    uid=$(id -u); gids=$(id -G)
+  fi
+  if ! reason=$(authority_tool_trust /usr/bin/bwrap "$uid" "$gids"); then
+    die "local issuer requires trusted bubblewrap: $reason"
+  fi
+  if ! capability=$(authority_sandbox_capability); then
+    die "$capability"
+  fi
+  if is_real_root_prefix && [ "$(id -u)" != 0 ]; then
+    note "local issuer execution capability ready for the current account; runner revalidation remains mandatory"
+  else
+    note "local issuer execution capability ready: /usr/bin/bwrap; unprivileged user, mount and PID namespaces"
+  fi
 }
 
 cmd_enroll() { cmd_enrollment enroll "$@"; }
@@ -298,7 +337,9 @@ cmd_enrollment() {
   local mechanism; mechanism=$(read_mechanism "$canonical") \
     || die "mechanism files are missing or unreadable in $canonical"
 
-  local tools; tools=$(authority_discover_tools "$uid" "$gids") \
+  local prep_provider
+  prep_provider=$(printf '%s' "$contract" | jq -r '.preparation.provider // empty')
+  local tools; tools=$(authority_discover_tools "$uid" "$gids" "$prep_provider" "$exec_path") \
     || die "no trusted runtime tool set could be approved: $tools"
 
   local environment pair name value
@@ -321,14 +362,27 @@ cmd_enrollment() {
   else
     environment=$(build_environment "$home" "$exec_path" "${extra_env[@]+"${extra_env[@]}"}") || exit 1
   fi
+  if [ "$prep_provider" = poetry ]; then
+    local conflicts
+    conflicts=$(authority_preparation_environment_conflicts "$environment")
+    [ -z "$conflicts" ] || die "approved environment conflicts with isolated Poetry preparation: $conflicts"
+  fi
   local path_report; path_report=$(build_path_report "$exec_path" "$uid" "$gids")
   local path_ok; path_ok=$(printf '%s' "$path_report" | jq 'all(.[]; .status == "eligible")')
 
   local status reasons
   reasons='[]'; status=eligible
+  local capability_reason
+  if is_real_root_prefix; then
+    if ! capability_reason=$(authority_sandbox_capability); then
+      reasons=$(jq -nc --arg reason "$capability_reason" '[$reason]')
+    fi
+  else
+    note "staging root: sandbox capability is enforced when run-check starts; no host runner was probed"
+  fi
   if [ "$path_ok" != true ]; then
     status=ineligible
-    reasons=$(printf '%s' "$path_report" | jq -c '[.[] | select(.status != "eligible")
+    reasons=$(printf '%s' "$path_report" | jq -c --argjson prior "$reasons" '$prior + [.[] | select(.status != "eligible")
       | "PATH entry \(.entry): \(.reason)"]')
   fi
   local traversal_reasons
@@ -344,6 +398,7 @@ cmd_enrollment() {
   [ "$reasons" = '[]' ] || status=ineligible
   if is_real_root_prefix && [ "$(id -u)" != 0 ]; then
     note "workspace traversal and source: only the current account was tested; agentmd-runner access was not probed by this unprivileged enrollment"
+    note "sandbox capability: probed as the current account; the runner must establish containment on every execution"
   fi
 
   local record
@@ -359,6 +414,7 @@ cmd_enrollment() {
     --argjson environment "$environment" \
     --argjson path_eligibility "$path_report" \
     --argjson tools "$tools" \
+    --arg boundary "$AUTHORITY_EXECUTION_BOUNDARY" \
     --arg status "$status" \
     --argjson reasons "$reasons" \
     --arg created "$(if [ "$mode" = reapprove ]; then jq -r '.metadata.created' <<<"$old_record"; else date -u +%Y-%m-%dT%H:%M:%SZ; fi)" \
@@ -372,6 +428,7 @@ cmd_enrollment() {
       approved_mechanism: $mechanism,
       approved_environment: $environment,
       approved_tools: $tools,
+      execution_boundary: $boundary,
       path_eligibility: $path_eligibility,
       status: $status,
       reasons: $reasons,
@@ -395,6 +452,7 @@ cmd_enrollment() {
       .[0] as $old | .[1] as $new |
       $old.approved_environment != $new.approved_environment or
       $old.approved_tools != $new.approved_tools or
+      $old.execution_boundary != $new.execution_boundary or
       $old.path_eligibility != $new.path_eligibility or
       $old.execution != $new.execution')
     identity_changed=$(printf '%s\n%s\n' "$old_record" "$record" | jq -sc '
@@ -475,6 +533,10 @@ present_enrollment() {
   fi
   note ""
   note "required checks: $(printf '%s' "$record" | jq -r 'if (.approved_contract.required | length) == 0 then "(none declared)" else (.approved_contract.required | join(", ")) end')"
+  if [ "$(printf '%s' "$record" | jq -r '.approved_contract.preparation != null')" = true ]; then
+    note "runtime preparation (before each check, on its own scratch):"
+    printf '%s' "$record" | jq -r '.approved_contract.preparation | "  \(.provider): \(.command) (timeout \(.timeout_seconds)s)"'
+  fi
   note "contract fingerprint: $(printf '%s' "$record" | jq -r '.approved_contract_fingerprint')"
   note ""
   note "mechanism identities:"
@@ -484,6 +546,8 @@ present_enrollment() {
   printf '%s' "$record" | jq -r '.approved_environment[] | "  \(.name)=\(.value)"'
   note ""
   note "trusted runtime tools:"
+  printf 'execution boundary: %s (unprivileged user, mount and PID namespaces required)\n' \
+    "$(jq -r '.execution_boundary // "unapproved; reapprove required"' <<<"$record")"
   printf '%s' "$record" | jq -r '.approved_tools[]? | "  \(.name) -> \(.path)"'
   note ""
   note "PATH eligibility:"
@@ -527,6 +591,8 @@ cmd_prepare_run() {
     || die "enrollment uses an unsupported schema; administrative migration is required"
   [ "$(printf '%s' "$record" | jq -r '.status')" = eligible ] \
     || die "enrollment is not eligible; refusing to prepare a run"
+  [ "$(jq -r '.execution_boundary // empty' <<<"$record")" = "$AUTHORITY_EXECUTION_BOUNDARY" ] \
+    || die "execution capability requires administrative reapprove"
 
   # The project directory is sealed between runs so nothing but the authority
   # can introduce a file next to the pointer a check will trust. The authority
@@ -670,13 +736,18 @@ cmd_prepare_run() {
       --argjson developer "$(printf '%s' "$record" | jq -c '.execution')" \
       --arg check "$name" \
       --arg command "$command" \
+      --argjson preparation "$(printf '%s' "$record" | jq -c '.approved_contract.preparation // null')" \
       --argjson environment "$(printf '%s' "$record" | jq -c '.approved_environment')" \
       --argjson timeout_seconds "$timeout" \
       --argjson tools "$(printf '%s' "$record" | jq -c '.approved_tools')" \
+      --arg boundary "$AUTHORITY_EXECUTION_BOUNDARY" \
+      --argjson supervised "$(if [ -n "$want_run_id" ]; then printf true; else printf false; fi)" \
       '{schema: $schema, project_id: $project_id, run_id: $run_id, workspace: $workspace,
         snapshot: $snapshot, snapshot_fingerprint: $snapshot_fingerprint,
         execution: $execution, developer: $developer, check: $check, command: $command,
-        environment: $environment, timeout_seconds: $timeout_seconds, tools: $tools}')
+        environment: $environment, timeout_seconds: $timeout_seconds,
+        preparation: $preparation, tools: $tools,
+        execution_boundary: $boundary, supervised: $supervised}')
     printf '%s\n' "$job" | atomic_write "$run_dir/jobs/$name.json" 0444
   done
   chmod 0555 "$run_dir/jobs" 2>/dev/null || true
@@ -1060,6 +1131,7 @@ command -v jq >/dev/null 2>&1 || die "jq is required"
 subcommand="$1"; shift
 case "$subcommand" in
   install) cmd_install "$@" ;;
+  doctor) cmd_doctor "$@" ;;
   install-key) cmd_install_key "$@" ;;
   show-key) cmd_show_key "$@" ;;
   rotate-key) cmd_rotate_key "$@" ;;

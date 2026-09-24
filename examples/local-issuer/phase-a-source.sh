@@ -874,6 +874,7 @@ authority_pa_verification_contract_json() {
   local required_declared=0 timeout_value="" total_timeout_value="" rows='[]' check command origin requirement
   local seen_required="" value row trusted_values trusted_status trusted_files
   local capability_values capability_status capabilities
+  local preparation='null' preparation_command="" preparation_timeout="" preparation_provider=""
 
   required_values=$(authority_pa_read_toml_array "$config" verify.policy required)
   required_status=$?
@@ -932,6 +933,35 @@ EOF
         return 0
         ;;
     esac
+  fi
+
+  if authority_pa_toml_key_present "$config" verify.preparation command \
+    || authority_pa_toml_key_present "$config" verify.preparation timeout_seconds \
+    || authority_pa_toml_key_present "$config" verify.preparation provider; then
+    preparation_command=$(authority_pa_read_toml "$config" verify.preparation command)
+    preparation_timeout=$(authority_pa_read_toml "$config" verify.preparation timeout_seconds)
+    preparation_provider=$(authority_pa_read_toml "$config" verify.preparation provider)
+    case "$preparation_timeout" in
+      ''|*[!0-9]*|0)
+        authority_pa_verification_invalid_contract_json \
+          "Invalid ${config}: verify.preparation.timeout_seconds must be a positive integer."
+        return 0 ;;
+    esac
+    if [ -z "$preparation_command" ] || [ -z "$preparation_provider" ] \
+      || ! bash -n -c "$preparation_command" >/dev/null 2>&1; then
+      authority_pa_verification_invalid_contract_json \
+        "Invalid ${config}: verify.preparation requires a provider and a valid nonempty command."
+      return 0
+    fi
+    preparation=$(jq -cn --arg provider "$preparation_provider" \
+      --arg command "$preparation_command" --argjson timeout "$preparation_timeout" \
+      '{provider:$provider,command:$command,timeout_seconds:$timeout}')
+    if [ -n "$total_timeout_value" ] \
+      && [ "$preparation_timeout" -gt "$total_timeout_value" ]; then
+      authority_pa_verification_invalid_contract_json \
+        "Invalid ${config}: preparation timeout exceeds the total evaluation budget."
+      return 0
+    fi
   fi
 
   while IFS= read -r check; do
@@ -1051,6 +1081,7 @@ EOF
 
   jq -cn \
     --argjson checks "$rows" \
+    --argjson preparation "$preparation" \
     --arg timeout "$timeout_value" \
     --arg total_timeout "$total_timeout_value" \
     --arg mode "$(if [ "$required_declared" -eq 1 ]; then printf explicit; else printf legacy; fi)" '
@@ -1061,6 +1092,7 @@ EOF
         total_timeout_seconds: (if $total_timeout == "" then null else ($total_timeout | tonumber) end),
         checks: $checks
       }
+      | if $preparation == null then . else .preparation = $preparation end
     '
 }
 
@@ -1123,6 +1155,7 @@ authority_pa_merge_verification_contracts() {
         baseline_contract: $baseline,
         proposal_contract: $proposal
       }
+      | if $proposal.preparation == null then . else .preparation = $proposal.preparation end
   '
 }
 

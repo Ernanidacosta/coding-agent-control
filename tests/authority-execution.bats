@@ -101,6 +101,7 @@ assert_parity() {
   run_check_capture
   if [ "$CORE_STATUS" != "$RC_STATUS" ]; then
     printf 'exit differs: core=%s run-check=%s for [%s]\n' "$CORE_STATUS" "$RC_STATUS" "$command" >&2
+    cat "$RC_ERR" >&2
     return 1
   fi
   if ! cmp -s "$CORE_OUT" "$RC_OUT"; then
@@ -422,12 +423,20 @@ assert_parity() {
 @test "38 mutating the original during execution does not change the snapshot" {
   printf 'ORIGINAL\n' > "$WORKSPACE/marker.txt"
   git -C "$WORKSPACE" add -A >/dev/null 2>&1 || true
-  # The check rewrites the live worktree mid-run and restores it afterwards,
-  # which is exactly the substitution a before/after fingerprint cannot see.
-  write_contract "printf TAMPERED > $WORKSPACE/marker.txt; cat marker.txt; printf ORIGINAL > $WORKSPACE/marker.txt"
+  write_contract 'mkfifo /runtime/release; touch /runtime/ready; cat /runtime/release >/dev/null; cat marker.txt'
   approve
-  run_check_capture
-  [ "$RC_STATUS" -eq 0 ]
+  RC_OUT=$(mktemp); RC_ERR=$(mktemp)
+  bash "$RUNCHECK" "$PROJECT_ID" test --root "$ROOT" >"$RC_OUT" 2>"$RC_ERR" &
+  child=$!
+  scratch="$ROOT/var/tmp/agent-md-runner/$PROJECT_ID/test"
+  deadline=$((SECONDS + 10))
+  until [ -f "$scratch/ready" ]; do
+    [ "$SECONDS" -lt "$deadline" ] || return 1
+    sleep 0.02
+  done
+  printf TAMPERED > "$WORKSPACE/marker.txt"
+  printf release > "$scratch/release"
+  wait "$child"
   grep -q ORIGINAL "$RC_OUT"
   ! grep -q TAMPERED "$RC_OUT"
   grep -q ORIGINAL "$(snapshot_dir)/marker.txt"

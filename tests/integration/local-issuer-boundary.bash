@@ -74,7 +74,7 @@ TOML
 # identity both stay fixed while the outcome changes.
 cat > "$PAYLOAD/flagged.toml" <<'TOML'
 [verify]
-test = "cat /srv/flag"
+test = "cat /usr/local/bin/agent-md-test-controls/flag"
 
 [verify.policy]
 required = ["test"]
@@ -88,7 +88,7 @@ TOML
 # write access there, and that is the correct boundary.
 cat > "$PAYLOAD/holdflag.toml" <<'TOML'
 [verify]
-test = "touch /srv/running; cat /srv/flag || exit 1; while [ -e /srv/hold ]; do sleep 0.2; done; true"
+test = "touch /runtime/running; cat /usr/local/bin/agent-md-test-controls/flag || exit 1; while [ -e /usr/local/bin/agent-md-test-controls/hold ]; do sleep 0.2; done; true"
 
 [verify.policy]
 required = ["test"]
@@ -98,7 +98,7 @@ TOML
 
 cat > "$PAYLOAD/slowflag.toml" <<'TOML'
 [verify]
-test = "touch /srv/running; cat /srv/flag || exit 1; if [ -e /srv/slow ]; then sleep 40; fi; true"
+test = "touch /runtime/running; cat /usr/local/bin/agent-md-test-controls/flag || exit 1; if [ -e /usr/local/bin/agent-md-test-controls/slow ]; then sleep 40; fi; true"
 
 [verify.policy]
 required = ["test"]
@@ -117,8 +117,97 @@ timeout_seconds = 8
 total_timeout_seconds = 3
 TOML
 
+cat > "$PAYLOAD/preparation.toml" <<'TOML'
+[verify]
+lint = "poetry run depcli"
+test = "poetry run python3 -c 'import app; print(app.VALUE)'"
+
+[verify.policy]
+required = ["lint", "test"]
+timeout_seconds = 15
+total_timeout_seconds = 90
+
+[verify.preparation]
+provider = "poetry"
+command = "poetry sync --no-root"
+timeout_seconds = 15
+TOML
+
 mkdir -p "$PAYLOAD/hosts"
 cp "$ROOT_DIR/.claude/settings.json" "$PAYLOAD/hosts/settings.json"
+
+cat > "$PAYLOAD/containment.toml" <<'TOML'
+[verify]
+lint = "python3 attack.py"
+test = "python3 target.py"
+
+[verify.policy]
+required = ["lint", "test"]
+timeout_seconds = 20
+total_timeout_seconds = 90
+TOML
+
+cat > "$PAYLOAD/attack.py" <<'PYTHON'
+import glob
+import os
+import signal
+import sys
+import time
+from pathlib import Path
+
+ready_r, ready_w = os.pipe()
+pid = os.fork()
+if pid:
+    os.close(ready_w)
+    assert os.read(ready_r, 1) == b'1'
+    Path(sys.argv[2] if len(sys.argv) > 2 else '/runtime/attacker.pid').write_text(str(pid))
+    if len(sys.argv) == 1:
+        os.mkfifo('/runtime/permit-exit')
+        Path('/runtime/ready').touch()
+        with open('/runtime/permit-exit') as release:
+            release.read()
+    sys.exit(0)
+os.close(ready_r)
+os.setsid()
+signal.signal(signal.SIGTERM, signal.SIG_IGN)
+null = os.open('/dev/null', os.O_RDWR)
+for fd in (0, 1, 2):
+    os.dup2(null, fd)
+os.close(null)
+os.write(ready_w, b'1')
+os.close(ready_w)
+while True:
+    targets = [sys.argv[1]] if len(sys.argv) > 1 else glob.glob('/var/tmp/agent-md-runner/*/test/target')
+    for target in targets:
+        if Path(target).is_file():
+            Path(target).write_text('pass')
+            Path(target + '.tampered').touch()
+            os._exit(0)
+    time.sleep(0.01)
+PYTHON
+
+cat > "$PAYLOAD/target.py" <<'PYTHON'
+import os
+import sys
+from pathlib import Path
+
+runtime = Path(sys.argv[1] if len(sys.argv) > 1 else '/runtime')
+if len(sys.argv) == 1:
+    assert not Path('/var/lib/agent-md').exists()
+    assert not Path('/home/dev').exists()
+    try:
+        Path('/workspace/contaminated').write_text('bad')
+    except OSError:
+        pass
+    else:
+        raise AssertionError('snapshot writable')
+os.mkfifo(runtime / 'release')
+(runtime / 'target').write_text('fail')
+(runtime / 'ready').touch()
+with (runtime / 'release').open() as release:
+    release.read()
+sys.exit(0 if (runtime / 'target').read_text() == 'pass' else 7)
+PYTHON
 
 cat > "$PAYLOAD/setup.sh" <<'SETUP'
 #!/bin/bash
@@ -127,7 +216,7 @@ cat > "$PAYLOAD/setup.sh" <<'SETUP'
 set -u
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -qq >/dev/null 2>&1
-apt-get install -y -qq jq sudo strace python3 git procps util-linux openssl >/dev/null 2>&1 \
+apt-get install -y -qq jq sudo strace python3 git procps util-linux openssl bubblewrap >/dev/null 2>&1 \
   || { echo "SETUP-FAIL: packages"; exit 1; }
 
 useradd -m -s /bin/bash dev
@@ -148,9 +237,18 @@ grep -q 'created execution account agentmd-runner' /tmp/install.log \
   || { echo "SETUP-FAIL: install did not create the execution account"; cat /tmp/install.log; exit 1; }
 getent passwd agentmd >/dev/null || { echo "SETUP-FAIL: no agentmd"; exit 1; }
 getent passwd agentmd-runner >/dev/null || { echo "SETUP-FAIL: no agentmd-runner"; exit 1; }
+ROOT=""
+PROGRAM=integration
+. /usr/local/lib/agent-md/authority-lib.sh
+if capability=$(authority_sandbox_capability); then
+  echo "BWRAP_PROBE: ready"
+else
+  echo "BWRAP_PROBE: $capability"
+fi
 # Trigger files for the state-machine rows. They sit outside every workspace on
 # purpose: steering an outcome must not change the workspace identity.
 install -d -o root -g root -m 0777 /srv
+install -d -o root -g root -m 0755 /usr/local/bin/agent-md-test-controls
 # A real issuer key, created the way an operator creates one. Earlier rounds
 # planted a sentinel file here; a sentinel proves the directory permissions but
 # not that the program that creates a key leaves it in the state it claims.
@@ -220,6 +318,7 @@ enroll_project() {
     || { cat /tmp/enroll.log; return 1; }
   PID=$(sudo -u agentmd "$LIB/agent-md-authority" show --workspace /home/dev/repo 2>/dev/null | awk '/^project id:/{print $3}')
   [ -n "$PID" ] || return 1
+  RUNNING_PATH="/var/tmp/agent-md-runner/$PID/test/running"
   rm -f /etc/sudoers.d/agent-md-*
   "$LIB/agent-md-authority" sudoers "$PID" --write >/dev/null
   chmod 0440 "/etc/sudoers.d/agent-md-$PID"
@@ -231,6 +330,8 @@ evaluate_as() {
     sudo -n -u agentmd "$LIB/agent-md-issuer" evaluate \
     <<<'{"protocol":1,"scope":"worktree","workspace":"/home/dev/repo"}' 2>/tmp/ev.err
 }
+
+if [ "${AGENT_MD_INTEGRATION_ONLY:-}" != containment ]; then
 prepare() { sudo -u agentmd "$LIB/agent-md-authority" prepare-run "$PID" --check "$1" >/dev/null 2>/tmp/prep.err; }
 run_job() { sudo -u agentmd sudo -n -u agentmd-runner "$LIB/run-check" "$PID" "$1" >/tmp/rc.out 2>/tmp/rc.err; echo $?; }
 
@@ -628,7 +729,11 @@ row root "current" "unchanged after rotate-key" "explicit refusal" "$(cat /var/l
 row runner-env "private key" "reachable from a check" "env isolation" "$(sudo -u agentmd-runner env | grep -ciE 'issuer.*key|PRIVATE' || true)" 0
 # The key must not have been copied into anything the runner can read. These
 # grep the real artefacts of the run that just executed, not the source.
+prepare test || { echo "ABORT: cannot prepare key-custody artifacts"; cat /tmp/prep.err; exit 1; }
 RUNDIR=/var/lib/agent-md/projects/$PID/runs/$(cat "/var/lib/agent-md/projects/$PID/current-run")
+[ -d "$RUNDIR/jobs" ] && [ -d "$RUNDIR/snapshot" ] || {
+  echo "ABORT: captured run artifacts are absent"; exit 1;
+}
 row root "run artefacts" "contain key material" "custody" "$(grep -rlF "$(sed -n 2p "$PRIV")" "$RUNDIR" 2>/dev/null | wc -l)" 0
 row root "job files" "name the key directory" "custody" "$(grep -rlE 'keys/|issuer-.*\.key' "$RUNDIR/jobs" 2>/dev/null | wc -l)" 0
 row root "snapshot" "contains a PEM private key" "custody" "$(grep -rlF 'BEGIN PRIVATE KEY' "$RUNDIR/snapshot" 2>/dev/null | wc -l)" 0
@@ -648,11 +753,11 @@ SEQ_BEFORE=$(jq -r '.scopes.worktree.next_sequence' "$STATE")
 install -o dev -g dev -m 0644 /it/flagged.toml /home/dev/repo/agent-md.toml
 enroll_project >/dev/null
 STATE=/var/lib/agent-md/projects/$PID/state.json
-printf 'ok\n' > /srv/flag; chmod 0644 /srv/flag
+printf 'ok\n' > /usr/local/bin/agent-md-test-controls/flag; chmod 0644 /usr/local/bin/agent-md-test-controls/flag
 row dev evaluation "flag present" "orchestration" "$(evaluate_as dev | jq -r .status)" authenticated_pass
 PASS_SEQ=$(jq -r '.scopes.worktree.last_terminal.sequence' "$STATE")
 row root "state" "pass is the terminal" "C4b state machine" "$(jq -r '.scopes.worktree.last_terminal.status' "$STATE")" candidate_pass
-rm -f /srv/flag
+rm -f /usr/local/bin/agent-md-test-controls/flag
 row dev evaluation "flag removed" "orchestration" "$(evaluate_as dev | jq -r .status)" authenticated_fail
 FAIL_SEQ=$(jq -r '.scopes.worktree.last_terminal.sequence' "$STATE")
 row root "state" "fail supersedes the pass" "C4b state machine" "$(jq -r '.scopes.worktree.last_terminal.status' "$STATE")" candidate_fail
@@ -661,16 +766,16 @@ row root "pending" "cleared after a terminal" "C4b state machine" "$(jq -r '.sco
 
 # kill -9 during a check must leave the pending, and the previous terminal
 # must stay suppressed until a later evaluation takes the reservation over.
-printf 'ok\n' > /srv/flag; chmod 0644 /srv/flag
+printf 'ok\n' > /usr/local/bin/agent-md-test-controls/flag; chmod 0644 /usr/local/bin/agent-md-test-controls/flag
 install -o dev -g dev -m 0644 /it/slowflag.toml /home/dev/repo/agent-md.toml
 enroll_project >/dev/null
 STATE=/var/lib/agent-md/projects/$PID/state.json
 evaluate_as dev >/dev/null
 BEFORE_KILL_SEQ=$(jq -r '.scopes.worktree.last_terminal.sequence' "$STATE")
-rm -f /srv/running
-touch /srv/slow
+rm -f $RUNNING_PATH
+touch /usr/local/bin/agent-md-test-controls/slow
 ( evaluate_as dev >/dev/null 2>&1 ) & EVBG=$!
-for _ in $(seq 1 300); do [ -e /srv/running ] && break; sleep 0.1; done
+for _ in $(seq 1 300); do [ -e $RUNNING_PATH ] && break; sleep 0.1; done
 EVPG=$(ps -o pgid= -p "$EVBG" 2>/dev/null | tr -d ' ')
 [ -n "$EVPG" ] && kill -9 -"$EVPG" 2>/dev/null
 kill -9 "$EVBG" 2>/dev/null; wait "$EVBG" 2>/dev/null
@@ -679,16 +784,16 @@ ABANDONED=$(jq -r '.scopes.worktree.pending.sequence' "$STATE")
 row root "previous terminal" "still suppressed by the pending" "crash consistency" "$(jq -r '.scopes.worktree.last_terminal.sequence' "$STATE")" "$BEFORE_KILL_SEQ"
 
 # The lock must be free again: the killed tree may not keep holding it.
-rm -f /srv/slow
+rm -f /usr/local/bin/agent-md-test-controls/slow
 row dev evaluation "recovers after the crash" "lock released on death" "$(evaluate_as dev | jq -r .status)" authenticated_pass
 RECOVERED=$(jq -r '.scopes.worktree.last_terminal.sequence' "$STATE")
 row root "sequence" "abandoned number never reused" "monotonicity" "$([ "$RECOVERED" -gt "$ABANDONED" ] && printf later || printf reused)" later
 row root "pending" "resolved by the recovery" "crash consistency" "$(jq -r '.scopes.worktree.pending | type' "$STATE")" null
 
 # A second evaluation while one holds the lock must reserve nothing.
-rm -f /srv/running; touch /srv/slow
+rm -f $RUNNING_PATH; touch /usr/local/bin/agent-md-test-controls/slow
 ( evaluate_as dev >/dev/null 2>&1 ) & EVBG=$!
-for _ in $(seq 1 300); do [ -e /srv/running ] && break; sleep 0.1; done
+for _ in $(seq 1 300); do [ -e $RUNNING_PATH ] && break; sleep 0.1; done
 HELD_NEXT=$(jq -r '.scopes.worktree.next_sequence' "$STATE")
 CONC=$(evaluate_as dev)
 row dev evaluation "concurrent request" "flock, non-blocking" "$(printf '%s' "$CONC" | jq -r .reason_code)" REFUSED_EVALUATION_IN_PROGRESS
@@ -697,7 +802,7 @@ row root "next_sequence" "unchanged by the refusal" "flock, non-blocking" "$(jq 
 EVPG=$(ps -o pgid= -p "$EVBG" 2>/dev/null | tr -d ' ')
 [ -n "$EVPG" ] && kill -9 -"$EVPG" 2>/dev/null
 kill -9 "$EVBG" 2>/dev/null; wait "$EVBG" 2>/dev/null
-rm -f /srv/slow /srv/running
+rm -f /usr/local/bin/agent-md-test-controls/slow $RUNNING_PATH
 
 # The state names the key that signed the current receipt; an identifier is
 # not material. What must never appear is the key itself.
@@ -709,7 +814,7 @@ install -o dev -g dev -m 0644 /it/flagged.toml /home/dev/repo/agent-md.toml
 enroll_project >/dev/null
 STATE=/var/lib/agent-md/projects/$PID/state.json
 PROJ=/var/lib/agent-md/projects/$PID
-printf 'ok\n' > /srv/flag; chmod 0644 /srv/flag
+printf 'ok\n' > /usr/local/bin/agent-md-test-controls/flag; chmod 0644 /usr/local/bin/agent-md-test-controls/flag
 
 EV=$(evaluate_as dev)
 row dev evaluation "signed pass" "C4c issuance" "$(printf '%s' "$EV" | jq -r .status)" authenticated_pass
@@ -740,7 +845,7 @@ row dev "trusted key" "replace" "DAC 0444 in 0555" "$(try sudo -u dev bash -c "e
 row dev receipts "add a receipt of their own" "DAC 0555 directory" "$(try sudo -u dev bash -c "echo x > $PROJ/receipts/worktree/999.json")" denied
 
 # A signed FAIL supersedes a signed PASS.
-rm -f /srv/flag
+rm -f /usr/local/bin/agent-md-test-controls/flag
 EV2=$(evaluate_as dev)
 row dev evaluation "signed fail" "C4c issuance" "$(printf '%s' "$EV2" | jq -r .status)" authenticated_fail
 FSEQ=$(printf '%s' "$EV2" | jq -r .sequence)
@@ -751,17 +856,17 @@ row root "earlier pass receipt" "is not current" "state decides latest" "$([ "$(
 # identity_changed opens no key and publishes nothing. The workspace is changed
 # while a check is demonstrably executing, then the check is released, so the
 # divergence is certain rather than raced for.
-printf 'ok\n' > /srv/flag; chmod 0644 /srv/flag
+printf 'ok\n' > /usr/local/bin/agent-md-test-controls/flag; chmod 0644 /usr/local/bin/agent-md-test-controls/flag
 install -o dev -g dev -m 0644 /it/holdflag.toml /home/dev/repo/agent-md.toml
 enroll_project >/dev/null
 STATE=/var/lib/agent-md/projects/$PID/state.json
 PROJ=/var/lib/agent-md/projects/$PID
-rm -f /srv/running; touch /srv/hold
+rm -f $RUNNING_PATH; touch /usr/local/bin/agent-md-test-controls/hold
 EV3OUT=$(mktemp)
 ( evaluate_as dev > "$EV3OUT" 2>/dev/null ) & EV3BG=$!
-for _ in $(seq 1 600); do [ -e /srv/running ] && break; sleep 0.1; done
+for _ in $(seq 1 600); do [ -e $RUNNING_PATH ] && break; sleep 0.1; done
 sudo -u dev bash -c 'printf "CHANGED\n" >> ~/repo/marker.txt'
-rm -f /srv/hold
+rm -f /usr/local/bin/agent-md-test-controls/hold
 wait "$EV3BG" 2>/dev/null
 EV3=$(cat "$EV3OUT"); rm -f "$EV3OUT"
 row dev evaluation "identity changed before signing" "policy B" "$(printf '%s' "$EV3" | jq -r .status)" identity_changed
@@ -777,7 +882,7 @@ header "8e. unprivileged receipt validation, real accounts"
 install -o dev -g dev -m 0644 /it/flagged.toml /home/dev/repo/agent-md.toml
 enroll_project >/dev/null
 PROJ=/var/lib/agent-md/projects/$PID
-printf 'ok\n' > /srv/flag; chmod 0644 /srv/flag
+printf 'ok\n' > /usr/local/bin/agent-md-test-controls/flag; chmod 0644 /usr/local/bin/agent-md-test-controls/flag
 RV="sudo -u dev $LIB/receipt-verify.sh /home/dev/repo worktree"
 
 row dev "private key dir" "readable at all" "DAC 0700 agentmd" "$(try sudo -u dev ls /var/lib/agent-md/keys)" denied
@@ -832,28 +937,28 @@ row dev validator "source restored" "live fingerprint" "$($RV 2>/dev/null | jq -
 
 # A newer authenticated failure supersedes the earlier pass.
 PASS_SEQ=$(jq -r '.scopes.worktree.last_terminal.sequence' "$PROJ/state.json")
-rm -f /srv/flag
+rm -f /usr/local/bin/agent-md-test-controls/flag
 evaluate_as dev >/dev/null
 row dev validator "after an authenticated failure" "supersession" "$($RV 2>/dev/null | jq -r .status)" current_fail
 row root "earlier pass receipt" "still present" "history" "$([ -f "$PROJ/receipts/worktree/$PASS_SEQ.json" ] && printf present || printf gone)" present
 row dev validator "earlier pass is not reusable" "state decides latest" "$($RV >/dev/null 2>&1; [ $? -eq 0 ] && printf reusable || printf "not-reusable")" not-reusable
 
 # A pending left by a crash suppresses everything underneath it.
-printf 'ok\n' > /srv/flag; chmod 0644 /srv/flag
+printf 'ok\n' > /usr/local/bin/agent-md-test-controls/flag; chmod 0644 /usr/local/bin/agent-md-test-controls/flag
 evaluate_as dev >/dev/null
 row dev validator "recovered to a pass" "C4d validation" "$($RV 2>/dev/null | jq -r .status)" reusable_ordinary
 install -o dev -g dev -m 0644 /it/slowflag.toml /home/dev/repo/agent-md.toml
 enroll_project >/dev/null
 PROJ=/var/lib/agent-md/projects/$PID
-printf 'ok\n' > /srv/flag; chmod 0644 /srv/flag
+printf 'ok\n' > /usr/local/bin/agent-md-test-controls/flag; chmod 0644 /usr/local/bin/agent-md-test-controls/flag
 evaluate_as dev >/dev/null
-rm -f /srv/running; touch /srv/slow
+rm -f $RUNNING_PATH; touch /usr/local/bin/agent-md-test-controls/slow
 ( evaluate_as dev >/dev/null 2>&1 ) & RVBG=$!
-for _ in $(seq 1 600); do [ -e /srv/running ] && break; sleep 0.1; done
+for _ in $(seq 1 600); do [ -e $RUNNING_PATH ] && break; sleep 0.1; done
 RVPG=$(ps -o pgid= -p "$RVBG" 2>/dev/null | tr -d ' ')
 [ -n "$RVPG" ] && kill -9 -"$RVPG" 2>/dev/null
 kill -9 "$RVBG" 2>/dev/null; wait "$RVBG" 2>/dev/null
-rm -f /srv/slow
+rm -f /usr/local/bin/agent-md-test-controls/slow
 row dev validator "pending after a crash" "pending suppresses" "$($RV 2>/dev/null | jq -r .status)" unresolved_pending
 row dev validator "pending is not reusable" "fail closed" "$($RV >/dev/null 2>&1; [ $? -eq 0 ] && printf reusable || printf "not-reusable")" not-reusable
 evaluate_as dev >/dev/null
@@ -883,15 +988,14 @@ install -o dev -g dev -m 0644 /hosts/settings.json /home/dev/repo/.claude/settin
 install -o dev -g dev -m 0644 /it/flagged.toml /home/dev/repo/agent-md.toml
 enroll_project >/dev/null
 PROJ=/var/lib/agent-md/projects/$PID
-printf 'ok\n' > /srv/flag; chmod 0644 /srv/flag
+printf 'ok\n' > /usr/local/bin/agent-md-test-controls/flag; chmod 0644 /usr/local/bin/agent-md-test-controls/flag
 
-# The ordinary contract appends a mark every time it actually executes, so a
-# completion that reuses evidence can be told apart from one that re-ran it.
-# A boolean would not distinguish "ran once under the authority" from "ran
-# again afterwards", which is the invariant that matters here.
+# The authority sequence counts evaluations while the validator reuses current
+# evidence without consuming another number. The legacy fallback is observed
+# with its own external marker below.
 cat > /home/dev/repo/agent-md.toml <<'TOML'
 [verify]
-test = "printf x >> /srv/RUNS; cat /home/dev/repo/gate"
+test = "cat gate"
 
 [verify.policy]
 required = ["test"]
@@ -911,8 +1015,9 @@ run_stop_stderr() {
   sudo -u dev env -i HOME=/home/dev PATH=/usr/local/bin:/usr/bin:/bin \
     bash -c 'cd /home/dev/repo && printf "{}" | bash .claude/hooks/stop-verify.sh' 2>&1 >/dev/null
 }
-runs() { [ -f /srv/RUNS ] && wc -c < /srv/RUNS | tr -d ' ' || printf 0; }
+runs() { local next; next=$(jq -r '.scopes.worktree.next_sequence' "$PROJ/state.json"); printf '%s' "$(( next - RUN_BASE ))"; }
 
+RUN_BASE=$(jq -r '.scopes.worktree.next_sequence' "$PROJ/state.json")
 : > /srv/RUNS; chmod 0666 /srv/RUNS
 
 T0=$(date +%s); OUT1=$(run_stop); T1=$(date +%s)
@@ -965,13 +1070,16 @@ WARN=$(run_stop_stderr)
 row dev completion "a tampered receipt warns" "corruption is visible" \
   "$(printf '%s' "$WARN" | grep -qi 'WARNING' && printf warned || printf silent)" warned
 row dev completion "a tampered receipt is never reused" "fail closed" \
-  "$([ "$(runs)" -gt "$BEFORE" ] && printf ran-anyway || printf reused)" ran-anyway
+  "$(sudo -u dev "$LIB/receipt-verify.sh" /home/dev/repo worktree | jq -r .status)" invalid_receipt
 
 mv /usr/local/lib/agent-md/receipt-verify.sh /usr/local/lib/agent-md/receipt-verify.sh.off
-BEFORE=$(runs)
+# The legacy path still runs as the developer; this temporary contract gives
+# it an external execution marker without exposing that path to the issuer.
+sudo -u dev sed -i 's|test = "cat gate"|test = "printf x >> /srv/RUNS; cat gate"|' /home/dev/repo/agent-md.toml
 run_stop >/dev/null
 row dev completion "no validator installed" "legacy fallback" \
-  "$([ "$(runs)" -gt "$BEFORE" ] && printf ran || printf skipped)" ran
+  "$([ -s /srv/RUNS ] && printf ran || printf skipped)" ran
+sudo -u dev sed -i 's|test = "printf x >> /srv/RUNS; cat gate"|test = "cat gate"|' /home/dev/repo/agent-md.toml
 mv /usr/local/lib/agent-md/receipt-verify.sh.off /usr/local/lib/agent-md/receipt-verify.sh
 
 sudo -u dev bash -c 'mkdir -p /home/dev/solo/.claude/hooks && cd /home/dev/solo && git init -q'
@@ -1025,14 +1133,129 @@ fi
 wait "$BG"
 install -o dev -g dev -m 0644 /it/agent-md.toml /home/dev/repo/agent-md.toml
 
+header "11. authenticated runtime preparation as the runner"
+cat > /usr/local/bin/poetry <<'POETRY'
+#!/bin/bash
+set -eu
+case "$1" in
+  sync)
+    [ ! -f /usr/local/bin/agent-md-test-controls/PREP_DENY ] || exit 7
+    mkdir -p "$POETRY_VIRTUALENVS_PATH/bin"
+    printf '#!/bin/bash\nprintf "prepared-dependency\\n"\n' > "$POETRY_VIRTUALENVS_PATH/bin/depcli"
+    chmod 0555 "$POETRY_VIRTUALENVS_PATH/bin/depcli"
+    ;;
+  run)
+    shift
+    if [ "$1" = depcli ]; then
+      exec "$POETRY_VIRTUALENVS_PATH/bin/depcli"
+    fi
+    exec "$@"
+    ;;
+  *) exit 2 ;;
+esac
+POETRY
+chmod 0555 /usr/local/bin/poetry
+install -o dev -g dev -m 0644 /it/agent-md.toml /home/dev/repo/agent-md.toml
+printf '[tool.poetry]\npackage-mode = false\n' | install -o dev -g dev -m 0644 /dev/stdin /home/dev/repo/pyproject.toml
+printf '# fixture lock\n' | install -o dev -g dev -m 0644 /dev/stdin /home/dev/repo/poetry.lock
+install -d -o dev -g dev -m 0755 /home/dev/repo/app
+printf 'VALUE = "sealed-snapshot-module"\n' | install -o dev -g dev -m 0644 /dev/stdin /home/dev/repo/app/__init__.py
+enroll_project >/dev/null
+BEFORE_ID=$PID
+BEFORE_RESPONSE=$(evaluate_as dev)
+BEFORE_SEQ=$(jq -r '.scopes.worktree.next_sequence' "/var/lib/agent-md/projects/$PID/state.json")
+install -o dev -g dev -m 0644 /it/preparation.toml /home/dev/repo/agent-md.toml
+"$LIB/agent-md-authority" reapprove /home/dev/repo --yes >/tmp/preparation-reapprove.log 2>&1
+row root reapprove "same project id" "contract rotation" \
+  "$("$LIB/agent-md-authority" show --workspace /home/dev/repo | awk '/^project id:/{print $3}')" "$BEFORE_ID"
+row root reapprove "sequence preserved" "state not reset" \
+  "$(jq -r '.scopes.worktree.next_sequence' "/var/lib/agent-md/projects/$PID/state.json")" "$BEFORE_SEQ"
+row root reapprove "old receipt retained" "signed history" \
+  "$([ -f "/var/lib/agent-md/projects/$PID/receipts/worktree/1.json" ] && printf yes || printf no)" yes
+AFTER_RESPONSE=$(evaluate_as dev)
+row dev preparation "new evaluation" "runner runtime" "$(jq -r .status <<<"$AFTER_RESPONSE")" authenticated_pass
+row dev preparation "both ordinary checks" "prepared dependencies" \
+  "$(jq '[.checks[] | select(.exit_code == 0)] | length' <<<"$AFTER_RESPONSE")" 2
+for CHECK in lint test; do
+  row agentmd-runner "$CHECK runtime" owner "per-check scratch" \
+    "$(stat -c %U "/var/tmp/agent-md-runner/$PID/$CHECK/venvs")" agentmd-runner
+done
+row root preparation "old PASS not current" "contract fingerprint" \
+  "$([ "$(jq -r '.identity.contract.value' <<<"$BEFORE_RESPONSE")" != "$(jq -r '.identity.contract.value' <<<"$AFTER_RESPONSE")" ] && printf stale || printf current)" stale
+touch /usr/local/bin/agent-md-test-controls/PREP_DENY
+FAILED_PREPARATION=$(evaluate_as dev)
+rm -f /usr/local/bin/agent-md-test-controls/PREP_DENY
+row dev preparation "download failure" "infrastructure refusal" \
+  "$(jq -r .reason_code <<<"$FAILED_PREPARATION")" REFUSED_PREPARATION_FAILED
+row root state "prior PASS superseded" "receipt-free terminal" \
+  "$(jq -r '.scopes.worktree.last_terminal.status' "/var/lib/agent-md/projects/$PID/state.json")" preparation_failed
+row root state "pending resolved" "atomic terminal" \
+  "$(jq -r '.scopes.worktree.pending | type' "/var/lib/agent-md/projects/$PID/state.json")" null
+row dev validator "prior PASS not reused" "negative infrastructure state" \
+  "$(sudo -u dev "$LIB/receipt-verify.sh" /home/dev/repo worktree | jq -r .status)" unauthenticated_terminal
+row root receipt "earlier PASS retained" "signed history" \
+  "$([ -f "/var/lib/agent-md/projects/$PID/receipts/worktree/2.json" ] && printf yes || printf no)" yes
+row root receipt "failure publishes none" "no ordinary verdict" \
+  "$([ -f "/var/lib/agent-md/projects/$PID/receipts/worktree/3.json" ] && printf yes || printf no)" no
+
 echo
+fi
+
+header "12. detached runner cannot poison the next check"
+install -o dev -g dev -m 0644 /it/containment.toml /home/dev/repo/agent-md.toml
+install -o dev -g dev -m 0644 /it/attack.py /home/dev/repo/attack.py
+install -o dev -g dev -m 0644 /it/target.py /home/dev/repo/target.py
+enroll_project >/dev/null
+BASE_DIR="/var/tmp/agent-md-runner/$PID/baseline"
+install -d -o agentmd-runner -g agentmd-runner -m 0700 \
+  "/var/tmp/agent-md-runner/$PID" "$BASE_DIR"
+sudo -u agentmd-runner python3 /home/dev/repo/attack.py "$BASE_DIR/target" "$BASE_DIR/attacker.pid"
+sudo -u agentmd-runner python3 /home/dev/repo/target.py "$BASE_DIR" > /tmp/baseline-target.log 2>&1 & BASE_TEST=$!
+for _ in $(seq 1 300); do [ -f "$BASE_DIR/target.tampered" ] && break; sleep 0.02; done
+row agentmd-runner "baseline attack" "rewrites next runtime" "same UID without namespace" \
+  "$([ -f "$BASE_DIR/target.tampered" ] && cat "$BASE_DIR/target" || printf untouched)" pass
+printf release > "$BASE_DIR/release"
+wait "$BASE_TEST"; BASE_CODE=$?
+row agentmd-runner "baseline attack" "false PASS possible" "old execution boundary" "$BASE_CODE" 0
+
+( evaluate_as dev > /tmp/contained-evaluation.json 2>/tmp/contained-evaluation.err ) & CONTAINED=$!
+LINT_SCRATCH="/var/tmp/agent-md-runner/$PID/lint"
+TEST_SCRATCH="/var/tmp/agent-md-runner/$PID/test"
+for _ in $(seq 1 600); do [ -f "$LINT_SCRATCH/ready" ] && break; sleep 0.02; done
+mapfile -t ATTACK_PIDS < <(pgrep -u agentmd-runner -f '^python3 attack.py$')
+row agentmd-runner "contained lint" "parent and child observed" "synchronized process tree" \
+  "${#ATTACK_PIDS[@]}" 2
+printf release > "$LINT_SCRATCH/permit-exit"
+for _ in $(seq 1 600); do [ -f "$TEST_SCRATCH/ready" ] && break; sleep 0.02; done
+for ATTACK_PID in "${ATTACK_PIDS[@]}"; do
+  for _ in $(seq 1 300); do [ ! -d "/proc/$ATTACK_PID" ] && break; sleep 0.01; done
+done
+row agentmd-runner "contained lint" "all descendants gone before test" "private PID namespace" \
+  "$(pgrep -u agentmd-runner -f '^python3 attack.py$' >/dev/null && printf alive || printf gone)" gone
+row agentmd-runner "test scratch" "target unchanged" "cross-scratch isolation" \
+  "$(cat "$TEST_SCRATCH/target" 2>/dev/null || printf absent)" fail
+printf release > "$TEST_SCRATCH/release"
+wait "$CONTAINED" || true
+if [ "$(jq -r .status /tmp/contained-evaluation.json)" = refused ]; then
+  jq -c '{reason_code,reason}' /tmp/contained-evaluation.json
+  cat /tmp/contained-evaluation.err
+  cat /tmp/ev.err
+fi
+row dev evaluation "contained attack verdict" "no false PASS" \
+  "$(jq -r .status /tmp/contained-evaluation.json)" authenticated_fail
+row dev evaluation "contained attack reason" "ordinary failure, not setup refusal" \
+  "$(jq -r .reason_code /tmp/contained-evaluation.json)" AUTHENTICATED_FAIL
+row dev evaluation "test exit" "unmodified runtime" \
+  "$(jq -r '.checks[] | select(.name == "test") | .exit_code' /tmp/contained-evaluation.json)" 7
+
 echo "PASS=$PASS FAIL=$FAIL NOT_EXERCISED=$SKIP"
 [ "$FAIL" -eq 0 ]
 MATRIX
 
 chmod +x "$PAYLOAD"/*.sh
 docker run --rm \
-  --cap-add=SYS_PTRACE --security-opt seccomp=unconfined \
+  --cap-add=SYS_PTRACE --security-opt seccomp=unconfined --security-opt apparmor=unconfined \
+  -e AGENT_MD_INTEGRATION_ONLY \
   -v "$ROOT_DIR/examples/local-issuer:/src:ro" \
   -v "$ROOT_DIR:/package:ro" \
   -v "$ROOT_DIR/.claude/hooks:/hooks:ro" \

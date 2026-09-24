@@ -1,4 +1,4 @@
-# Local verification authority (slices C1-C4d)
+# Local verification authority
 
 This directory holds the optional component that decides which projects may
 ever receive an authenticated verification receipt. It is not required to use
@@ -14,10 +14,11 @@ as it does today and completion runs the full contract.
 | `phase-a-source.sh` | vendored Phase A identity functions, used unmodified |
 | `receipt-verify.sh` | unprivileged validation of a published receipt |
 
-The authority can issue an authenticated receipt and validate one. What it
-still does not do is *reuse* one: no hook and no verification entry point
-consults the validator, so ordinary completion continues to run the full
-contract exactly as it does today.
+The authority issues authenticated receipts, and the completion hook consults
+the validator before running a new evaluation. A current applicable PASS can
+be reused; a current FAIL remains negative evidence. Invalid, stale or absent
+evidence causes fresh verification or a visible refusal according to the
+receipt-first flow.
 
 ## Why the authority lives outside the repository
 
@@ -43,6 +44,12 @@ sudo ./examples/local-issuer/agent-md-authority install
 Inspect it first with `--dry-run`. Use `--root PREFIX` to build a staging tree
 under an alternate prefix; that mode creates no service account and is what the
 test suite uses.
+
+After installation, `sudo /usr/local/lib/agent-md/agent-md-authority doctor`
+checks the local issuer's
+trusted bubblewrap executable and tests namespaces as `agentmd-runner`. This
+diagnostic belongs to the optional authority; the basic project doctor does
+not require bubblewrap.
 
 The layout it produces:
 
@@ -154,6 +161,83 @@ An environment, tool or PATH resolution change also needs a changed contract
 or mechanism identity. Otherwise a previously signed PASS could still match
 all four receipt fingerprints after reapproval, so the command refuses that
 proposal rather than claiming a new approval has invalidated it.
+
+### Preparing an isolated runtime
+
+Projects that need dependencies for their checks can declare preparation in
+`agent-md.toml`:
+
+```toml
+[verify.preparation]
+provider = "poetry"
+command = "poetry sync --no-root"
+timeout_seconds = 600
+```
+
+Poetry is the first supported provider. The authority also accepts the same
+command with `--no-interaction`, `--all-groups`, or both. It requires
+`pyproject.toml` and `poetry.lock` in the sealed snapshot, discovers Poetry on
+the approved PATH, records its trusted executable path, and revalidates that
+path before execution. The command and timeout enter the effective contract
+identity. Adding or changing them requires `reapprove`; an earlier receipt
+cannot apply to the new contract. The approval review shows the preparation
+separately from ordinary checks.
+
+For each ordinary check, `agentmd-runner` creates a fresh scratch, runs the
+approved preparation inside the sealed snapshot, and then runs that check with
+the resulting runtime. `HOME`, Poetry's cache, config, data and virtualenv
+paths, plus Ruff, Pytest and coverage output paths, all point into that check's
+scratch. Nothing comes from the developer's
+virtualenv, user site or Poetry cache, and no mutable runtime or cache is
+shared between checks. This costs repeated installs, but a check running as
+the same UID could poison a shared writable cache before the next check used
+it. Because `--no-root` does not install the project, `PYTHONPATH` is set to
+the sealed snapshot root so checks can import its code without executing the
+project's build hooks; the developer's `PYTHONPATH` is discarded. Preparation
+and the check have separate timeouts, both limited by the
+remaining total evaluation budget; a derived total includes each preparation.
+
+A failed or timed-out preparation is infrastructure refusal, never an ordinary
+FAIL receipt. It records a receipt-free `preparation_failed` terminal so that
+an earlier PASS does not become current again, while keeping the old receipt
+as signed history. Preparation does not count toward required-check coverage.
+
+### Execution containment
+
+The authenticated local issuer requires **bubblewrap at `/usr/bin/bwrap`** and
+working unprivileged user, mount and PID namespaces for `agentmd-runner`. The
+normal coding-agent-control hooks and `verify.sh` have no bubblewrap
+requirement. `install` diagnoses an unavailable sandbox; enrollment or
+reapproval marks it ineligible when a capability probe fails. An evaluation
+never runs a check without the sandbox. A missing or failed sandbox records a
+receipt-free `execution_failed` terminal and returns
+`REFUSED_SANDBOX_UNAVAILABLE`, so an earlier PASS cannot revive. Existing
+enrollments without the approved `bubblewrap-v1` execution boundary require
+administrative `reapprove`. Reapproval must also change the approved contract
+or mechanism identity before it can make an old receipt current
+under the new execution semantics; the project id, state and signed history
+remain intact.
+
+Each preparation and ordinary check starts a separate bubblewrap instance as
+`agentmd-runner`. `--unshare-user`, `--unshare-pid`, `--unshare-ipc` and
+`--unshare-uts` give it private namespaces; `--cap-drop ALL` removes capabilities;
+`--die-with-parent` ties it to the supervisor; bubblewrap's PID 1 reaps and
+terminates remaining descendants when the stage command exits. `--new-session`
+separates its terminal session. There is no host-root bind. `/usr`, the system
+binary/library paths, and the small set of needed `/etc` files are read-only;
+`/proc` and `/dev` are newly created; `/dev/shm` is backed by this stage's
+scratch. The sealed snapshot is read-only at
+`/workspace`. Only that stage's scratch is writable, at `/runtime` and `/tmp`.
+Other checks' scratches, the developer home, `/var/lib/agent-md`, keys, state
+and receipts are absent. The approved PATH may add read-only tool directories
+after their paths are checked. The approved absolute bubblewrap executable is
+checked again immediately before each stage.
+
+Network remains available in this first boundary version, including during
+Poetry downloads and ordinary checks. Network policy is a separate control;
+the receipt makes no claim that checks ran offline. Runtimes and caches remain
+separate per check, because each check can write its own scratch and same-UID
+filesystem permissions alone cannot make a shared runtime immutable.
 
 Workspace parent directories must allow runtime traversal even when root can
 read the repository. Production enrollment as root
@@ -445,13 +529,14 @@ Staging does not switch accounts and announces that limitation.
 ```text
 env -i
   + the approved allowlist (PATH, LANG/LC_*, declared extras)
-  + HOME     = ephemeral, created per run, never the developer's
-  + TMPDIR   = scratch outside the snapshot
+  + HOME     = /runtime/home, ephemeral for this check
+  + TMPDIR   = /runtime/tmp, ephemeral for this check
   + PYTHONNOUSERSITE=1
-  + trusted absolute env, timeout and bash
-  + cwd      = the sealed snapshot, revalidated after chdir
+  + PYTHONPATH=sealed snapshot, PYTHONDONTWRITEBYTECODE=1, and check-local Poetry paths when preparation is approved
+  + trusted absolute env, timeout, bwrap and bash
+  + cwd      = /workspace (the sealed snapshot)
   + stdin    = /dev/null
-  + fd 3     closed
+  + bwrap status fd closed before project code starts
 ```
 
 A check that needs to write source is incompatible with accelerated receipts
@@ -471,13 +556,14 @@ Fixed RunAs, literal project id, no wildcard command, no rule targeting root or
 any developer. The rule no longer varies per developer, because checks no
 longer run as one.
 
-### Nothing trusted runs after the command starts
+### Status from the sandbox monitor
 
 `run-check` validates the job, the snapshot, the tools and the environment,
-enters the snapshot, and then **execs** the command. It does not call the
-command and resume afterwards. After that line no code of ours is left running
-under the same uid as the project's own code, so there is nothing to tamper
-with and nothing to post-process a verdict.
+then starts preparation and the ordinary check through bubblewrap. The
+external bubblewrap monitor reports namespace setup and kernel exit status on
+its JSON status descriptor. It closes that descriptor before executing project
+code. Project output goes to diagnostic stderr, so it cannot forge a sandbox
+status record. A missing or malformed status record is infrastructure refusal.
 
 The status the supervisor observes is whatever the kernel reports back through
 sudo. The decision rule for this slice is deliberately blunt:

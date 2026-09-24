@@ -51,6 +51,8 @@ EX_BUDGET_EXHAUSTED=17
 EX_EVALUATION_IN_PROGRESS=18
 EX_STATE_UNUSABLE=19
 EX_SIGNING_UNAVAILABLE=21
+EX_PREPARATION_FAILED=22
+EX_SANDBOX_UNAVAILABLE=23
 EX_INTERNAL=20
 
 RESPONSE_MODE=eligibility
@@ -308,6 +310,12 @@ issuer_check_eligibility() {
   # mask the real reason.
   issuer_caller_gate
 
+  if [ "$(jq -r '.execution_boundary // empty' <<<"$record")" != "$AUTHORITY_EXECUTION_BOUNDARY" ] \
+    || ! jq -e 'any(.approved_tools[]?; .name == "bwrap")' <<<"$record" >/dev/null; then
+    refuse REFUSED_EXECUTION_REAPPROVAL_REQUIRED \
+      "the authenticated local issuer requires approved bubblewrap containment; update the mechanism and reapprove" "$EX_SANDBOX_UNAVAILABLE"
+  fi
+
   # --- contract revalidation -------------------------------------------------
   local current_contract current_fp approved_fp contract_err contract_reason
   contract_err=$(mktemp "${TMPDIR:-/tmp}/agent-md-contract-err.XXXXXX") \
@@ -374,6 +382,15 @@ EOF
   done <<EOF
 $(printf '%s' "$record" | jq -r '.approved_environment[].name')
 EOF
+
+  if [ "$(printf '%s' "$record" | jq -r '.approved_contract.preparation.provider // empty')" = poetry ]; then
+    local conflicts
+    conflicts=$(authority_preparation_environment_conflicts "$(printf '%s' "$record" | jq -c '.approved_environment')")
+    if [ -n "$conflicts" ]; then
+      RESPONSE_ENVIRONMENT='"forbidden"'
+      refuse REFUSED_ENV_CHANGED "approved environment conflicts with isolated Poetry preparation: $conflicts" "$EX_ENV_CHANGED"
+    fi
+  fi
 
   approved_path=$(printf '%s' "$record" | jq -r '.approved_environment[] | select(.name == "PATH") | .value')
   if [ -z "$approved_path" ]; then
@@ -683,20 +700,65 @@ issuer_prepare_run() {
 # check's own output is untrusted and is kept away from stdout, which carries
 # exactly one response object.
 issuer_run_one_check() {
-  local check="$1"
+  local check="$1" remaining="$2" marker_file="$3"
+  local invocation=()
   # 8>&- keeps the evaluation lock out of the child. Without it a check that
   # outlives a killed issuer would still hold the lock through the inherited
   # descriptor, and no later evaluation could ever recover the pending. sudo
   # closes descriptors above 2 on its own; the direct path does not.
   if is_real_root_prefix; then
-    sudo -n -u "$AUTHORITY_RUNNER_USER" "$(lib_dir)/run-check" "$ISSUER_PROJECT_ID" "$check" >&2 8>&-
+    invocation+=(sudo -n -u "$AUTHORITY_RUNNER_USER" "$(lib_dir)/run-check" "$ISSUER_PROJECT_ID" "$check")
   else
-    "$AUTHORITY_SELF_DIR/run-check" "$ISSUER_PROJECT_ID" "$check" --root "$ROOT" >&2 8>&-
+    invocation+=("$AUTHORITY_SELF_DIR/run-check" "$ISSUER_PROJECT_ID" "$check" --root "$ROOT")
   fi
+  timeout -k "${AUTHORITY_TIMEOUT_GRACE_SECONDS}s" "${remaining}s" \
+    "${invocation[@]}" >"$marker_file" 8>&-
+}
+
+issuer_execution_failed() {
+  issuer_commit_terminal execution_failed
+  refuse REFUSED_SANDBOX_UNAVAILABLE \
+    "execution containment could not be established for '$1'; check bubblewrap, unprivileged user/mount/PID namespaces and the preceding diagnostics" \
+    "$EX_SANDBOX_UNAVAILABLE"
+}
+
+issuer_execution_status() {
+  jq -se '
+    reduce .[] as $entry (
+      {stage:null, preparation:{started:false,exit:null}, check:{started:false,exit:null}};
+      if ($entry | keys) == ["stage"] then
+        if ($entry.stage != "preparation" and $entry.stage != "check") or
+           .stage == "check" or .stage == $entry.stage then error("invalid stage")
+        else .stage = $entry.stage end
+      elif .stage == null then error("no stage")
+      elif $entry | has("child-pid") then
+        if .[.stage].started or
+          ($entry["mnt-namespace"] | type) != "number" or
+          ($entry["pid-namespace"] | type) != "number" then error("invalid namespaces")
+        else .[.stage].started = true end
+      elif ($entry | keys) == ["exit-code"] then
+        if (.[.stage].started | not) or .[.stage].exit != null or
+          ($entry["exit-code"] | type) != "number" or
+          $entry["exit-code"] < 0 or $entry["exit-code"] > 255 then error("invalid exit")
+        else .[.stage].exit = $entry["exit-code"] end
+      else error("invalid execution report") end)
+  ' "$1"
+}
+
+issuer_preparation_failed() {
+  local check="$1" exit_code="$2"
+  # An attempted runtime that never materialized is no verdict on the source.
+  # It nevertheless supersedes an earlier PASS for this exact identity: keeping
+  # the previous terminal current after a failed preparation would let an
+  # attacker force a preparation failure to revive cached positive evidence.
+  issuer_commit_terminal preparation_failed
+  refuse REFUSED_PREPARATION_FAILED \
+    "runtime preparation did not complete for '$check' (exit $exit_code); ordinary checks were not concluded" \
+    "$EX_PREPARATION_FAILED"
 }
 
 issuer_execute_checks() {
-  local run_dir jobs_dir per_check total declared stages
+  local run_dir jobs_dir per_check total declared stages preparation_timeout
   run_dir=$(authority_run_dir "$ISSUER_PROJECT_ID" "$ISSUER_RUN_ID")
   jobs_dir="$run_dir/jobs"
 
@@ -708,12 +770,13 @@ issuer_execute_checks() {
 
   per_check=$(printf '%s' "$ISSUER_RECORD" | jq -r '.approved_contract.timeout_seconds')
   declared=$(printf '%s' "$ISSUER_RECORD" | jq -r '.approved_contract.total_timeout_seconds // empty')
+  preparation_timeout=$(printf '%s' "$ISSUER_RECORD" | jq -r '.approved_contract.preparation.timeout_seconds // 0')
   stages=${#ordered[@]}
-  total=$(authority_derive_total_timeout "$per_check" "$stages" "$declared")
+  total=$(authority_derive_total_timeout "$per_check" "$stages" "$declared" "$preparation_timeout")
 
   # Every applicable check runs while the budget allows, which is what the core
   # does: a failing check does not hide the diagnosis of the ones after it.
-  local started elapsed remaining status exhausted=false required command identity job
+  local started elapsed remaining status exhausted=false required command identity job marker execution_status prep_exit check_exit
   started=$SECONDS
   for name in "${ordered[@]}"; do
     job="$jobs_dir/$name.json"
@@ -723,14 +786,40 @@ issuer_execute_checks() {
       'if (.approved_contract.required | index($n)) then "required" else "optional" end')
     elapsed=$(( SECONDS - started ))
     remaining=$(( total - elapsed ))
-    if [ "$remaining" -le 0 ]; then
+    if [ "$exhausted" = true ] || [ "$remaining" -le 0 ]; then
       exhausted=true
       RESPONSE_CHECKS=$(printf '%s' "$RESPONSE_CHECKS" | jq -c \
         --arg n "$name" --arg r "$required" --arg i "$identity" \
         '. + [{name:$n,requirement:$r,origin:"configured",command_identity:$i,exit_code:null,execution:"not_run"}]')
       continue
     fi
-    if issuer_run_one_check "$name"; then status=0; else status=$?; fi
+    marker=$(mktemp "${TMPDIR:-/tmp}/agent-md-preparation-marker.XXXXXX") \
+      || refuse REFUSED_RUN_FAILED "cannot create a preparation marker" "$EX_RUN_FAILED"
+    if issuer_run_one_check "$name" "$remaining" "$marker"; then status=0; else status=$?; fi
+    if ! execution_status=$(issuer_execution_status "$marker"); then
+      rm -f "$marker"
+      issuer_execution_failed "$name"
+    fi
+    rm -f "$marker"
+    prep_exit=$(jq -r '.preparation.exit' <<<"$execution_status")
+    check_exit=$(jq -r '.check.exit' <<<"$execution_status")
+    if [ "$preparation_timeout" -gt 0 ] && [ "$prep_exit" != 0 ]; then
+      if [ "$prep_exit" = null ] && [ "$status" != 124 ] && [ "$status" != 137 ]; then
+        issuer_execution_failed "$name"
+      fi
+      issuer_preparation_failed "$name" "$status"
+    fi
+    case "$status" in
+      124|137)
+        exhausted=true
+        RESPONSE_CHECKS=$(printf '%s' "$RESPONSE_CHECKS" | jq -c \
+          --arg n "$name" --arg r "$required" --arg i "$identity" \
+          '. + [{name:$n,requirement:$r,origin:"configured",command_identity:$i,exit_code:null,execution:"not_run"}]')
+        continue
+        ;;
+    esac
+    [ "$check_exit" != null ] && [ "$check_exit" = "$status" ] \
+      || issuer_execution_failed "$name"
     RESPONSE_CHECKS=$(printf '%s' "$RESPONSE_CHECKS" | jq -c \
       --arg n "$name" --arg r "$required" --arg i "$identity" --argjson e "$status" \
       '. + [{name:$n,requirement:$r,origin:"configured",command_identity:$i,exit_code:$e,execution:"completed"}]')

@@ -183,6 +183,8 @@ rv_resolve_project() {
   # workspace and then not checking the binding would make a rename enough.
   [ "$(jq -r '.workspace // empty' "$enrollment")" = "$canonical" ] || answer unavailable \
     "the enrollment does not bind this workspace" "$EX_UNAVAILABLE"
+  [ "$(jq -r '.execution_boundary // empty' "$enrollment")" = "$AUTHORITY_EXECUTION_BOUNDARY" ] \
+    || answer unavailable "execution containment was not approved; update the mechanism and reapprove" "$EX_UNAVAILABLE"
 }
 
 rv_read_state() {
@@ -221,6 +223,16 @@ rv_resolve_terminal() {
   RV_SEQUENCE=$(jq -c '.sequence' <<<"$RV_TERMINAL")
 
   if [ "$(jq -r '.receipt | type' <<<"$RV_TERMINAL")" = null ]; then
+    if [ "$(jq -r '.status' <<<"$RV_TERMINAL")" = execution_failed ]; then
+      answer unauthenticated_terminal \
+        "the latest evaluation could not establish execution containment; no ordinary verdict was published" \
+        "$EX_UNAUTHENTICATED_TERMINAL"
+    fi
+    if [ "$(jq -r '.status' <<<"$RV_TERMINAL")" = preparation_failed ]; then
+      answer unauthenticated_terminal \
+        "the latest evaluation could not prepare its runtime; it supersedes earlier receipts and publishes no ordinary verdict" \
+        "$EX_UNAUTHENTICATED_TERMINAL"
+    fi
     answer unauthenticated_terminal \
       "the current terminal result predates receipts and was never signed" "$EX_UNAUTHENTICATED_TERMINAL"
   fi

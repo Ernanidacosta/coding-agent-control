@@ -39,7 +39,7 @@ jobs:
       - uses: actions/checkout@v4
       - name: Install bats
         run: |
-          sudo apt-get update && sudo apt-get install -y bats jq parallel
+          sudo apt-get update && sudo apt-get install -y bats jq parallel bubblewrap
           # GNU parallel refuses to run unattended until its citation notice is
           # acknowledged; without this the suite runner can stall in CI.
           mkdir -p ~/.parallel && touch ~/.parallel/will-cite

@@ -165,16 +165,17 @@ timeout_seconds = 20'
   # the check's own execution instead of against the clock: nothing is touched
   # until a check has signalled that it is running, which can only happen once
   # the snapshot is sealed.
-  local running="$ROOT/running" hold="$ROOT/hold"
-  rm -f "$running"; : > "$hold"
+  local running="$ROOT/var/tmp/agent-md-runner"
   contract "[verify]
-test = \"touch $running; while [ -e $hold ]; do sleep 0.2; done; cat marker.txt\"
+test = \"mkfifo /runtime/release; touch /runtime/running; cat /runtime/release >/dev/null; cat marker.txt\"
 
 [verify.policy]
 required = [\"test\"]
 timeout_seconds = 60
 total_timeout_seconds = 180"
   enroll
+  running="$running/$PROJECT_ID/test/running"
+  local release="$ROOT/var/tmp/agent-md-runner/$PROJECT_ID/test/release"
 
   local out; out=$(mktemp)
   ( printf '{"protocol":1,"scope":"worktree","workspace":"%s"}' "$WS" \
@@ -190,7 +191,7 @@ total_timeout_seconds = 180"
 
   # The snapshot is sealed and a check is executing. Now tamper.
   printf 'TAMPERED\n' > "$WS/marker.txt"
-  rm -f "$hold"
+  printf release > "$release"
   # identity_changed exits non-zero, which is the expected outcome here.
   wait "$evaluation" || true
   local response; response=$(cat "$out"); rm -f "$out"

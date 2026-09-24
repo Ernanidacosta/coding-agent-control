@@ -32,7 +32,8 @@ AUTHORITY_LEGACY_OVERHEAD_SECONDS=30
 AUTHORITY_CONDITIONAL_CHECKS="independent approval"
 AUTHORITY_SERVICE_USER=agentmd
 AUTHORITY_RUNNER_USER=agentmd-runner
-AUTHORITY_REQUIRED_TOOLS="bash timeout env"
+AUTHORITY_REQUIRED_TOOLS="bash timeout env bwrap"
+AUTHORITY_EXECUTION_BOUNDARY=bubblewrap-v1
 AUTHORITY_SCRATCH_ROOT=/var/tmp/agent-md-runner
 AUTHORITY_TIMEOUT_GRACE_SECONDS=5
 
@@ -313,6 +314,10 @@ build_environment() {
   printf '%s' "$entries" | jq -cS 'sort_by(.name)'
 }
 
+authority_preparation_environment_conflicts() {
+  jq -r '[.[] | .name | select(test("^(POETRY_|PIP_|UV_|XDG_|PYTHON)|^(VIRTUAL_ENV|RUFF_CACHE_DIR|PYTEST_ADDOPTS|COVERAGE_FILE)$"))] | join(", ")' <<<"$1"
+}
+
 build_path_report() {
   local path="$1" uid="$2" gids="$3" entry report='[]'
   local saved_ifs="$IFS"
@@ -418,6 +423,27 @@ authority_parse_contract_lines() {
         }
         next
       }
+      if (section == "verify.preparation") {
+        if (key != "provider" && key != "command" && key != "timeout_seconds")
+          fail("verify.preparation has unsupported key " key)
+        if (seen["preparation." key]++) fail("duplicate key verify.preparation." key)
+        value = trim(raw)
+        if (key == "timeout_seconds") {
+          sub(/[ \t]*#.*$/, "", value)
+          value = trim(value)
+          if (value !~ /^[0-9]+$/ || value + 0 <= 0)
+            fail("verify.preparation.timeout_seconds must be a bare positive integer")
+          print "PREP_TIMEOUT:" value
+        } else {
+          if (index(value, "#") || value !~ /^".*"$/)
+            fail("verify.preparation." key " must be an unambiguous double-quoted string")
+          value = substr(value, 2, length(value) - 2)
+          if (value == "" || index(value, "\""))
+            fail("verify.preparation." key " is empty or contains an embedded quote")
+          print (key == "provider" ? "PREP_PROVIDER:" : "PREP_COMMAND:") value
+        }
+        next
+      }
       next
     }
     function emit_required(   body, i, ch, item, state) {
@@ -457,7 +483,8 @@ authority_parse_contract_lines() {
 # Prints the canonical contract JSON, or fails with AUTHORITY_CONTRACT_ERROR set.
 authority_read_contract() {
   local file="$1" lines kind name value
-  local checks='[]' conditional='[]' required='[]' timeout=null total=null
+  local checks='[]' conditional='[]' required='[]' timeout=null total=null preparation=null
+  local prep_provider="" prep_command="" prep_timeout=""
   local required_seen=0
   AUTHORITY_CONTRACT_ERROR=""
   # The reason is also written to stderr. Callers read this function through a
@@ -501,6 +528,9 @@ authority_read_contract() {
       REQUIRED_END:*) required_seen=1 ;;
       TIMEOUT:*) timeout=${line#TIMEOUT:} ;;
       TOTAL:*) total=${line#TOTAL:} ;;
+      PREP_PROVIDER:*) prep_provider=${line#PREP_PROVIDER:} ;;
+      PREP_COMMAND:*) prep_command=${line#PREP_COMMAND:} ;;
+      PREP_TIMEOUT:*) prep_timeout=${line#PREP_TIMEOUT:} ;;
     esac
   done <<EOF
 $lines
@@ -548,9 +578,30 @@ EOF
     return 1
   fi
 
+  if [ -n "$prep_provider$prep_command$prep_timeout" ]; then
+    case "$prep_command" in
+      'poetry sync --no-root'|'poetry sync --no-root --no-interaction'|\
+      'poetry sync --no-root --all-groups'|'poetry sync --no-root --all-groups --no-interaction') ;;
+      *) prep_command="" ;;
+    esac
+    if [ "$prep_provider" != poetry ] || [ -z "$prep_command" ] || [ -z "$prep_timeout" ]; then
+      AUTHORITY_CONTRACT_ERROR="verify.preparation v1 requires provider poetry, an approved 'poetry sync --no-root' variant, and a positive timeout_seconds"
+      printf '%s\n' "$AUTHORITY_CONTRACT_ERROR" >&2
+      return 1
+    fi
+    preparation=$(jq -cn --arg provider "$prep_provider" --arg command "$prep_command" \
+      --argjson timeout "$prep_timeout" \
+      '{provider:$provider,command:$command,timeout_seconds:$timeout}')
+    if [ "$total" != null ] && [ "$prep_timeout" -gt "$total" ]; then
+      AUTHORITY_CONTRACT_ERROR="preparation timeout exceeds the total evaluation budget"
+      printf '%s\n' "$AUTHORITY_CONTRACT_ERROR" >&2
+      return 1
+    fi
+  fi
+
   jq -nc --argjson checks "$checks" --argjson conditional "$conditional" \
     --argjson required "$required" --argjson required_declared "$([ "$required_seen" -eq 1 ] && echo true || echo false)" \
-    --argjson timeout "$timeout" --argjson total "$total" '
+    --argjson timeout "$timeout" --argjson total "$total" --argjson preparation "$preparation" '
     {
       checks: ($checks | sort_by(.name)),
       excluded_conditional: ($conditional | sort_by(.name)),
@@ -558,7 +609,7 @@ EOF
       required_declared: $required_declared,
       timeout_seconds: $timeout,
       total_timeout_seconds: $total
-    }'
+    } | if $preparation == null then . else .preparation = $preparation end'
 }
 
 # authority_git_state <workspace>
@@ -637,25 +688,115 @@ authority_tool_trust() {
   return 0
 }
 
-# authority_discover_tools <uid> <gids>
+# authority_discover_tools <uid> <gids> [preparation-provider] [approved-path]
 # Emits the approved tool table, or fails with a reason on stdout.
 authority_discover_tools() {
-  local uid="$1" gids="$2" name path reason entries='[]'
-  for name in $AUTHORITY_REQUIRED_TOOLS; do
+  local uid="$1" gids="$2" provider="${3:-}" approved_path="${4:-}"
+  local name path reason entries='[]' names="$AUTHORITY_REQUIRED_TOOLS"
+  [ "$provider" != poetry ] || names="$names poetry"
+  for name in $names; do
     case "$name" in
       bash) path=/bin/bash; [ -x "$path" ] || path=/usr/bin/bash ;;
       timeout) path=/usr/bin/timeout; [ -x "$path" ] || path=/bin/timeout ;;
       env) path=/usr/bin/env; [ -x "$path" ] || path=/bin/env ;;
+      bwrap) path=/usr/bin/bwrap ;;
+      poetry)
+        path=$(PATH="$approved_path" type -P poetry 2>/dev/null) \
+          || { printf 'poetry is absent from the approved PATH'; return 1; }
+        ;;
       *) printf 'unknown tool %s' "$name"; return 1 ;;
     esac
     path=$(realpath "$path" 2>/dev/null) || { printf 'cannot resolve %s' "$name"; return 1; }
     if ! reason=$(authority_tool_trust "$path" "$uid" "$gids"); then
       printf '%s at %s %s' "$name" "$path" "$reason"; return 1
     fi
+    if [ "$name" = bwrap ] && [ -u "$path" ]; then
+      printf 'bwrap must be unprivileged, not setuid'; return 1
+    fi
+    if [ "$name" = bwrap ] && is_real_root_prefix; then
+      local runner_uid runner_gids
+      runner_uid=$(uid_of_user "$AUTHORITY_RUNNER_USER") \
+        || { printf 'cannot resolve the local issuer runner'; return 1; }
+      runner_gids=$(gids_of_user "$AUTHORITY_RUNNER_USER") \
+        || { printf 'cannot resolve runner groups'; return 1; }
+      if ! reason=$(authority_tool_trust "$path" "$runner_uid" "$runner_gids"); then
+        printf 'bwrap at %s %s' "$path" "$reason"; return 1
+      fi
+      # shellcheck disable=SC2016 # The runner shell receives the path as $1.
+      if [ "$(id -u)" = 0 ] &&
+        runuser -u "$AUTHORITY_RUNNER_USER" -- /bin/bash -c \
+          '[ -w "$1" ] || [ -w "$(dirname "$1")" ]' _ "$path"; then
+        printf 'bwrap or its directory is writable by the runner'; return 1
+      fi
+    fi
     entries=$(printf '%s' "$entries" | jq -c --arg n "$name" --arg p "$path" '. + [{name:$n,path:$p}]')
   done
   printf '%s' "$entries" | jq -cS 'sort_by(.name)'
 }
+
+# A closed filesystem view: no host root, home, authority store or other
+# runtime is mounted. Additional approved tool directories are read-only.
+authority_sandbox_arguments() {
+  local snapshot="$1" scratch="$2" approved_path="$3" path resolved old_ifs protected
+  AUTHORITY_SANDBOX_ARGS=(--unshare-user --unshare-pid --unshare-ipc --unshare-uts
+    --die-with-parent --new-session --cap-drop ALL)
+  for path in /usr /bin /sbin /lib /lib64; do
+    [ ! -e "$path" ] || AUTHORITY_SANDBOX_ARGS+=(--ro-bind "$path" "$path")
+  done
+  for path in /etc/ld.so.cache /etc/nsswitch.conf /etc/passwd /etc/group \
+    /etc/resolv.conf /etc/hosts /etc/ssl/certs /etc/localtime; do
+    [ ! -e "$path" ] || AUTHORITY_SANDBOX_ARGS+=(--ro-bind "$path" "$path")
+  done
+  AUTHORITY_SANDBOX_ARGS+=(--proc /proc --dev /dev --bind "$scratch/shm" /dev/shm
+    --bind "$scratch" /runtime --bind "$scratch/tmp" /tmp
+    --ro-bind "$snapshot" /workspace)
+  old_ifs=$IFS; IFS=:
+  for path in $approved_path; do
+    case "$path" in
+      /usr|/usr/*|/bin|/sbin|/lib|/lib64) continue ;;
+      /|/home|/home/*|/root|/root/*|/var|/var/*|/etc|/etc/*|/proc|/proc/*|/dev|/dev/*|/sys|/sys/*|/run|/run/*|/tmp|/runtime|/runtime/*|/workspace|/workspace/*)
+        IFS=$old_ifs; printf 'approved tool path cannot be exposed in the sandbox: %s' "$path"; return 1 ;;
+    esac
+    resolved=$(realpath "$path") || { IFS=$old_ifs; return 1; }
+    case "$resolved" in
+      /|/home|/home/*|/root|/root/*|/var|/var/*|/etc|/etc/*|/proc|/proc/*|/dev|/dev/*|/sys|/sys/*|/run|/run/*|/tmp)
+        IFS=$old_ifs; printf 'approved tool path resolves into a protected tree'; return 1 ;;
+    esac
+    for protected in "$(state_dir)" "$ROOT$AUTHORITY_SCRATCH_ROOT" "$snapshot" "$scratch"; do
+      case "$resolved/" in "$protected/"*)
+        IFS=$old_ifs; printf 'approved tool path is inside authority data'; return 1 ;;
+      esac
+      case "$protected/" in "$resolved/"*)
+        IFS=$old_ifs; printf 'approved tool path exposes authority data'; return 1 ;;
+      esac
+    done
+    AUTHORITY_SANDBOX_ARGS+=(--ro-bind "$resolved" "$path")
+  done
+  IFS=$old_ifs
+  AUTHORITY_SANDBOX_ARGS+=(--chdir /workspace --remount-ro /)
+}
+
+# Only trusted system code runs in this capability probe. Root may test the
+# runner with runuser; a service enrollment cannot gain that impersonation.
+authority_sandbox_capability() (
+  local args=() prefix=() path
+  [ -x /usr/bin/bwrap ] && [ ! -u /usr/bin/bwrap ] || {
+    printf 'local issuer requires unprivileged bubblewrap at /usr/bin/bwrap'; return 1;
+  }
+  if is_real_root_prefix && [ "$(id -u)" = 0 ]; then
+    prefix=(runuser -u "$AUTHORITY_RUNNER_USER" --)
+  fi
+  args=(--unshare-user --unshare-pid --unshare-ipc --unshare-uts
+    --die-with-parent --new-session --cap-drop ALL)
+  for path in /usr /bin /sbin /lib /lib64; do
+    [ ! -e "$path" ] || args+=(--ro-bind "$path" "$path")
+  done
+  args+=(--proc /proc --dev /dev --remount-ro / -- /bin/true)
+  if ! timeout -k 1s 5s "${prefix[@]}" /usr/bin/env -i PATH=/usr/bin:/bin \
+    /usr/bin/bwrap "${args[@]}" 2>&1; then
+    printf 'local issuer requires working unprivileged user, mount and PID namespaces'; return 1
+  fi
+)
 
 # authority_file_unwritable_by_effective_user <path>
 # The control-plane rule for anything the execution user may read but must not
@@ -860,16 +1001,16 @@ authority_run_id_is_safe() {
   [ "${#1}" -eq 36 ]
 }
 
-# authority_derive_total_timeout <per-check> <stage-count> <declared-total>
+# authority_derive_total_timeout <per-check> <stage-count> <declared-total> [preparation-timeout]
 # Mirrors the core's legacy derivation when a contract declares no total, so a
 # project without one is still bounded rather than unbounded.
 authority_derive_total_timeout() {
-  local per_check="$1" stages="$2" declared="$3"
+  local per_check="$1" stages="$2" declared="$3" preparation="${4:-0}"
   if [ -n "$declared" ] && [ "$declared" != null ]; then
     printf '%s' "$declared"
     return 0
   fi
-  printf '%s' "$(( stages * per_check + AUTHORITY_LEGACY_OVERHEAD_SECONDS ))"
+  printf '%s' "$(( stages * (per_check + preparation) + AUTHORITY_LEGACY_OVERHEAD_SECONDS ))"
 }
 
 # --- Source identity bound to the executed snapshot -------------------------
@@ -1169,7 +1310,7 @@ AUTHORITY_STATE_UNISSUED_SCHEMA=2
 AUTHORITY_RECEIPT_SCHEMA=1
 AUTHORITY_SIGNATURE_FORMAT=ed25519-openssl-rawin
 AUTHORITY_SCOPES="worktree staged"
-AUTHORITY_TERMINAL_STATUSES="candidate_pass candidate_fail identity_changed"
+AUTHORITY_TERMINAL_STATUSES="candidate_pass candidate_fail identity_changed preparation_failed execution_failed"
 
 # A fresh identifier for a run. Lives here because the issuer now names the run
 # before it asks for one: the sequence is reserved against that name, and the

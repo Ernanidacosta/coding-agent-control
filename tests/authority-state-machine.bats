@@ -60,10 +60,11 @@ write_contract() {
 #   SLOW present   -> it stays in execution long enough to be killed
 #   MUTATE present -> it writes into the live workspace, so revalidation diverges
 steerable_contract() {
-  FLAG="$ROOT/flag"; SLOW="$ROOT/slow"; MUTATE="$ROOT/mutate"; RUNNING="$ROOT/running"
+  CONTROLS=$(fixture_controls)
+  FLAG="$CONTROLS/flag"; SLOW="$CONTROLS/slow"; MUTATE="$CONTROLS/mutate"; RUNNING=""
   export FLAG SLOW MUTATE RUNNING
   printf 'ok\n' > "$FLAG"
-  write_contract "touch $RUNNING; cat $FLAG || exit 1; if [ -e $MUTATE ]; then printf x >> $WS/marker.txt; fi; if [ -e $SLOW ]; then sleep 40; fi; true" "${1:-60}"
+  write_contract "touch /runtime/running; cat $FLAG || exit 1; if [ -e $MUTATE ]; then mkfifo /runtime/mutation; cat /runtime/mutation >/dev/null; fi; if [ -e $SLOW ]; then sleep 40; fi; true" "${1:-60}"
 }
 
 unseal() { chmod u+w "$ROOT/var/lib/agent-md/projects/$PID" 2>/dev/null || true; }
@@ -80,6 +81,8 @@ enroll() {
   bash "$AUTHORITY" enroll "$WS" --root "$ROOT" --exec-path "$EXEC_PATH" --yes >/dev/null
   PID=$(ls "$ROOT/var/lib/agent-md/projects" | head -1)
   export PID
+  RUNNING="$ROOT/var/tmp/agent-md-runner/$PID/test/running"
+  export RUNNING
   [ "$(jq -r .status "$ROOT/var/lib/agent-md/projects/$PID/enrollment.json")" = eligible ] || {
     enrollment_diagnosis "$ROOT/var/lib/agent-md/projects/$PID/enrollment.json" >&2
     return 1
@@ -94,7 +97,7 @@ terminal_seq() { jq -r '.scopes.worktree.last_terminal.sequence // "none"' "$(st
 terminal_status() { jq -r '.scopes.worktree.last_terminal.status // "none"' "$(state_file)"; }
 
 request() { printf '{"protocol":1,"scope":"worktree","workspace":"%s"}' "$WS"; }
-evaluate() { request | bash "$ISSUER" evaluate --root "$ROOT" 2>/dev/null; }
+evaluate() { fixture_evaluate; }
 
 # Runs the library in-process against the staging root, for the state-layer
 # cases that do not need a whole evaluation.
@@ -432,7 +435,8 @@ wait_for() {
 }
 
 @test "26 G: identity_changed is terminal, supersedes, and is not candidate_fail" {
-  write_contract "printf CHANGED > $WS/marker.txt"; enroll
+  steerable_contract; enroll
+  touch "$MUTATE"
   run evaluate
   [ "$(jq -r .status <<<"$output")" = identity_changed ]
   [ "$(terminal_status)" = identity_changed ]
@@ -513,9 +517,9 @@ wait_for() {
 # --- concurrency -------------------------------------------------------------
 
 @test "31 a second concurrent evaluation is refused and reserves nothing" {
-  write_contract "touch $WS/running && sleep 20" 40; enroll
+  write_contract "touch /runtime/running && sleep 20" 40; enroll
   start_evaluation
-  wait_for '[ -e "$WS/running" ]'
+  wait_for '[ -e "$RUNNING" ]'
   local held_next held_pending
   held_next=$(next_seq); held_pending=$(pending_seq)
 
@@ -532,9 +536,9 @@ wait_for() {
 }
 
 @test "32 the refused evaluation creates no run of its own" {
-  write_contract "touch $WS/running && sleep 20" 40; enroll
+  write_contract "touch /runtime/running && sleep 20" 40; enroll
   start_evaluation
-  wait_for '[ -e "$WS/running" ]'
+  wait_for '[ -e "$RUNNING" ]'
   local before; before=$(ls "$ROOT/var/lib/agent-md/projects/$PID/runs" | wc -l)
   evaluate >/dev/null || true
   [ "$(ls "$ROOT/var/lib/agent-md/projects/$PID/runs" | wc -l)" = "$before" ]

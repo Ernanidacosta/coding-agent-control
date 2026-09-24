@@ -222,9 +222,9 @@ enrollment_file() {
     (.approved_mechanism | length) == 3 and
     all(.approved_mechanism[]; (.digest | length) == 64) and
     (.approved_environment | length) >= 2 and
-    (.approved_tools | length) == 3 and
+    (.approved_tools | length) == 4 and
     all(.approved_tools[]; (.path | startswith("/"))) and
-    ([.approved_tools[].name] | sort) == ["bash","env","timeout"] and
+    ([.approved_tools[].name] | sort) == ["bash","bwrap","env","timeout"] and
     (.path_eligibility | type) == "array" and
     (.status == "eligible" or .status == "ineligible") and
     (.metadata.created | length) > 0
@@ -316,6 +316,7 @@ enrollment_file() {
     export -f chown
     bash "$AUTHORITY" enroll "$WS" --root "$ROOT" --yes
   '
+  [ "$status" -eq 0 ] || printf '%s\n' "$output" >&2
   [ "$status" -eq 0 ]
   [ ! -e "$MARKER" ]
   local record dir

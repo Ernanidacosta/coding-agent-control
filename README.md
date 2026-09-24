@@ -678,6 +678,11 @@ including canonical worktree, contract, control, and mechanism identity. This
 is not an unsigned local cache: without an authority-separated issuer, Stop
 continues to execute the complete contract. A receipt file written by the
 executor is never accepted as proof that checks ran.
+The [local issuer](examples/local-issuer/README.md) can approve an explicit
+Poetry runtime preparation in that contract and run it as the isolated runner
+before each check. Authenticated local issuance requires bubblewrap and working
+unprivileged user, mount and PID namespaces; the ordinary hooks and
+`verify.sh` do not.
 
 `doctor.sh` validates contract configuration and wiring without executing the
 suite or provider verifiers. For conditional capabilities it leads with:
