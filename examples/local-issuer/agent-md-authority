@@ -190,7 +190,7 @@ cmd_doctor() {
       *) die "unknown doctor option: $1" ;;
     esac
   done
-  local uid gids reason capability
+  local uid gids reason capability tls_probe
   if is_real_root_prefix; then
     uid=$(uid_of_user "$AUTHORITY_RUNNER_USER") || die "runner account $AUTHORITY_RUNNER_USER is absent"
     gids=$(gids_of_user "$AUTHORITY_RUNNER_USER") || die "cannot resolve runner groups"
@@ -203,11 +203,15 @@ cmd_doctor() {
   if ! capability=$(authority_sandbox_capability); then
     die "$capability"
   fi
-  if is_real_root_prefix && [ "$(id -u)" != 0 ]; then
-    note "local issuer execution capability ready for the current account; runner revalidation remains mandatory"
-  else
-    note "local issuer execution capability ready: /usr/bin/bwrap; unprivileged user, mount and PID namespaces"
+  if ! tls_probe=$(authority_sandbox_tls_capability); then
+    die "local issuer HTTPS system trust capability unavailable: $tls_probe"
   fi
+  if is_real_root_prefix && [ "$(id -u)" != 0 ]; then
+    note "$AUTHORITY_EXECUTION_CAPABILITY via $AUTHORITY_EXECUTION_BOUNDARY ready for the current account; runner revalidation remains mandatory"
+  else
+    note "$AUTHORITY_EXECUTION_CAPABILITY via $AUTHORITY_EXECUTION_BOUNDARY ready: /usr/bin/bwrap; unprivileged user, mount and PID namespaces"
+  fi
+  note "system trust: $tls_probe"
 }
 
 cmd_enroll() { cmd_enrollment enroll "$@"; }
@@ -714,8 +718,17 @@ cmd_prepare_run() {
   fingerprint=$(printf '%s' "$manifest" | jq -cS . | sha256_hex) || die "cannot fingerprint the snapshot"
   printf '%s\n' "$manifest" | atomic_write "$run_dir/snapshot/manifest.json" 0444
 
-  local runner total
+  local runner total runner_user runner_uid developer_user developer_uid
   runner=$(authority_runner_identity) || die "cannot resolve the execution account: $runner"
+  runner_user=$(jq -r '.user' <<<"$runner")
+  runner_uid=$(jq -r '.uid' <<<"$runner")
+  developer_user=$(jq -r '.execution.user' <<<"$record")
+  developer_uid=$(jq -r '.execution.uid' <<<"$record")
+  if ! reason=$(authority_materialize_system_trust "$run_dir/system-trust" / \
+    "$runner_uid" "$developer_uid"); then
+    abandon_run
+    die "system trust capability unavailable: $reason" 23
+  fi
   total=$(authority_derive_total_timeout "$timeout" "${#ordered[@]}" \
     "$(printf '%s' "$record" | jq -r '.approved_contract.total_timeout_seconds // empty')")
 

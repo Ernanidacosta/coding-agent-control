@@ -218,6 +218,12 @@ or mechanism identity before it can make an old receipt current
 under the new execution semantics; the project id, state and signed history
 remain intact.
 
+`isolated-execution-v1` is the capability; `bubblewrap-v1` is its current Linux
+provider, including WSL2 when unprivileged namespaces and system-trust discovery
+work. There is no
+authenticated provider for native macOS or Windows yet. Their ordinary hooks
+and `verify.sh` remain available, with no authenticated fallback.
+
 Each preparation and ordinary check starts a separate bubblewrap instance as
 `agentmd-runner`. `--unshare-user`, `--unshare-pid`, `--unshare-ipc` and
 `--unshare-uts` give it private namespaces; `--cap-drop ALL` removes capabilities;
@@ -232,6 +238,22 @@ Other checks' scratches, the developer home, `/var/lib/agent-md`, keys, state
 and receipts are absent. The approved PATH may add read-only tool directories
 after their paths are checked. The approved absolute bubblewrap executable is
 checked again immediately before each stage.
+
+The provider builds one authority-owned system-trust view for each evaluation
+after sealing the snapshot and before any project code runs. It inspects the
+existing OpenSSL logical locations `/etc/ssl/certs` and `/etc/ssl/cert.pem`,
+resolves certificate symlinks, rejects missing targets, writable or protected
+sources (including group-write/ACL masks), and copies only certificate material
+into regular files. The view is
+`0555`/`0444`, hidden from the runner's writable scratch, and mounted read-only
+at those logical locations. A link to a target elsewhere under trusted system
+paths therefore works without mounting its parent directory. Preparation and
+all checks share these immutable CA bytes for this run; their mutable runtimes
+and caches remain separate. If trust discovery fails, the attempt resolves as
+receipt-free `execution_failed` before preparation. No TLS verification switch
+is disabled and no CA comes from the workspace. The local issuer's `doctor`
+uses a temporary local TLS server to verify that a trusted test certificate
+passes and an untrusted one fails, without contacting a public registry.
 
 Network remains available in this first boundary version, including during
 Poetry downloads and ordinary checks. Network policy is a separate control;

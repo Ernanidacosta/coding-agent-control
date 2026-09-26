@@ -95,7 +95,8 @@ PY
 @test "local issuer doctor diagnoses its explicit sandbox capability" {
   run bash "$AUTHORITY" doctor --root "$ROOT"
   [ "$status" -eq 0 ]
-  [[ "$output" == *'execution capability ready'* ]]
+  [[ "$output" == *'isolated-execution-v1 via bubblewrap-v1 ready'* ]]
+  [[ "$output" == *'trusted local HTTPS passed; untrusted certificate rejected'* ]]
 }
 
 assert_descendants_contained() {

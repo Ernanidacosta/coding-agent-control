@@ -33,6 +33,7 @@ AUTHORITY_CONDITIONAL_CHECKS="independent approval"
 AUTHORITY_SERVICE_USER=agentmd
 AUTHORITY_RUNNER_USER=agentmd-runner
 AUTHORITY_REQUIRED_TOOLS="bash timeout env bwrap"
+AUTHORITY_EXECUTION_CAPABILITY=isolated-execution-v1
 AUTHORITY_EXECUTION_BOUNDARY=bubblewrap-v1
 AUTHORITY_SCRATCH_ROOT=/var/tmp/agent-md-runner
 AUTHORITY_TIMEOUT_GRACE_SECONDS=5
@@ -734,19 +735,188 @@ authority_discover_tools() {
   printf '%s' "$entries" | jq -cS 'sort_by(.name)'
 }
 
+# Only OpenSSL's logical system locations enter the namespace. A certificate
+# symlink can resolve outside /etc/ssl, but the view contains a checked copy at
+# the logical name, so its target directory never has to be mounted.
+authority_trust_path_mutable() {
+  local path="$1" uid="$2" developer_uid="${3:-}" owner mode digits
+  read -r owner mode <<<"$(stat -c '%u %a' -- "$path" 2>/dev/null)"
+  [ -n "$mode" ] || return 0
+  digits=${mode: -3}
+  digit_has_write "${digits:2:1}" && return 0
+  # The group class is also the effective mask for named POSIX ACL entries.
+  # Reject it even when the owning group is unrelated to either principal.
+  digit_has_write "${digits:1:1}" && return 0
+  if [ "$owner" = "$uid" ] && digit_has_write "${digits:0:1}"; then return 0; fi
+  if [ -n "$developer_uid" ]; then
+    if [ "$owner" = "$developer_uid" ] && digit_has_write "${digits:0:1}"; then return 0; fi
+  fi
+  return 1
+}
+
+authority_trust_source_guard() {
+  local path="$1" source_root="$2" uid="$3" developer_uid="${4:-}"
+  local resolved relative part candidate checked_path
+  local checked=()
+  if [ "$#" -ge 5 ]; then
+    resolved="$5" # Produced by the checked, NUL-delimited batch below.
+  else
+    resolved=$(realpath -e -- "$path" 2>/dev/null) || {
+      printf 'system trust source does not resolve: %s' "$path"; return 1;
+    }
+  fi
+  if [ "$source_root" = / ]; then
+    relative="$resolved"
+  else
+    case "$resolved" in
+      "$source_root"/*) relative=${resolved#"$source_root"} ;;
+      *) printf 'system trust source escapes its root: %s' "$path"; return 1 ;;
+    esac
+  fi
+  case "$relative" in
+    /etc/*|/usr/*) ;;
+    *) printf 'system trust source is outside system paths: %s' "$path"; return 1 ;;
+  esac
+  for candidate in "$path" "$resolved"; do
+    part="$candidate"
+    while [ "$part" != "$source_root" ] && [ "$part" != / ]; do
+      [ -z "${AUTHORITY_TRUST_SAFE_PATHS[$part]+x}" ] || break
+      if [ ! -L "$part" ] && authority_trust_path_mutable "$part" "$uid" \
+        "$developer_uid"; then
+        printf 'system trust source has unsafe write access: %s' "$part"
+        return 1
+      fi
+      checked+=("$part")
+      part=${part%/*}; [ -n "$part" ] || part=/
+    done
+    for checked_path in "${checked[@]}"; do AUTHORITY_TRUST_SAFE_PATHS[$checked_path]=1; done
+    checked=()
+  done
+  AUTHORITY_TRUST_RESOLVED="$resolved"
+}
+
+authority_materialize_system_trust() (
+  local view="$1" source_root="${2:-/}" uid="$3" developer_uid="${4:-}"
+  local certs cert_file stage='' entry name resolved count=0 invalid grep_status index
+  local cert_entries=() cert_targets=()
+  declare -A AUTHORITY_TRUST_SAFE_PATHS=()
+  local AUTHORITY_TRUST_RESOLVED=''
+  source_root=${source_root%/}; [ -n "$source_root" ] || source_root=/
+  [ "$source_root" = / ] || {
+    [ "$(realpath -e -- "$source_root" 2>/dev/null)" = "$source_root" ] || {
+      printf 'system trust fixture root is not canonical'; return 1;
+    }
+  }
+  case "$view" in /*) ;; *) printf 'system trust view path is not absolute'; return 1 ;; esac
+  [ ! -e "$view" ] && [ ! -L "$view" ] || {
+    printf 'system trust view already exists'; return 1;
+  }
+  certs="$source_root/etc/ssl/certs"
+  cert_file="$source_root/etc/ssl/cert.pem"
+  [ "$source_root" != / ] || { certs=/etc/ssl/certs; cert_file=/etc/ssl/cert.pem; }
+  mkdir -p "$(dirname "$view")" || { printf 'cannot create system trust parent'; return 1; }
+  stage=$(mktemp -d "${view}.XXXXXX") || { printf 'cannot stage system trust'; return 1; }
+  trap 'if [ -n "$stage" ]; then chmod -R u+w "$stage" 2>/dev/null; rm -rf "$stage"; fi' EXIT
+  mkdir "$stage/certs" || { printf 'cannot create system trust certificates view'; return 1; }
+  : > "$stage/sources.list" || { printf 'cannot create system trust source record'; return 1; }
+
+  if [ -e "$certs" ] || [ -L "$certs" ]; then
+    [ -d "$certs" ] || { printf 'system trust certs is not a directory'; return 1; }
+    authority_trust_source_guard "$certs" "$source_root" "$uid" \
+      "$developer_uid" || return 1
+    shopt -s nullglob dotglob
+    for entry in "$certs"/*; do
+      name=${entry##*/}
+      case "$name" in *.pem|*.crt|*.cer|????????.[0-9]*) ;; *) continue ;; esac
+      cert_entries+=("$entry")
+    done
+    if [ "${#cert_entries[@]}" -gt 0 ]; then
+      if ! realpath -e -z -- "${cert_entries[@]}" > "$stage/resolved.list" 2>/dev/null; then
+        for entry in "${cert_entries[@]}"; do
+          realpath -e -- "$entry" >/dev/null 2>&1 || {
+            printf 'system trust source does not resolve: %s' "$entry"; return 1;
+          }
+        done
+        printf 'cannot resolve system trust certificates'; return 1
+      fi
+      mapfile -d '' -t cert_targets < "$stage/resolved.list"
+      [ "${#cert_entries[@]}" -eq "${#cert_targets[@]}" ] \
+        || { printf 'incomplete system trust resolution'; return 1; }
+      rm -f "$stage/resolved.list"
+      for index in "${!cert_entries[@]}"; do
+        entry="${cert_entries[$index]}"
+        resolved="${cert_targets[$index]}"
+        authority_trust_source_guard "$entry" "$source_root" "$uid" \
+          "$developer_uid" "$resolved" || return 1
+        [ -f "$resolved" ] || {
+          printf 'system trust entry is not a regular certificate: %s' "$entry"; return 1;
+        }
+        printf '%s\0%s\0' "$entry" "$resolved" >> "$stage/sources.list" \
+          || { printf 'cannot record system trust source'; return 1; }
+        count=$((count + 1))
+      done
+      invalid=$(grep -L -- '^-----BEGIN CERTIFICATE-----' "${cert_targets[@]}")
+      grep_status=$?
+      [ "$grep_status" -le 1 ] || { printf 'cannot validate system trust certificates'; return 1; }
+      [ -z "$invalid" ] || { printf 'system trust contains a non-certificate: %s' "$invalid"; return 1; }
+      invalid=$(grep -lE -- '^-----BEGIN ([A-Z ]* )?PRIVATE KEY-----' "${cert_targets[@]}")
+      grep_status=$?
+      [ "$grep_status" -le 1 ] || { printf 'cannot inspect system trust certificates'; return 1; }
+      [ -z "$invalid" ] || { printf 'system trust contains a private key: %s' "$invalid"; return 1; }
+      cp -L -- "${cert_entries[@]}" "$stage/certs/" \
+        || { printf 'cannot copy system trust certificates'; return 1; }
+      chmod 0444 "$stage/certs"/* \
+        || { printf 'cannot seal system trust certificates'; return 1; }
+    fi
+  fi
+  if [ -e "$cert_file" ] || [ -L "$cert_file" ]; then
+    authority_trust_source_guard "$cert_file" "$source_root" "$uid" \
+      "$developer_uid" || return 1
+    resolved="$AUTHORITY_TRUST_RESOLVED"
+    [ -f "$resolved" ] || { printf 'system trust bundle is not a regular file'; return 1; }
+    if ! openssl x509 -in "$resolved" -noout >/dev/null 2>&1 ||
+      grep -Eq '^-----BEGIN ([A-Z ]* )?PRIVATE KEY-----' "$resolved"; then
+      printf 'system trust bundle is not certificate-only: %s' "$cert_file"; return 1
+    fi
+    install -m 0444 "$resolved" "$stage/cert.pem" \
+      || { printf 'cannot copy system trust bundle'; return 1; }
+    printf '%s\0%s\0' "$cert_file" "$resolved" >> "$stage/sources.list" \
+      || { printf 'cannot record system trust bundle source'; return 1; }
+    count=$((count + 1))
+  fi
+  [ "$count" -gt 0 ] || { printf 'no usable system trust material was found'; return 1; }
+  chmod 0444 "$stage/sources.list" \
+    || { printf 'cannot seal system trust source record'; return 1; }
+  chmod 0555 "$stage/certs" "$stage" \
+    || { printf 'cannot seal system trust view'; return 1; }
+  mv -T "$stage" "$view" || { printf 'cannot publish system trust view'; return 1; }
+  stage=''
+)
+
 # A closed filesystem view: no host root, home, authority store or other
 # runtime is mounted. Additional approved tool directories are read-only.
 authority_sandbox_arguments() {
-  local snapshot="$1" scratch="$2" approved_path="$3" path resolved old_ifs protected
+  local snapshot="$1" scratch="$2" approved_path="$3" trust_view="$4"
+  local path resolved old_ifs protected
+  [ -d "$trust_view" ] && [ ! -L "$trust_view" ] || {
+    printf 'system trust view is absent or unsafe'; return 1;
+  }
+  [ -d "$trust_view/certs" ] && [ ! -L "$trust_view/certs" ] || {
+    printf 'system trust certs view is absent or unsafe'; return 1;
+  }
   AUTHORITY_SANDBOX_ARGS=(--unshare-user --unshare-pid --unshare-ipc --unshare-uts
     --die-with-parent --new-session --cap-drop ALL)
   for path in /usr /bin /sbin /lib /lib64; do
     [ ! -e "$path" ] || AUTHORITY_SANDBOX_ARGS+=(--ro-bind "$path" "$path")
   done
   for path in /etc/ld.so.cache /etc/nsswitch.conf /etc/passwd /etc/group \
-    /etc/resolv.conf /etc/hosts /etc/ssl/certs /etc/localtime; do
+    /etc/resolv.conf /etc/hosts /etc/localtime; do
     [ ! -e "$path" ] || AUTHORITY_SANDBOX_ARGS+=(--ro-bind "$path" "$path")
   done
+  AUTHORITY_SANDBOX_ARGS+=(--ro-bind "$trust_view/certs" /etc/ssl/certs)
+  if [ -f "$trust_view/cert.pem" ]; then
+    AUTHORITY_SANDBOX_ARGS+=(--ro-bind "$trust_view/cert.pem" /etc/ssl/cert.pem)
+  fi
   AUTHORITY_SANDBOX_ARGS+=(--proc /proc --dev /dev --bind "$scratch/shm" /dev/shm
     --bind "$scratch" /runtime --bind "$scratch/tmp" /tmp
     --ro-bind "$snapshot" /workspace)
@@ -779,7 +949,7 @@ authority_sandbox_arguments() {
 # Only trusted system code runs in this capability probe. Root may test the
 # runner with runuser; a service enrollment cannot gain that impersonation.
 authority_sandbox_capability() (
-  local args=() prefix=() path
+  local args=() prefix=() path trust_probe='' runner_uid reason
   [ -x /usr/bin/bwrap ] && [ ! -u /usr/bin/bwrap ] || {
     printf 'local issuer requires unprivileged bubblewrap at /usr/bin/bwrap'; return 1;
   }
@@ -796,6 +966,112 @@ authority_sandbox_capability() (
     /usr/bin/bwrap "${args[@]}" 2>&1; then
     printf 'local issuer requires working unprivileged user, mount and PID namespaces'; return 1
   fi
+  if is_real_root_prefix; then
+    runner_uid=$(uid_of_user "$AUTHORITY_RUNNER_USER") || return 1
+    trust_probe=$(mktemp -d "${TMPDIR:-/tmp}/agent-md-trust-probe.XXXXXX") || return 1
+    if ! reason=$(authority_materialize_system_trust "$trust_probe/view" / \
+      "$runner_uid"); then
+      chmod -R u+w "$trust_probe" 2>/dev/null || true
+      rm -rf "$trust_probe"
+      printf 'local issuer system trust is unavailable: %s' "$reason"
+      return 1
+    fi
+    chmod -R u+w "$trust_probe" 2>/dev/null || true
+    rm -rf "$trust_probe"
+  fi
+)
+
+# This is a local TLS handshake, not a request to a public registry. The test
+# CA is visible only in this probe's synthetic trust view; the generated key
+# and the server remain outside the project sandbox.
+authority_sandbox_tls_capability() (
+  local probe='' prefix=() runner_uid port server='' ready=0 attempt
+  local output reason
+  probe=$(mktemp -d "${TMPDIR:-/tmp}/agent-md-tls-probe.XXXXXX") || return 1
+  trap 'if [ -n "$server" ]; then kill "$server" 2>/dev/null || true; wait "$server" 2>/dev/null || true; fi; chmod -R u+w "$probe" 2>/dev/null; rm -rf "$probe"' EXIT
+  chmod 0755 "$probe"
+  mkdir -p "$probe/source/etc/ssl/certs" "$probe/source/etc/trust" \
+    "$probe/snapshot" "$probe/scratch/tmp" "$probe/scratch/shm" || return 1
+  if ! openssl req -x509 -newkey rsa:2048 -nodes -days 1 \
+      -subj /CN=agent-md-local-test-ca -addext 'basicConstraints=critical,CA:TRUE' \
+      -addext 'keyUsage=critical,keyCertSign,cRLSign' \
+      -keyout "$probe/ca.key" -out "$probe/source/etc/trust/ca.pem" >/dev/null 2>&1 ||
+    ! openssl req -newkey rsa:2048 -nodes -subj /CN=localhost \
+      -keyout "$probe/server.key" -out "$probe/server.csr" >/dev/null 2>&1; then
+    printf 'cannot generate the local TLS fixture'; return 1
+  fi
+  printf 'subjectAltName=DNS:localhost\n' > "$probe/server.ext"
+  if ! openssl x509 -req -days 1 -in "$probe/server.csr" \
+      -CA "$probe/source/etc/trust/ca.pem" -CAkey "$probe/ca.key" \
+      -CAcreateserial -extfile "$probe/server.ext" \
+      -out "$probe/server.pem" >/dev/null 2>&1 ||
+    ! openssl req -x509 -newkey rsa:2048 -nodes -days 1 \
+      -subj /CN=localhost -addext 'subjectAltName=DNS:localhost' \
+      -keyout "$probe/untrusted.key" -out "$probe/snapshot/untrusted.pem" >/dev/null 2>&1; then
+    printf 'cannot finish the local TLS fixture'; return 1
+  fi
+  ln -s ../../trust/ca.pem "$probe/source/etc/ssl/certs/ca-certificates.crt"
+  ln -s ../trust/ca.pem "$probe/source/etc/ssl/cert.pem"
+  chmod 0444 "$probe/source/etc/trust/ca.pem" "$probe/snapshot/untrusted.pem"
+  chmod 0555 "$probe/source/etc" "$probe/source/etc/ssl" \
+    "$probe/source/etc/ssl/certs" "$probe/source/etc/trust" "$probe/snapshot"
+  if is_real_root_prefix; then
+    runner_uid=$(uid_of_user "$AUTHORITY_RUNNER_USER") || return 1
+    [ "$(id -u)" != 0 ] || prefix=(runuser -u "$AUTHORITY_RUNNER_USER" --)
+  else
+    runner_uid=$(id -u)
+  fi
+  if ! reason=$(authority_materialize_system_trust "$probe/view" "$probe/source" \
+      "$runner_uid"); then
+    printf 'cannot present the local test CA: %s' "$reason"; return 1
+  fi
+  authority_sandbox_arguments "$probe/snapshot" "$probe/scratch" /usr/bin:/bin \
+    "$probe/view" || { printf 'cannot construct the local TLS sandbox'; return 1; }
+  port=$((20000 + RANDOM % 40000))
+  openssl s_server -accept "127.0.0.1:$port" -cert "$probe/server.pem" \
+    -key "$probe/server.key" -quiet > "$probe/server.log" 2>&1 &
+  server=$!
+  for attempt in {1..100}; do
+    if ( : > "/dev/tcp/127.0.0.1/$port" ) 2>/dev/null; then ready=1; break; fi
+    kill -0 "$server" 2>/dev/null || break
+    sleep 0.02
+  done
+  [ "$ready" -eq 1 ] || { printf 'local TLS server did not start'; return 1; }
+  if ! timeout -k 1s 5s "${prefix[@]}" /usr/bin/env -i PATH=/usr/bin:/bin \
+      /usr/bin/bwrap "${AUTHORITY_SANDBOX_ARGS[@]}" -- \
+      /usr/bin/openssl s_client -verify_return_error -verify_hostname localhost \
+      -connect "127.0.0.1:$port" -brief </dev/null > "$probe/trusted.log" 2>&1; then
+    output=$(tail -n 3 "$probe/trusted.log" | tr '\n' ' ' | cut -c1-300)
+    printf 'the sandbox cannot validate HTTPS with the provider system trust view: %s' "$output"
+    return 1
+  fi
+  kill "$server" 2>/dev/null || true
+  wait "$server" 2>/dev/null || true
+  server=''
+  port=$((20000 + RANDOM % 40000))
+  openssl s_server -accept "127.0.0.1:$port" -cert "$probe/snapshot/untrusted.pem" \
+    -key "$probe/untrusted.key" -quiet > "$probe/untrusted-server.log" 2>&1 &
+  server=$!
+  ready=0
+  for attempt in {1..100}; do
+    if ( : > "/dev/tcp/127.0.0.1/$port" ) 2>/dev/null; then ready=1; break; fi
+    kill -0 "$server" 2>/dev/null || break
+    sleep 0.02
+  done
+  [ "$ready" -eq 1 ] || { printf 'untrusted local TLS server did not start'; return 1; }
+  if timeout -k 1s 5s "${prefix[@]}" /usr/bin/env -i PATH=/usr/bin:/bin \
+      /usr/bin/bwrap "${AUTHORITY_SANDBOX_ARGS[@]}" -- \
+      /usr/bin/openssl s_client -verify_return_error -verify_hostname localhost \
+      -connect "127.0.0.1:$port" -brief </dev/null > "$probe/untrusted.log" 2>&1; then
+    printf 'the sandbox accepted an untrusted local HTTPS certificate'
+    return 1
+  fi
+  grep -Eiq 'verify error|certificate verify failed' "$probe/untrusted.log" || {
+    output=$(tail -n 3 "$probe/untrusted.log" | tr '\n' ' ' | cut -c1-300)
+    printf 'the untrusted TLS probe did not reach certificate validation: %s' "$output"
+    return 1;
+  }
+  printf 'trusted local HTTPS passed; untrusted certificate rejected'
 )
 
 # authority_file_unwritable_by_effective_user <path>

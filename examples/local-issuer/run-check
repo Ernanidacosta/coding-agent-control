@@ -307,7 +307,35 @@ fi
 # --- execute -----------------------------------------------------------------
 cd "$CANONICAL" || refuse "cannot enter the snapshot"
 [ "$(pwd -P)" = "$CANONICAL" ] || refuse "working directory changed while entering the snapshot"
-authority_sandbox_arguments "$CANONICAL" "$SCRATCH" "$APPROVED_PATH" \
+TRUST_VIEW="$(authority_run_dir "$PROJECT_ID" "$RUN_ID")/system-trust"
+for trust_path in "$TRUST_VIEW" "$TRUST_VIEW/certs" "$TRUST_VIEW/sources.list"; do
+  if is_real_root_prefix; then
+    if ! reason=$(authority_file_unwritable_by_effective_user "$trust_path"); then
+      refuse "system trust view $reason"
+    fi
+  elif [ -L "$trust_path" ] || [ -w "$trust_path" ]; then
+    refuse "staging system trust view is mutable"
+  fi
+done
+if [ -e "$TRUST_VIEW/cert.pem" ]; then
+  if is_real_root_prefix; then
+    if ! reason=$(authority_file_unwritable_by_effective_user "$TRUST_VIEW/cert.pem"); then
+      refuse "system trust bundle $reason"
+    fi
+  elif [ -L "$TRUST_VIEW/cert.pem" ] || [ -w "$TRUST_VIEW/cert.pem" ]; then
+    refuse "staging system trust bundle is mutable"
+  fi
+fi
+while IFS= read -r -d '' trust_source; do
+  trust_parent="$trust_source"
+  while [ "$trust_parent" != / ]; do
+    [ ! -w "$trust_parent" ] \
+      || refuse "system trust source became writable by the runner: $trust_parent"
+    trust_parent=${trust_parent%/*}
+    [ -n "$trust_parent" ] || trust_parent=/
+  done
+done < "$TRUST_VIEW/sources.list"
+authority_sandbox_arguments "$CANONICAL" "$SCRATCH" "$APPROVED_PATH" "$TRUST_VIEW" \
   || refuse "cannot construct the approved sandbox view"
 
 # Only bubblewrap's monitor outside the PID namespace writes this channel.

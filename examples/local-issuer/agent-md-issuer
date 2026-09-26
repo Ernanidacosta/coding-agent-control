@@ -671,9 +671,15 @@ issuer_publish_signed_terminal() {
 }
 
 issuer_prepare_run() {
-  local out
-  if ! out=$("$AUTHORITY_SELF_DIR/agent-md-authority" prepare-run "$ISSUER_PROJECT_ID" \
-               --run-id "$ISSUER_RUN_ID" ${ROOT:+--root "$ROOT"} 2>&1 8>&-); then
+  local out prepare_status
+  if out=$("$AUTHORITY_SELF_DIR/agent-md-authority" prepare-run "$ISSUER_PROJECT_ID" \
+             --run-id "$ISSUER_RUN_ID" ${ROOT:+--root "$ROOT"} 2>&1 8>&-); then
+    :
+  else
+    prepare_status=$?
+    if [ "$prepare_status" -eq 23 ]; then
+      issuer_execution_failed "system trust: $(printf '%s' "$out" | tail -1)"
+    fi
     refuse REFUSED_RUN_FAILED "the evaluation run could not be prepared: $(printf '%s' "$out" | tail -1)" "$EX_RUN_FAILED"
   fi
 

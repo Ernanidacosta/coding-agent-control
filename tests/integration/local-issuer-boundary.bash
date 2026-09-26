@@ -1201,6 +1201,109 @@ row root receipt "failure publishes none" "no ordinary verdict" \
 echo
 fi
 
+header "11b. system trust through the real runner sandbox"
+ROOT=""
+PROGRAM=integration
+. "$LIB/authority-lib.sh"
+TRUST_ROOT=$(mktemp -d /tmp/agent-md-trust-integration.XXXXXX)
+chmod 0755 "$TRUST_ROOT"
+mkdir -p "$TRUST_ROOT/source/etc/ssl/certs" "$TRUST_ROOT/source/etc/trust" \
+  "$TRUST_ROOT/snapshot" "$TRUST_ROOT/scratch/tmp" "$TRUST_ROOT/scratch/shm"
+chown -R agentmd-runner:agentmd-runner "$TRUST_ROOT/scratch"
+openssl req -x509 -newkey rsa:2048 -nodes -days 1 \
+  -subj /CN=integration-test-ca -addext 'basicConstraints=critical,CA:TRUE' \
+  -addext 'keyUsage=critical,keyCertSign,cRLSign' \
+  -keyout "$TRUST_ROOT/ca.key" -out "$TRUST_ROOT/source/etc/trust/ca.pem" >/dev/null 2>&1
+openssl req -newkey rsa:2048 -nodes -subj /CN=localhost \
+  -keyout "$TRUST_ROOT/server.key" -out "$TRUST_ROOT/server.csr" >/dev/null 2>&1
+printf 'subjectAltName=DNS:localhost\n' > "$TRUST_ROOT/server.ext"
+openssl x509 -req -days 1 -in "$TRUST_ROOT/server.csr" \
+  -CA "$TRUST_ROOT/source/etc/trust/ca.pem" -CAkey "$TRUST_ROOT/ca.key" \
+  -CAcreateserial -extfile "$TRUST_ROOT/server.ext" \
+  -out "$TRUST_ROOT/server.pem" >/dev/null 2>&1
+openssl req -x509 -newkey rsa:2048 -nodes -days 1 \
+  -subj /CN=localhost -addext 'subjectAltName=DNS:localhost' \
+  -keyout "$TRUST_ROOT/untrusted.key" -out "$TRUST_ROOT/untrusted.pem" >/dev/null 2>&1
+ln -s ../../trust/ca.pem "$TRUST_ROOT/source/etc/ssl/certs/ca-certificates.crt"
+ln -s ../trust/ca.pem "$TRUST_ROOT/source/etc/ssl/cert.pem"
+chmod 0444 "$TRUST_ROOT/source/etc/trust/ca.pem"
+chmod 0555 "$TRUST_ROOT/source/etc" "$TRUST_ROOT/source/etc/ssl" \
+  "$TRUST_ROOT/source/etc/ssl/certs" "$TRUST_ROOT/source/etc/trust"
+TRUST_PORT=$((20000 + RANDOM % 40000))
+openssl s_server -accept "127.0.0.1:$TRUST_PORT" -cert "$TRUST_ROOT/server.pem" \
+  -key "$TRUST_ROOT/server.key" -quiet > "$TRUST_ROOT/server.log" 2>&1 & TRUST_SERVER=$!
+for _ in $(seq 1 100); do
+  if ( : > "/dev/tcp/127.0.0.1/$TRUST_PORT" ) 2>/dev/null; then break; fi
+  sleep 0.02
+done
+TRUST_TLS_CLIENT='import socket, ssl, sys; raw=socket.create_connection(("127.0.0.1", int(sys.argv[1])), timeout=3); ssl.create_default_context().wrap_socket(raw, server_hostname="localhost").close()'
+TRUST_START=$(date +%s%N)
+authority_materialize_system_trust "$TRUST_ROOT/view" "$TRUST_ROOT/source" \
+  "$(id -u agentmd-runner)" "$(id -u dev)" \
+  || { echo "TRUST-FAIL: materialization"; exit 1; }
+TRUST_MS=$(( ($(date +%s%N) - TRUST_START) / 1000000 ))
+authority_sandbox_arguments "$TRUST_ROOT/snapshot" "$TRUST_ROOT/scratch" /usr/bin:/bin "$TRUST_ROOT/view"
+# The before/after stages differ only in the CA mounts. Every other sandbox
+# argument, including network, namespaces and writable scratch, is identical.
+TRUST_BASE_ARGS=()
+for ((i=0; i<${#AUTHORITY_SANDBOX_ARGS[@]}; i++)); do
+  if [ "${AUTHORITY_SANDBOX_ARGS[i]}" = --ro-bind ] &&
+    [ "${AUTHORITY_SANDBOX_ARGS[i+1]:-}" = "$TRUST_ROOT/view/certs" ]; then
+    TRUST_BASE_ARGS+=(--ro-bind "$TRUST_ROOT/source/etc/ssl/certs" /etc/ssl/certs)
+    i=$((i+2))
+    continue
+  fi
+  if [ "${AUTHORITY_SANDBOX_ARGS[i]}" = --ro-bind ] &&
+    [ "${AUTHORITY_SANDBOX_ARGS[i+1]:-}" = "$TRUST_ROOT/view/cert.pem" ]; then
+    i=$((i+2))
+    continue
+  fi
+  TRUST_BASE_ARGS+=("${AUTHORITY_SANDBOX_ARGS[i]}")
+done
+row agentmd-runner "baseline sandbox" "DNS resolves" "same network namespace" \
+  "$(try sudo -u agentmd-runner env -i PATH=/usr/bin:/bin /usr/bin/bwrap "${TRUST_BASE_ARGS[@]}" -- getent ahosts localhost)" allowed
+sudo -u agentmd-runner env -i PATH=/usr/bin:/bin /usr/bin/bwrap "${TRUST_BASE_ARGS[@]}" -- \
+  python3 -c "$TRUST_TLS_CLIENT" "$TRUST_PORT" > "$TRUST_ROOT/before.log" 2>&1
+TRUST_BEFORE=$?
+row agentmd-runner "baseline sandbox" "HTTPS CA target absent" "broken relative symlink" \
+  "$([ "$TRUST_BEFORE" -ne 0 ] && grep -q CERTIFICATE_VERIFY_FAILED "$TRUST_ROOT/before.log" && printf certificate-failed || printf other)" certificate-failed
+echo "TRUST_VIEW_MATERIALIZE_MS=$TRUST_MS"
+row root "system trust" "view owner" "authority custody" \
+  "$(stat -c %U:%G:%a "$TRUST_ROOT/view")" root:root:555
+row agentmd-runner "system trust" "CA not writable" "read-only provider view" \
+  "$(try sudo -u agentmd-runner test -w "$TRUST_ROOT/view/cert.pem")" denied
+trust_stage() {
+  sudo -u agentmd-runner env -i PATH=/usr/bin:/bin \
+    /usr/bin/bwrap "${AUTHORITY_SANDBOX_ARGS[@]}" -- "$@"
+}
+row agentmd-runner "provider sandbox" "DNS resolves" "same network namespace" \
+  "$(try trust_stage getent ahosts localhost)" allowed
+row agentmd-runner "provider sandbox" "trusted HTTPS" "flattened system CA" \
+  "$(try trust_stage python3 -c "$TRUST_TLS_CLIENT" "$TRUST_PORT")" allowed
+row agentmd-runner "provider sandbox" "trust is read-only" "mount and ownership" \
+  "$(try trust_stage bash -c 'echo poison > /etc/ssl/cert.pem')" denied
+row agentmd-runner "provider sandbox" "developer home hidden" "minimal mount view" \
+  "$(try trust_stage test -e /home/dev)" denied
+row agentmd-runner "provider sandbox" "authority state hidden" "minimal mount view" \
+  "$(try trust_stage test -e /var/lib/agent-md)" denied
+kill "$TRUST_SERVER" 2>/dev/null || true
+wait "$TRUST_SERVER" 2>/dev/null || true
+TRUST_PORT=$((20000 + RANDOM % 40000))
+openssl s_server -accept "127.0.0.1:$TRUST_PORT" -cert "$TRUST_ROOT/untrusted.pem" \
+  -key "$TRUST_ROOT/untrusted.key" -quiet > "$TRUST_ROOT/untrusted-server.log" 2>&1 & TRUST_SERVER=$!
+for _ in $(seq 1 100); do
+  if ( : > "/dev/tcp/127.0.0.1/$TRUST_PORT" ) 2>/dev/null; then break; fi
+  sleep 0.02
+done
+trust_stage python3 -c "$TRUST_TLS_CLIENT" "$TRUST_PORT" > "$TRUST_ROOT/untrusted.log" 2>&1
+TRUST_UNTRUSTED=$?
+row agentmd-runner "provider sandbox" "untrusted HTTPS" "verification remains on" \
+  "$([ "$TRUST_UNTRUSTED" -ne 0 ] && grep -q CERTIFICATE_VERIFY_FAILED "$TRUST_ROOT/untrusted.log" && printf rejected || printf other)" rejected
+kill "$TRUST_SERVER" 2>/dev/null || true
+wait "$TRUST_SERVER" 2>/dev/null || true
+chmod -R u+w "$TRUST_ROOT" 2>/dev/null
+rm -rf "$TRUST_ROOT"
+
 header "12. detached runner cannot poison the next check"
 install -o dev -g dev -m 0644 /it/containment.toml /home/dev/repo/agent-md.toml
 install -o dev -g dev -m 0644 /it/attack.py /home/dev/repo/attack.py
