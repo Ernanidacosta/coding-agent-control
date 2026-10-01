@@ -39,10 +39,37 @@ jobs:
       - uses: actions/checkout@v4
       - name: Install bats
         run: |
-          sudo apt-get update && sudo apt-get install -y bats jq parallel bubblewrap
+          sudo apt-get update && sudo apt-get install -y bats jq parallel bubblewrap acl apparmor apparmor-profiles
           # GNU parallel refuses to run unattended until its citation notice is
           # acknowledged; without this the suite runner can stall in CI.
           mkdir -p ~/.parallel && touch ~/.parallel/will-cite
+      - name: Prepare host security prerequisites
+        run: |
+          for path in /usr /usr/share /usr/share/ca-certificates /etc /etc/ssl /etc/ssl/certs; do
+            stat -c 'before: %a %U:%G %n' "$path"
+            getfacl -cp "$path"
+          done
+          # The image may give the runner ownership of system CA paths.
+          sudo chown root:root /usr /usr/share /etc
+          sudo chown -R root:root /usr/share/ca-certificates /etc/ssl
+          sudo chmod go-w /usr /usr/share /etc
+          sudo chmod -R go-w /usr/share/ca-certificates /etc/ssl
+          for path in /usr /usr/share /usr/share/ca-certificates /etc /etc/ssl /etc/ssl/certs; do
+            stat -c 'after: %a %U:%G %n' "$path"
+            getfacl -cp "$path"
+          done
+          source examples/local-issuer/authority-lib.sh
+          trust_probe=$(mktemp -d)
+          trap 'chmod -R u+w "$trust_probe"; rm -rf "$trust_probe"' EXIT
+          if ! reason=$(authority_materialize_system_trust "$trust_probe/view" / "$(id -u)" "$(id -u)"); then
+            echo "system trust prerequisite failed: $reason" >&2
+            exit 1
+          fi
+          # Ubuntu's restricted profile permits bwrap to set up the namespace
+          # while denying capabilities to processes inside it.
+          test -f /usr/share/apparmor/extra-profiles/bwrap-userns-restrict
+          sudo apparmor_parser -r /usr/share/apparmor/extra-profiles/bwrap-userns-restrict
+          bash examples/local-issuer/agent-md-authority doctor --root /tmp/agent-md-ci-authority
       - name: Run bats suite
         run: bash tests/run.sh
 

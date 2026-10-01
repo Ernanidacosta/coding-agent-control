@@ -113,7 +113,7 @@ rewrite_state() {
   [ "$(jq -r .authentic <<<"$output")" = true ]
   [ "$(jq -r .current <<<"$output")" = true ]
   [ "$(jq -r .applicable <<<"$output")" = true ]
-  [ "$(verify_rc)" -eq 0 ]
+  [ "$status" -eq 0 ]
 }
 
 @test "1b a receipt issued without developer global excludes remains immediately applicable" {
@@ -169,7 +169,7 @@ rewrite_state() {
   [ "$(jq -r .current <<<"$output")" = true ]
   [ "$(jq -r .applicable <<<"$output")" = true ]
   # Reusable, but never mistakable for a pass by exit status alone.
-  [ "$(verify_rc)" -ne 0 ]
+  [ "$status" -ne 0 ]
 }
 
 @test "3 only a reusable pass exits zero" {
@@ -396,7 +396,7 @@ rewrite_state() {
   seal
   run verify
   [ "$(jq -r .status <<<"$output")" = unresolved_pending ]
-  [ "$(verify_rc)" -ne 0 ]
+  [ "$status" -ne 0 ]
 }
 
 @test "28 recovery after a pending restores a reusable answer" {
@@ -441,7 +441,7 @@ rewrite_state() {
     | .scopes.worktree.last_terminal = (.scopes.worktree.last_terminal | del(.receipt) | del(.key_id))'
   run verify
   [ "$(jq -r .status <<<"$output")" = unauthenticated_terminal ]
-  [ "$(verify_rc)" -ne 0 ]
+  [ "$status" -ne 0 ]
 }
 
 @test "31 no terminal result at all is no evidence" {
@@ -563,7 +563,7 @@ rewrite_state() {
   printf 'schema = 1\nrisk = "critical"\n' > "$WS/.project-control.toml"
   run verify
   [ "$(jq -r .status <<<"$output")" = stale ]
-  [ "$(verify_rc)" -ne 0 ]
+  [ "$status" -ne 0 ]
 }
 
 # --- malformed input ---------------------------------------------------------
@@ -682,7 +682,7 @@ authority_state_write|authority_publish_receipt|authority_publish_trusted_key|\
   rm -rf "$ROOT/var/lib/agent-md/projects"
   run verify
   [ "$(jq -r .status <<<"$output")" = unavailable ]
-  [ "$(verify_rc)" -ne 0 ]
+  [ "$status" -ne 0 ]
 }
 
 # --- C4e reconciliation ------------------------------------------------------
@@ -759,7 +759,7 @@ authority_state_write|authority_publish_receipt|authority_publish_trusted_key|\
   [ "$(jq -r .ordinary <<<"$output")" = pass ]
   [ "$(jq -r '.requires_external | type' <<<"$output")" = array ]
   [ "$(jq -r '.requires_external | length' <<<"$output")" = 0 ]
-  [ "$(verify_rc)" -eq 0 ]
+  [ "$status" -eq 0 ]
 }
 
 @test "62b a risk that requires independent still permits ordinary reuse" {
@@ -773,7 +773,7 @@ authority_state_write|authority_publish_receipt|authority_publish_trusted_key|\
   [ "$(jq -r .ordinary <<<"$output")" = pass ]
   [ "$(jq -r '.requires_external | index("independent")' <<<"$output")" != null ]
   # Exit 0 licenses reusing the ordinary half, never completion as a whole.
-  [ "$(verify_rc)" -eq 0 ]
+  [ "$status" -eq 0 ]
 }
 
 @test "62c a critical risk reports both external guarantees" {

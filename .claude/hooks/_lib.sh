@@ -1287,9 +1287,10 @@ verification_invalid_contract_json() {
 # Without `required`, resolved checks retain the legacy required behavior.
 verification_contract_json() {
   local config="${1:-$(toml_path)}" required_values required_status
-  local required_declared=0 timeout_value="" total_timeout_value="" rows='[]' check command origin requirement
-  local seen_required="" value row trusted_values trusted_status trusted_files
+  local required_declared=0 timeout_value="" total_timeout_value="" check_names check command origin requirement
+  local seen_required="" value trusted_values trusted_status trusted_files
   local capability_values capability_status capabilities
+  local check_args=()
   local preparation='null' preparation_command="" preparation_timeout="" preparation_provider=""
 
   required_values=$(read_toml_array "$config" verify.policy required)
@@ -1380,6 +1381,7 @@ EOF
     fi
   fi
 
+  check_names=$(verification_check_names)
   while IFS= read -r check; do
     command=""
     origin="not configured"
@@ -1481,22 +1483,20 @@ EOF
       requirement="required"
     fi
 
-    row=$(jq -cn \
-      --arg name "$check" \
-      --arg requirement "$requirement" \
-      --arg origin "$origin" \
-      --arg command "$command" \
-      --argjson trusted_files "$trusted_files" \
-      --argjson capabilities "$capabilities" \
-      '{name:$name, requirement:$requirement, origin:$origin, command:$command,
-        trusted_files:$trusted_files, capabilities:$capabilities}')
-    rows=$(printf '%s' "$rows" | jq -c --argjson row "$row" '. + [$row]')
+    check_args+=(
+      --arg "${check}_requirement" "$requirement"
+      --arg "${check}_origin" "$origin"
+      --arg "${check}_command" "$command"
+      --argjson "${check}_trusted_files" "$trusted_files"
+      --argjson "${check}_capabilities" "$capabilities"
+    )
   done <<EOF
-$(verification_check_names)
+$check_names
 EOF
 
   jq -cn \
-    --argjson checks "$rows" \
+    "${check_args[@]}" \
+    --arg check_names "$check_names" \
     --argjson preparation "$preparation" \
     --arg timeout "$timeout_value" \
     --arg total_timeout "$total_timeout_value" \
@@ -1506,7 +1506,14 @@ EOF
         policy: $mode,
         timeout_seconds: (if $timeout == "" then null else ($timeout | tonumber) end),
         total_timeout_seconds: (if $total_timeout == "" then null else ($total_timeout | tonumber) end),
-        checks: $checks
+        checks: ($check_names | split("\n") | map(. as $name | {
+          name: $name,
+          requirement: $ARGS.named[$name + "_requirement"],
+          origin: $ARGS.named[$name + "_origin"],
+          command: $ARGS.named[$name + "_command"],
+          trusted_files: $ARGS.named[$name + "_trusted_files"],
+          capabilities: $ARGS.named[$name + "_capabilities"]
+        }))
       }
       | if $preparation == null then . else .preparation = $preparation end
     '

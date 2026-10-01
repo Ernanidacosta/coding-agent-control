@@ -824,8 +824,9 @@ issuer_execute_checks() {
         continue
         ;;
     esac
-    [ "$check_exit" != null ] && [ "$check_exit" = "$status" ] \
-      || issuer_execution_failed "$name"
+    if [ "$check_exit" = null ] || [ "$check_exit" != "$status" ]; then
+      issuer_execution_failed "$name"
+    fi
     RESPONSE_CHECKS=$(printf '%s' "$RESPONSE_CHECKS" | jq -c \
       --arg n "$name" --arg r "$required" --arg i "$identity" --argjson e "$status" \
       '. + [{name:$n,requirement:$r,origin:"configured",command_identity:$i,exit_code:$e,execution:"completed"}]')

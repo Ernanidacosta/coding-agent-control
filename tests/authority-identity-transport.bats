@@ -37,9 +37,9 @@ teardown() {
 @test "large workspace identity exceeds argv and preserves all core manifests and fingerprints" {
   local suffix i
   printf -v suffix '%0200d' 0
-  mkdir "$WS/bulk"
-  for ((i=0; i<400; i++)); do
-    printf 'same content\n' > "$WS/bulk/$i-$suffix.txt"
+  mkdir -p "$WS/bulk/$suffix/$suffix"
+  for ((i=0; i<160; i++)); do
+    printf 'same content\n' > "$WS/bulk/$suffix/$suffix/$i-$suffix.txt"
   done
   git -C "$WS" add bulk
   bash -c '

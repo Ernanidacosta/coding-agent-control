@@ -808,9 +808,9 @@ authority_materialize_system_trust() (
     }
   }
   case "$view" in /*) ;; *) printf 'system trust view path is not absolute'; return 1 ;; esac
-  [ ! -e "$view" ] && [ ! -L "$view" ] || {
+  if [ -e "$view" ] || [ -L "$view" ]; then
     printf 'system trust view already exists'; return 1;
-  }
+  fi
   certs="$source_root/etc/ssl/certs"
   cert_file="$source_root/etc/ssl/cert.pem"
   [ "$source_root" != / ] || { certs=/etc/ssl/certs; cert_file=/etc/ssl/cert.pem; }
@@ -898,12 +898,12 @@ authority_materialize_system_trust() (
 authority_sandbox_arguments() {
   local snapshot="$1" scratch="$2" approved_path="$3" trust_view="$4"
   local path resolved old_ifs protected
-  [ -d "$trust_view" ] && [ ! -L "$trust_view" ] || {
+  if [ ! -d "$trust_view" ] || [ -L "$trust_view" ]; then
     printf 'system trust view is absent or unsafe'; return 1;
-  }
-  [ -d "$trust_view/certs" ] && [ ! -L "$trust_view/certs" ] || {
+  fi
+  if [ ! -d "$trust_view/certs" ] || [ -L "$trust_view/certs" ]; then
     printf 'system trust certs view is absent or unsafe'; return 1;
-  }
+  fi
   AUTHORITY_SANDBOX_ARGS=(--unshare-user --unshare-pid --unshare-ipc --unshare-uts
     --die-with-parent --new-session --cap-drop ALL)
   for path in /usr /bin /sbin /lib /lib64; do
@@ -950,9 +950,9 @@ authority_sandbox_arguments() {
 # runner with runuser; a service enrollment cannot gain that impersonation.
 authority_sandbox_capability() (
   local args=() prefix=() path trust_probe='' runner_uid reason
-  [ -x /usr/bin/bwrap ] && [ ! -u /usr/bin/bwrap ] || {
+  if [ ! -x /usr/bin/bwrap ] || [ -u /usr/bin/bwrap ]; then
     printf 'local issuer requires unprivileged bubblewrap at /usr/bin/bwrap'; return 1;
-  }
+  fi
   if is_real_root_prefix && [ "$(id -u)" = 0 ]; then
     prefix=(runuser -u "$AUTHORITY_RUNNER_USER" --)
   fi
@@ -980,6 +980,21 @@ authority_sandbox_capability() (
     rm -rf "$trust_probe"
   fi
 )
+
+authority_tls_startup_diagnostic() {
+  local pid="$1" port="$2" log="$3" alive=no exit_status=unavailable output
+  if kill -0 "$pid" 2>/dev/null; then
+    alive=yes
+  elif wait "$pid" 2>/dev/null; then
+    exit_status=0
+  else
+    exit_status=$?
+  fi
+  output=$(sed '/-----BEGIN /,/-----END /d' "$log" 2>/dev/null |
+    tail -n 3 | LC_ALL=C tr -cd '\11\12\15\40-\176' | tr '\r\n' ' ' | cut -c1-600)
+  printf ' (pid=%s port=%s alive=%s exit_status=%s; server.log: %s)' \
+    "$pid" "$port" "$alive" "$exit_status" "${output:-<empty>}"
+}
 
 # This is a local TLS handshake, not a request to a public registry. The test
 # CA is visible only in this probe's synthetic trust view; the generated key
@@ -1036,7 +1051,11 @@ authority_sandbox_tls_capability() (
     kill -0 "$server" 2>/dev/null || break
     sleep 0.02
   done
-  [ "$ready" -eq 1 ] || { printf 'local TLS server did not start'; return 1; }
+  if [ "$ready" -ne 1 ]; then
+    printf 'local TLS server did not start'
+    authority_tls_startup_diagnostic "$server" "$port" "$probe/server.log"
+    return 1
+  fi
   if ! timeout -k 1s 5s "${prefix[@]}" /usr/bin/env -i PATH=/usr/bin:/bin \
       /usr/bin/bwrap "${AUTHORITY_SANDBOX_ARGS[@]}" -- \
       /usr/bin/openssl s_client -verify_return_error -verify_hostname localhost \
@@ -1058,7 +1077,11 @@ authority_sandbox_tls_capability() (
     kill -0 "$server" 2>/dev/null || break
     sleep 0.02
   done
-  [ "$ready" -eq 1 ] || { printf 'untrusted local TLS server did not start'; return 1; }
+  if [ "$ready" -ne 1 ]; then
+    printf 'untrusted local TLS server did not start'
+    authority_tls_startup_diagnostic "$server" "$port" "$probe/untrusted-server.log"
+    return 1
+  fi
   if timeout -k 1s 5s "${prefix[@]}" /usr/bin/env -i PATH=/usr/bin:/bin \
       /usr/bin/bwrap "${AUTHORITY_SANDBOX_ARGS[@]}" -- \
       /usr/bin/openssl s_client -verify_return_error -verify_hostname localhost \
@@ -1781,7 +1804,9 @@ authority_state_write() {
   # restored on every path out, including failure.
   local dirmode; dirmode=$(mode_of "$dir")
   chmod u+w "$dir" 2>/dev/null || true
-  _authority_state_reseal() { [ -n "$dirmode" ] && chmod "$dirmode" "$dir" 2>/dev/null || true; }
+  _authority_state_reseal() {
+    if [ -n "$dirmode" ]; then chmod "$dirmode" "$dir" 2>/dev/null; fi
+  }
 
   tmp=$(mktemp "$dir/.agent-md-state.XXXXXX") || {
     _authority_state_reseal; printf 'cannot create a temporary state file'; return 1; }
@@ -1795,7 +1820,7 @@ authority_state_write() {
     rm -f "$tmp"; _authority_state_reseal; printf 'cannot replace the state file'; return 1; }
   authority_fsync_path "$dir" || {
     _authority_state_reseal; printf 'cannot flush the state directory'; return 1; }
-  _authority_state_reseal
+  _authority_state_reseal || { printf 'cannot reseal the state directory'; return 1; }
   return 0
 }
 
@@ -2110,7 +2135,7 @@ authority_publish_trusted_key() {
   mv -f "$tmp" "$target" || { rm -f "$tmp"; printf 'cannot publish the trusted key'; return 1; }
   authority_fsync_path "$dir" || true
   chmod 0555 "$dir" 2>/dev/null || true
-  [ -n "$dirmode" ] && chmod "$dirmode" "$parent" 2>/dev/null || true
+  if [ -n "$dirmode" ]; then chmod "$dirmode" "$parent" 2>/dev/null || return 1; fi
   return 0
 }
 
@@ -2134,7 +2159,7 @@ authority_publish_receipt() {
 
   if [ -e "$target" ]; then
     chmod 0555 "$dir" 2>/dev/null || true
-    [ -n "$dirmode" ] && chmod "$dirmode" "$parent" 2>/dev/null || true
+    if [ -n "$dirmode" ]; then chmod "$dirmode" "$parent" 2>/dev/null; fi
     printf 'a receipt already exists for sequence %s' "$seq"; return 1
   fi
 
@@ -2145,6 +2170,9 @@ authority_publish_receipt() {
   mv -f "$tmp" "$target" || { rm -f "$tmp"; printf 'cannot publish the receipt'; return 1; }
   authority_fsync_path "$dir" || { printf 'cannot flush the receipt directory'; return 1; }
   chmod 0555 "$dir" 2>/dev/null || true
-  [ -n "$dirmode" ] && chmod "$dirmode" "$parent" 2>/dev/null || true
+  if [ -n "$dirmode" ]; then
+    chmod "$dirmode" "$parent" 2>/dev/null \
+      || { printf 'cannot reseal the receipt parent'; return 1; }
+  fi
   return 0
 }

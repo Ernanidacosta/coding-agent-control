@@ -229,8 +229,9 @@ for tool_name in bash timeout env bwrap; do
   fi
 done
 [ ! -u "$BWRAP_PATH" ] || refuse "bwrap must be unprivileged, not setuid"
-[ ! -w "$BWRAP_PATH" ] && [ ! -w "$(dirname "$BWRAP_PATH")" ] \
-  || refuse "bwrap is writable by the execution account"
+if [ -w "$BWRAP_PATH" ] || [ -w "$(dirname "$BWRAP_PATH")" ]; then
+  refuse "bwrap is writable by the execution account"
+fi
 
 PREPARATION=$(printf '%s' "$JOB_JSON" | jq -c '.preparation // null')
 if [ "$PREPARATION" != null ]; then
@@ -344,8 +345,9 @@ STATUS_ARGS=()
 if [ "$SUPERVISED" = true ]; then STATUS_ARGS=(--json-status-fd 3); fi
 
 if [ "$PREPARATION" != null ]; then
-  [ -f poetry.lock ] && [ -f pyproject.toml ] \
-    || refuse "Poetry preparation requires pyproject.toml and poetry.lock in the snapshot"
+  if [ ! -f poetry.lock ] || [ ! -f pyproject.toml ]; then
+    refuse "Poetry preparation requires pyproject.toml and poetry.lock in the snapshot"
+  fi
   [ "$SUPERVISED" != true ] || printf '{"stage":"preparation"}\n'
   if "$ENV_PATH" -i "${ENV_PAIRS[@]}" \
     "$TIMEOUT_PATH" -k "${AUTHORITY_TIMEOUT_GRACE_SECONDS}s" "${PREP_TIMEOUT}s" \

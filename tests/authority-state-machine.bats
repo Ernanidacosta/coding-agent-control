@@ -314,19 +314,25 @@ libcall() {
 
 # Starts an evaluation in its own process group so the whole tree can be killed.
 start_evaluation() {
-  setsid bash -c 'printf "{\"protocol\":1,\"scope\":\"worktree\",\"workspace\":\"$1\"}" \
-    | bash "$2" evaluate --root "$3" >/dev/null 2>&1' _ "$WS" "$ISSUER" "$ROOT" &
+  EVAL_PGID_FILE="$ROOT/evaluation.pgid"
+  setsid bash -c 'printf "%s\n" "$$" > "$4"
+    printf "{\"protocol\":1,\"scope\":\"worktree\",\"workspace\":\"$1\"}" \
+    | bash "$2" evaluate --root "$3" >/dev/null 2>&1' _ "$WS" "$ISSUER" "$ROOT" "$EVAL_PGID_FILE" &
   EVAL_PID=$!
-  export EVAL_PID
+  export EVAL_PID EVAL_PGID_FILE
+  wait_for '[ -s "$EVAL_PGID_FILE" ]'
 }
 
-# setsid forks, so the session it creates is not the job's own pid. The whole
-# tree is killed by its process group id, which is what actually stops the
-# check as well as the issuer.
+# setsid may fork, so read the session leader's PID from inside that session.
+# Killing its process group stops the check as well as the issuer.
 kill_evaluation() {
-  local pgid
-  pgid=$(ps -o pgid= -p "$EVAL_PID" 2>/dev/null | tr -d ' ')
-  if [ -n "$pgid" ]; then kill -9 -"$pgid" 2>/dev/null || true; fi
+  local pgid own_pgid
+  pgid=$(cat "$EVAL_PGID_FILE")
+  own_pgid=$(ps -o pgid= -p "$BASHPID" | tr -d ' ')
+  case "$pgid" in ''|*[!0-9]*) return 1 ;; esac
+  [ -n "$own_pgid" ] || return 1
+  [ "$pgid" != "$own_pgid" ] || return 1
+  kill -9 -- "-$pgid" 2>/dev/null || true
   kill -9 "$EVAL_PID" 2>/dev/null || true
   wait "$EVAL_PID" 2>/dev/null || true
 }

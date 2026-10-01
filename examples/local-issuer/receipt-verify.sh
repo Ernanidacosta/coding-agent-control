@@ -590,7 +590,7 @@ main() {
         shift ;;
     esac
   done
-  [ -n "$workspace" ] && [ -n "$scope" ] || { usage >&2; exit "$EX_USAGE"; }
+  if [ -z "$workspace" ] || [ -z "$scope" ]; then usage >&2; exit "$EX_USAGE"; fi
 
   command -v jq >/dev/null 2>&1 || { printf '%s: jq is required\n' "$PROGRAM" >&2; exit "$EX_UNAVAILABLE"; }
   command -v openssl >/dev/null 2>&1 || { printf '%s: openssl is required\n' "$PROGRAM" >&2; exit "$EX_UNAVAILABLE"; }
