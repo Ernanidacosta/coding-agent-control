@@ -24,3 +24,12 @@
 - 40 serial + 40 concurrent doctors passed, with 160 processes terminated and
   80 probe directories removed; /tmp/cac-tls-probe-investigation/fixed-repetition.json.
 - README reviewed; local trusted/untrusted TLS behavior remains accurately described.
+
+## Technical Checkpoint Evidence
+
+- SHA d6b2a544991d4b2e6388704fe7fd0e345064ebb4: normal commit hooks passed
+  lint, smoke, test and operational state; external CI 37042156831 passed all
+  four jobs and 975 Bats tests, including all three new doctor regressions.
+- Configured independent gate: VERIFY_PASSED, eligible trust anchor, origin ci,
+  target.commit equal to that exact SHA. This evidence does not cover descendants.
+- Audit records: /tmp/cac-p1-tls-checkpoint/technical-{commit.log,ci.json,independent.json}.
