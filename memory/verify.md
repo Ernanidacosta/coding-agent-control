@@ -33,3 +33,12 @@
 - Configured independent gate: VERIFY_PASSED, eligible trust anchor, origin ci,
   target.commit equal to that exact SHA. This evidence does not cover descendants.
 - Audit records: /tmp/cac-p1-tls-checkpoint/technical-{commit.log,ci.json,independent.json}.
+
+## Operational Checkpoint Evidence
+
+- SHA 5ee4b993c44840b975dc6d483f02f8db779ae50b: normal hooks passed;
+  external CI 37045495562 passed all four jobs and 975 Bats tests.
+- Configured independent gate returned VERIFY_PASSED for that exact SHA with
+  eligible trust anchor and origin ci. The final operational HEAD needs fresh
+  CI and independent evidence plus the full verification entry point.
+- Audit records: /tmp/cac-p1-tls-checkpoint/verifying-{commit.log,ci.json,independent.json}.
