@@ -350,13 +350,14 @@ enrollment_file() {
     . "$AUTHORITY"
     ROOT=$fixture_root
     is_real_root_prefix() { return 0; }
+    AUTHORITY_RUNNER_USER=$(id -un)
     projects_dir() { printf "%s/var/lib/agent-md/projects" "$ROOT"; }
     authority_workspace_traversal_reasons() { printf "[]"; }
     chown() { return 1; }
     cmd_enroll "$WS" --root "$ROOT" --yes
   ' "$AUTHORITY"
-  [ "$status" -ne 0 ]
-  [[ "$output" == *"cannot assign enrollment ownership to agentmd"* ]]
+  [ "$status" -ne 0 ] || { printf '%s\n' "$output" >&2; return 1; }
+  [[ "$output" == *"cannot assign enrollment ownership to agentmd"* ]] || { printf '%s\n' "$output" >&2; return 1; }
   [[ "$output" != *$'\nenrolled '* ]]
   [ "$(find "$ROOT/var/lib/agent-md/projects" -name enrollment.json | wc -l)" -eq 0 ]
   [ "$(find "$ROOT/var/lib/agent-md/projects" -name '.agent-md-*' | wc -l)" -eq 0 ]
@@ -374,13 +375,14 @@ enrollment_file() {
     . "$AUTHORITY"
     ROOT=$fixture_root
     is_real_root_prefix() { return 0; }
+    AUTHORITY_RUNNER_USER=$(id -un)
     projects_dir() { printf "%s/var/lib/agent-md/projects" "$ROOT"; }
     authority_workspace_traversal_reasons() { printf "[]"; }
     new_uuid() { printf preserved-state; }
     chown() { printf "%s\n" "$@" > "$MARKER"; }
     cmd_enroll "$WS" --root "$ROOT" --yes
   ' "$AUTHORITY"
-  [ "$status" -eq 0 ]
+  [ "$status" -eq 0 ] || { printf '%s\n' "$output" >&2; return 1; }
   [ "$(sha256sum "$dir/state.json")" = "$before" ]
   [ "$(sed -n '1p' "$MARKER")" = agentmd:agentmd ]
   [ "$(sed -n '2p' "$MARKER")" = "$dir" ]
@@ -412,10 +414,11 @@ enrollment_file() {
     . "$AUTHORITY" >/dev/null
     ROOT=$fixture_root
     is_real_root_prefix() { return 0; }
+    AUTHORITY_RUNNER_USER=$(id -un)
     chown() { return 0; }
     cmd_enroll "$WS" --root "$ROOT" --yes
   ' "$AUTHORITY"
-  [ "$status" -eq 0 ]
+  [ "$status" -eq 0 ] || { printf '%s\n' "$output" >&2; return 1; }
   local record
   record=$(enrollment_file)
   [ "$(jq -r .status "$record")" = ineligible ]
@@ -424,23 +427,29 @@ enrollment_file() {
 }
 
 @test "32 reapproval cancellation keeps the old enrollment and state byte-identical" {
-  bash "$AUTHORITY" enroll "$WS" --root "$ROOT" --yes >/dev/null
+  run_authority enroll "$WS" --root "$ROOT" --exec-path /usr/bin:/bin --yes
+  [ "$status" -eq 0 ] || { printf '%s\n' "$output" >&2; return 1; }
   local record dir before
   record=$(enrollment_file); dir=${record%/*}
+  jq -e '.status == "eligible"' "$record" >/dev/null \
+    || { printf '%s\n' "$output" >&2; return 1; }
   before=$(sha256sum "$record" "$dir/state.json")
   printf '# updated\n' >> "$WS/.claude/hooks/_lib.sh"
 
   run bash -c 'printf "n\n" | bash "$AUTHORITY" reapprove "$WS" --root "$ROOT"'
-  [ "$status" -ne 0 ]
-  [[ "$output" == *"reapprove declined"* ]]
+  [ "$status" -ne 0 ] || { printf '%s\n' "$output" >&2; return 1; }
+  [[ "$output" == *"reapprove declined"* ]] || { printf '%s\n' "$output" >&2; return 1; }
   [ "$(sha256sum "$record" "$dir/state.json")" = "$before" ]
   [ "$(find "$dir" -name '.agent-md-enrollment.*' | wc -l)" -eq 0 ]
 }
 
 @test "33 a failed atomic publication keeps the old enrollment and state" {
-  bash "$AUTHORITY" enroll "$WS" --root "$ROOT" --yes >/dev/null
+  run_authority enroll "$WS" --root "$ROOT" --exec-path /usr/bin:/bin --yes
+  [ "$status" -eq 0 ] || { printf '%s\n' "$output" >&2; return 1; }
   local record dir before
   record=$(enrollment_file); dir=${record%/*}
+  jq -e '.status == "eligible"' "$record" >/dev/null \
+    || { printf '%s\n' "$output" >&2; return 1; }
   before=$(sha256sum "$record" "$dir/state.json")
   printf '# updated\n' >> "$WS/.claude/hooks/_lib.sh"
   export FAIL_DEST="$record"
@@ -454,8 +463,8 @@ enrollment_file() {
     export -f mv
     bash "$AUTHORITY" reapprove "$WS" --root "$ROOT" --yes
   '
-  [ "$status" -ne 0 ]
-  [[ "$output" == *"cannot publish enrollment"* ]]
+  [ "$status" -ne 0 ] || { printf '%s\n' "$output" >&2; return 1; }
+  [[ "$output" == *"cannot publish enrollment"* ]] || { printf '%s\n' "$output" >&2; return 1; }
   [ "$(sha256sum "$record" "$dir/state.json")" = "$before" ]
   [ "$(find "$dir" -name '.agent-md-enrollment.*' | wc -l)" -eq 0 ]
 }
@@ -477,15 +486,18 @@ enrollment_file() {
 }
 
 @test "35 a changed check set requires sudoers refresh before publication" {
-  bash "$AUTHORITY" enroll "$WS" --root "$ROOT" --yes >/dev/null
+  run_authority enroll "$WS" --root "$ROOT" --exec-path /usr/bin:/bin --yes
+  [ "$status" -eq 0 ] || { printf '%s\n' "$output" >&2; return 1; }
   local record dir before
   record=$(enrollment_file); dir=${record%/*}
+  jq -e '.status == "eligible"' "$record" >/dev/null \
+    || { printf '%s\n' "$output" >&2; return 1; }
   before=$(sha256sum "$record" "$dir/state.json")
   sed -i '/^test =/a runtime = "exit 0"' "$WS/agent-md.toml"
 
   run_authority reapprove "$WS" --root "$ROOT" --yes
-  [ "$status" -ne 0 ]
-  [[ "$output" == *"sudoers refresh required"* ]]
+  [ "$status" -ne 0 ] || { printf '%s\n' "$output" >&2; return 1; }
+  [[ "$output" == *"sudoers refresh required"* ]] || { printf '%s\n' "$output" >&2; return 1; }
   [ "$(sha256sum "$record" "$dir/state.json")" = "$before" ]
 }
 
@@ -506,26 +518,32 @@ enrollment_file() {
 }
 
 @test "37 environment-only reapproval cannot keep an old PASS current" {
-  bash "$AUTHORITY" enroll "$WS" --root "$ROOT" --yes >/dev/null
+  run_authority enroll "$WS" --root "$ROOT" --exec-path /usr/bin:/bin --yes
+  [ "$status" -eq 0 ] || { printf '%s\n' "$output" >&2; return 1; }
   local record dir before
   record=$(enrollment_file); dir=${record%/*}
+  jq -e '.status == "eligible"' "$record" >/dev/null \
+    || { printf '%s\n' "$output" >&2; return 1; }
   before=$(sha256sum "$record" "$dir/state.json")
 
   run_authority reapprove "$WS" --root "$ROOT" --env REVIEWED=1 --yes
-  [ "$status" -ne 0 ]
-  [[ "$output" == *"old PASS could remain current"* ]]
+  [ "$status" -ne 0 ] || { printf '%s\n' "$output" >&2; return 1; }
+  [[ "$output" == *"old PASS could remain current"* ]] || { printf '%s\n' "$output" >&2; return 1; }
   [ "$(sha256sum "$record" "$dir/state.json")" = "$before" ]
 }
 
 @test "38 reapproval dry-run writes no locks or enrollment artifacts" {
-  bash "$AUTHORITY" enroll "$WS" --root "$ROOT" --yes >/dev/null
+  run_authority enroll "$WS" --root "$ROOT" --exec-path /usr/bin:/bin --yes
+  [ "$status" -eq 0 ] || { printf '%s\n' "$output" >&2; return 1; }
   local record dir before
   record=$(enrollment_file); dir=${record%/*}
+  jq -e '.status == "eligible"' "$record" >/dev/null \
+    || { printf '%s\n' "$output" >&2; return 1; }
   before=$(sha256sum "$record" "$dir/state.json")
 
   run_authority reapprove "$WS" --root "$ROOT" --dry-run
-  [ "$status" -eq 0 ]
-  [[ "$output" == *"dry run: nothing was written"* ]]
+  [ "$status" -eq 0 ] || { printf '%s\n' "$output" >&2; return 1; }
+  [[ "$output" == *"dry run: nothing was written"* ]] || { printf '%s\n' "$output" >&2; return 1; }
   [ "$(sha256sum "$record" "$dir/state.json")" = "$before" ]
   [ ! -e "$dir/.evaluation.lock" ]
   [ ! -e "$dir/.lock" ]

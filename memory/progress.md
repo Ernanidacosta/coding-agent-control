@@ -3,25 +3,23 @@
 ## Current
 
 Status: verifying
-Task: Reconcile operational memory and prepare independent verification review for checkpoint da0fe3d.
+Task: Isolate enrollment fixtures from host state and obtain external verification for the resulting checkpoint.
 Risk: high
 
 ## Scope
 
 - memory/progress.md
-- memory/plan.md
-- memory/verify.md
-- memory/gotchas.md
+- tests/authority-enrollment.bats
 
 ## Next
 
-- Review reconciled memory before starting the separate independent trust investigation.
-- Determine the eligible verifier baseline and the procedure for external evidence bound to the correct HEAD; do not change the trust anchor automatically.
-- Obtain owner direction for a separate focused follow-up on the observed TLS probe failure, then satisfy the applicable ordinary and independent verification gates before any completion claim.
+- Establish the fixture correction with normal commit hooks, then publish the exact resulting main SHA only with a clean checkout and unchanged trust files.
+- Require all four external CI jobs to pass for that exact SHA before running the configured independent verifier; stop on failure without an automatic correction or retry.
+- Present ordinary and independent evidence before any completion claim. Keep the historical TLS intermittence separate; no TLS change is authorized in this task.
 
 ## Blockers
 
-- Independent verification remains pending/untrusted; the last reported trust warning was RISK_ATTESTATION_UNTRUSTED / trusted-file-modified. Its current cause has not been reassessed after the technical commit.
+- External CI for 23082db failed eight enrollment cases. The corrected fixtures passed focused local checks, but external confirmation for the new commit and independent verification remain pending.
 - A later Stop reported VERIFY_REQUIRED_FAILED in the system-trust doctor test: BIO_bind: Address already in use, observed port 50889, probe process dead. This establishes an occupied-bind failure in that execution, not the identity of the competing process or a general cause of all intermittence.
 
 ## Recently Completed
@@ -29,5 +27,5 @@ Risk: high
 - Established the reviewed timeout baseline in administrative commit 8503adf: per-check 750 seconds, total 900 seconds; bootstrap is complete.
 - Promoted main by fast-forward without losing the existing local diffs.
 - Consolidated CI/runtime hardening, reseal coverage, TLS diagnostics, jq contract batching and fixtures/harness in technical commit da0fe3d; memory stayed outside that commit.
-- Normal pre-commit approved that technical checkpoint with 972 tests. This historical ordinary result does not satisfy independent verification or supersede the later Stop failure. No push has been performed.
-- Reconciled the four approved memory files; structural validators and git diff --check passed. Technical files and the unstaged index were preserved; the next phase awaits review.
+- The owner reviewed da0fe3d as the human trust baseline; operational commit 23082db was published with its workflow, verifier, config and policy unchanged. This review is not independent attestation.
+- Corrected the eight fixtures without changing production controls: enrollment 38/38, related cases 5/5 and the adverse-environment model 8/8; ShellCheck passed. The initial normal commit attempt passed lint, smoke and test but was blocked by STATE_PROGRESS_STALE; the owner authorized this progress update and resumption.
