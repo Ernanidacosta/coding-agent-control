@@ -8,7 +8,7 @@ as it does today and completion runs the full contract.
 | File | Role |
 |---|---|
 | `agent-md-authority` | administrator CLI: install, key custody, enroll, run preparation |
-| `agent-md-issuer` | runtime: answers eligibility for a request |
+| `agent-md-issuer` | runtime: eligibility, isolated evaluation and authenticated issuance |
 | `run-check` | executes one approved check inside a sealed run |
 | `authority-lib.sh` | shared implementation all three programs source |
 | `phase-a-source.sh` | vendored Phase A identity functions, used unmodified |
@@ -61,9 +61,9 @@ The layout it produces:
 | `/var/lib/agent-md/projects/` | agentmd | 0755 |
 | `/var/lib/agent-md/keys/` | agentmd | 0700 |
 
-Enrollment records are world-readable on purpose: a later slice validates
-receipts with the enrolled public key without needing any privileged call. That
-is also why an enrollment record must never contain secret material.
+Enrollment records are world-readable so the unprivileged validator can verify
+receipts with the enrolled public key without any privileged call. That is also
+why an enrollment record must never contain secret material.
 
 ### The issuer key
 
@@ -366,8 +366,7 @@ Compromising the authority account is serious and should be stated accurately:
 agentmd compromise
   -> receipt authority compromised
   -> issuer state and signing key compromised
-  -> once C3 lands, the descending sudo rule also gives limited
-     execution as the developer user
+  -> the descending sudo rule also gives limited execution as agentmd-runner
   -> NOT root
 ```
 
@@ -377,9 +376,10 @@ dedicated service account rather than root.
 
 ## The issuer runtime
 
-`agent-md-issuer` answers exactly one question: does the authority still
-recognise this project, and would it be authorised to attempt verification in a
-later slice? `eligible` is not a verification result, and the vocabulary avoids
+`agent-md-issuer eligibility` answers whether the authority still recognises
+this project and authorises an evaluation. `evaluate` runs the approved checks
+and issues an authenticated result, as described below.
+`eligible` is not a verification result, and the vocabulary avoids
 `passed`, `verified` and `success` on purpose.
 
 Request — one JSON object on stdin, and no other field is accepted:
@@ -387,6 +387,8 @@ Request — one JSON object on stdin, and no other field is accepted:
 ```json
 {"protocol": 1, "scope": "worktree", "workspace": "/absolute/path"}
 ```
+
+Only worktree issuance is supported; a `staged` request is refused.
 
 A request carrying `command`, `checks`, `fingerprints`, `project_id`, `status`,
 `sequence` or anything else is rejected rather than ignored. The caller never
@@ -495,9 +497,13 @@ because they answer separate Risk authority — and `required_declared`.
 
 ## Read-only guarantee
 
-The issuer writes nothing. Not the repository, not the enrollment, not the
-authority state, not any sequence state. A test hashes the workspace and the
-whole authority tree before and after a request and requires them byte-identical.
+The `eligibility` request writes nothing: neither the repository nor the
+enrollment, authority state or sequence state. A test hashes the workspace and
+whole authority tree before and after that request and requires them
+byte-identical.
+An `evaluate` request creates an authority-owned run, reserves a sequence and
+publishes a signed terminal receipt when the evaluation completes for the same
+identity.
 
 ## The execution boundary
 
@@ -655,8 +661,8 @@ choose its own verdict. The receipt, its sequence, the project, the signing key
 and the expected fingerprints are all derived from the authority's own records.
 
 It prints exactly one JSON object on stdout and human diagnostics on stderr, so
-a future caller routes on structure rather than on prose. Exit 0 means
-`reusable_pass` and nothing else does:
+the completion consumer routes on structure rather than on prose. Exit 0 means
+`reusable_ordinary` and nothing else does:
 
 | status | exit | meaning |
 |---|---|---|
@@ -679,8 +685,7 @@ make it reusable.
 
 ### What a consumer does with each status
 
-This is fixed policy for the step that wires reuse into completion, recorded
-now so that step implements a decision rather than inventing one.
+Stop applies this policy when deciding whether to reuse ordinary verification.
 
 | status | consumer action | why |
 |---|---|---|
@@ -746,9 +751,8 @@ contract from a stale or partial run, which stays `stale` or
 
 ### How a consumer obtains evidence
 
-This is the contract for the step that wires reuse into completion. It creates
-no new capability: issuing evidence remains something only an authority-side
-evaluation can do.
+Stop uses this flow to obtain evidence. Issuing evidence remains something
+only an authority-side evaluation can do.
 
 1. Run the validator.
 2. `reusable_ordinary` — skip the ordinary verification and evaluate only what
@@ -783,11 +787,10 @@ choose its verdict, and would run that code before any check could object.
 
 ## What these slices deliberately do not do
 
-No change to `verify.sh`, the Stop hook, the Codex wrapper or the pre-commit
-hook. Nothing in the product consults the validator, so a receipt currently
-changes nothing about how completion behaves; wiring that up is a separate
-step, deliberately taken after issuance and validation can each be reviewed on
-their own.
+Stop consults the installed validator before running ordinary checks; the
+Codex wrapper uses the same shared Stop path. Explicit `verify.sh` and the
+pre-commit hook run verification without receipt reuse. Ordinary receipts never
+replace independent verification, human approval or the other completion gates.
 
 An exit status of 0 from `run-check` still means the command exited 0 and
 nothing more. `run-check` does not read the key, the state or any receipt, and
@@ -864,20 +867,22 @@ authorities and are recorded in the enrollment as excluded.
 ### What the result is, and is not
 
 ```text
-candidate_pass   every required check returned zero for this snapshot
-candidate_fail   a required check did not
-refused / error  the authority would not or could not proceed
+authenticated_pass   every required check returned zero; the result is signed
+authenticated_fail   a required check did not; the result is signed
+identity_changed     the workspace changed; no receipt is published
+refused / error      the authority would not or could not proceed
 ```
 
 An optional check that fails is reported without blocking, which is the core's
 semantics. Any non-zero required check, any check that could not run, and an
 exhausted budget all make a candidate pass impossible.
 
-This is structured output of the orchestration, not evidence. It carries no
-signature, no sequence number and no receipt, and its vocabulary deliberately
-avoids `authentic`, `attested`, `verified` and `receipt`. Until a later slice
-adds signing, the authority can run a verification and observe it, and can do
-nothing reusable with the result.
+The response identifies the signed receipt and reserved sequence. Evidence
+comes from the authenticated receipt and authority-owned current state, not
+from trusting the response JSON alone. Both completed passes and failures are
+signed after identity revalidation; the validator decides whether they remain
+current and applicable. Neither result attests independent verification or
+human approval.
 
 ### Budget
 

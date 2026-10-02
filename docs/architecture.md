@@ -116,11 +116,15 @@ GitHub Actions is likewise a reference source of independent evidence, not a
 core dependency. The core validates a provider-neutral attestation contract;
 provider-specific API access stays outside the core.
 
-The same separation applies to the planned optimization for repeated ordinary
+The same separation applies to the optimization for repeated ordinary
 verification. [Authenticated verification receipts](authenticated-verification-receipts.md)
 bind check results to canonical worktree/control/contract identity, but only an
-authority-separated issuer can prove that those checks executed. Until such an
-issuer is configured, Stop continues to run the complete contract.
+authority-separated issuer can prove that those checks executed. The optional
+[local issuer](../examples/local-issuer/README.md) supplies authenticated worktree
+receipts that Stop can reuse for ordinary results. If neither an applicable
+receipt nor a fresh issuer evaluation supplies reusable evidence, Stop runs the
+complete contract. Independent verification and approval remain separate
+requirements.
 
 ## Completion deadline and host envelopes
 
@@ -150,7 +154,8 @@ so its envelope also reserves bounded state and sensory execution. Both adapters
 must leave finalization margin beyond the core budget and validate compatibility
 before checks start. Adapter limits never decide whether verification passes.
 They only ensure the host remains alive long enough for the core to return its
-decision. This budget model does not consume or trust Phase A receipts.
+decision. Receipt reuse requires authority-separated authenticated evidence;
+Phase A fingerprints alone never prove execution.
 
 ## Enforcement Vocabulary
 

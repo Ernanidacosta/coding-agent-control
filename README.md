@@ -678,6 +678,9 @@ including canonical worktree, contract, control, and mechanism identity. This
 is not an unsigned local cache: without an authority-separated issuer, Stop
 continues to execute the complete contract. A receipt file written by the
 executor is never accepted as proof that checks ran.
+With an installed local authority, Stop can reuse an authenticated, current,
+applicable worktree receipt for ordinary checks, including a recorded failure.
+Otherwise it obtains fresh verification or falls back to the complete contract.
 The [local issuer](examples/local-issuer/README.md) can approve an explicit
 Poetry runtime preparation in that contract and run it as the isolated runner
 before each check. Authenticated local issuance requires bubblewrap and working
@@ -821,11 +824,10 @@ Binding is deliberately conservative. If the shared classifier sees any
 uncommitted operationally relevant path, strong high/critical attestation is
 `RISK_ATTESTATION_UNBOUND`; commit the reviewed change and obtain evidence for
 that exact HEAD. Ignored metadata such as Markdown does not invalidate the
-binding. The worktree fingerprint defined for future authenticated ordinary
-receipts does not extend or replace this strong attestation contract. Until an
-authority-separated receipt issuer exists, no local worktree artifact can skip
-Stop verification. An attestation for a different commit is
-`RISK_ATTESTATION_STALE`.
+binding. Authenticated ordinary worktree receipts do not extend or replace this
+strong attestation contract. Stop can reuse their ordinary check results, but
+independent verification and approval remain separate requirements. An
+attestation for a different commit is `RISK_ATTESTATION_STALE`.
 
 Adding `approval = "true"`, creating `approval.json`, writing `By: human`, or
 claiming approval in chat is never accepted. Invalid JSON, missing target,
@@ -1244,8 +1246,8 @@ Use Codex skills with `$agent-md-verify` or `$visual-evidence`.
   the host remains responsible for ownership, mount integrity, package supply
   chain, and directories above the immediate parent.
 - Strong attestation currently binds only to a clean operational HEAD. The
-  separately defined worktree receipt fingerprint is not strong attestation
-  and remains inactive until an authority-separated issuer is available.
+  authenticated worktree receipts used by Stop are not strong attestation.
+  Staged receipt issuance and reuse remain unsupported.
 - Runtime applicability cannot be inferred generally. No configured
   runtime/smoke command produces a warning rather than false enforcement.
 - Independent evidence is conditional enforcement, not orchestration.

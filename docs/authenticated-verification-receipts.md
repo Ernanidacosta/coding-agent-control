@@ -1,14 +1,16 @@
 # Authenticated Verification Receipts
 
-Authenticated verification receipts are the planned optimization boundary
+Authenticated verification receipts are the optimization boundary
 between an explicit verification run and a later completion gate. They allow a
 gate to reuse ordinary check results only when an authority-separated provider
 proves both execution and freshness.
 
-This document defines protocol version 1. The current implementation provides
-canonical identity, payload, coverage, and validation-state functions, but does
-not configure an issuer, persist receipts, or consume them at Stop. Without a
-trusted issuer, Stop continues to execute the complete verification contract.
+This document defines the provider-neutral protocol version 1 model. The
+optional [local issuer](../examples/local-issuer/README.md) implements authenticated
+worktree issuance, publication and validation, and Stop can reuse its current
+applicable ordinary results. Its signed envelope and consumer decisions are
+documented in that guide. Without a trusted issuer, Stop continues to execute
+the complete verification contract.
 
 ## Security boundary
 
@@ -23,13 +25,14 @@ results. Repository scripts, file permissions controlled by the same user,
 timestamps, local hashes, and secrets available to the executor do not supply
 that authority.
 
-The planned disposable location is `.agent/verification/`. It is not a trust
-root and is structurally excluded from its own source identity. Deletion is
-safe: it produces an absent receipt and invokes the safe fallback.
+The disposable `.agent/verification/` namespace is not a trust root and is
+structurally excluded from source identity. The local issuer publishes receipts
+in its authority-owned `/var/lib/agent-md/projects/<id>/receipts/worktree/`
+store, rather than trusting a workspace cache.
 
 ## Provider-neutral operations
 
-A future provider adapter has two logical operations. The transport may be a
+A provider adapter has two logical operations. The transport may be a
 host capability or a direct external executable, but the JSON semantics remain
 the same.
 
@@ -205,10 +208,12 @@ gates remain separately calculated. An ordinary receipt never satisfies an
 
 ## Scope and fallback
 
-Protocol version 1 models both `worktree` and `staged` identities, but this phase
-does not issue or consume either. Worktree receipts can never satisfy staged
-verification. Staged receipts remain unsupported until checks run against a
-faithful materialization of the index rather than the normal worktree.
+Protocol version 1 models both `worktree` and `staged` identities. The local
+issuer issues worktree receipts and Stop consumes them when applicable.
+Worktree receipts can never satisfy staged verification. Staged issuance and
+reuse remain unsupported: checks do not run against a faithful materialization
+of the index. Explicit `verify.sh` and pre-commit continue to run verification
+without receipt reuse.
 
 The mandatory fallback is:
 
