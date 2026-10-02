@@ -87,3 +87,11 @@
 **Scope:** install.sh install_hook_config, warn_unsynchronized_envelope
 **Evidence:** tests/install-host-config-policy.bats
 **Added:** 2026-09
+
+## Historical local TLS startup intermittence
+
+**Rule:** Preserve bounded server.log, PID, port and process-liveness diagnostics when a local TLS probe fails; absence of recurrence does not establish a fix.
+**Why:** A Stop execution observed BIO_bind: Address already in use at port 50889 with the probe process dead. The competing socket/process was not identified. Both doctor tests later passed, without a change to the TLS probe.
+**Scope:** examples/local-issuer/authority-lib.sh, tests/authority-containment.bats, tests/authority-system-trust.bats
+**Evidence:** Historical VERIFY_REQUIRED_FAILED diagnostic; both doctor cases passed in GitHub Actions run 36968346146 for 17be88ea1502deabca963b4c034dd2922813f0bc.
+**Added:** 2026-10

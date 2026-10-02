@@ -2,26 +2,30 @@
 
 ## Current Contract
 
-- Main HEAD: da0fe3d0631921cc93248f0ea6e0493c79ab79fe; status remains verifying.
+- Verified technical checkpoint: 17be88ea1502deabca963b4c034dd2922813f0bc;
+  the owner approved Status done with Risk high.
 - agent-md.toml establishes per-check timeout 750 seconds and total timeout
   900 seconds. Required checks are lint and test; smoke is configured separately.
 - Canonical test command: bash tests/run.sh; current collection is 972 tests.
 - The local Risk proposal is high, stricter than the medium Git-bound baseline.
   Ordinary verification cannot satisfy its independent evidence requirement.
 
-## Remaining Completion Gates
+## Satisfied Technical Checkpoint Gates
 
-- [ ] Resolve the observed doctor TLS startup failure through separately
-  authorized focused work, without weakening TLS, system trust or fail-closed.
-- [ ] Obtain current applicable ordinary verification with no required failure;
-  use ./.agent-md/bin/verify.sh for official verification when authorized.
-- [ ] Establish an eligible independent trust baseline through the supported
-  reviewed procedure and obtain valid external evidence bound to the intended
-  clean operational HEAD. Do not let an anchor attest its own bootstrap change.
-- [x] Validate reconciled memory structure and git diff --check; retain visible
-  historical transition warnings rather than manufacture an intermediate state.
-- [ ] Satisfy all applicable state, Risk and completion requirements before
-  claiming done. No completion claim is made in this reconciliation.
+- [x] Normal commit hooks passed lint, smoke, test and operational state for
+  17be88e without bypass; all eight enrollment fixtures passed externally.
+- [x] External CI for the exact technical SHA passed all four jobs and 972/972
+  Bats tests with zero skips, including both doctor TLS tests.
+- [x] The owner reviewed da0fe3d as the human trust baseline; unchanged trust
+  files made 17be88e eligible for independent evidence.
+- [x] The configured provider returned independent PASS for 17be88e; the core
+  independent gate returned VERIFY_PASSED for that same SHA.
+- [x] Main and origin/main matched 17be88e with clean working tree and index
+  at owner approval; no known mandatory gate remained pending for that SHA.
+
+The historical TLS intermittence is retained as a gotcha, not declared fixed.
+The operational closure commit remains subject to normal hooks and fresh
+SHA-bound external evidence; the results below do not attest any descendant.
 
 ## Preserved Invariants
 
@@ -36,8 +40,27 @@
   concurrent-mutation detection, containment, immutable system trust and normal
   certificate validation. Staged issuance remains unsupported.
 - Ordinary receipts, smoke and pre-commit results are not independent evidence.
-- Memory remains outside receipt identity and technical commits; this phase
-  stages nothing, creates no commit and performs no push.
+- Memory remains outside receipt identity. Operational closure uses a separate
+  normal commit and push; executor-written memory never supplies attestation.
+
+## Final Technical Checkpoint Evidence
+
+- SHA: 17be88ea1502deabca963b4c034dd2922813f0bc, parent 23082db.
+- GitHub Actions run: https://github.com/Ernanidacosta/coding-agent-control/actions/runs/36968346146.
+- External shellcheck, static and install-smoke: PASS. Bats: 972 PASS, 0 FAIL,
+  0 skips; enrollment cases 28/29/31/32/33/35/37/38 all passed.
+- Normal pre-commit: lint, smoke, test and state PASS; commit exit 0, without
+  bypass. This is ordinary evidence, not independent verification.
+- Provider: ./examples/github-actions/github-actions-independent.sh, exit 0;
+  status pass, kind independent, origin ci, exact target.commit equal to the
+  full SHA above and reference equal to the external run above.
+- The existing core independent gate returned status pass, code VERIFY_PASSED,
+  exit 0, with an eligible unchanged trust anchor and clean commit binding.
+- No ordinary receipt, smoke result or pre-commit result substituted for that
+  independent evidence. The owner then explicitly approved checkpoint closure.
+- Audit sources: /tmp/cac-enrollment-fixtures-ii5ysqqn/ci-final.json,
+  ci-test-summary.json, provider-attestation.json, independent-gate.json,
+  successful-commit.json and final-integrity.json.
 
 ## Historical Evidence — Administrative Bootstrap
 
@@ -61,7 +84,7 @@
 - This establishes the historical staged result only; it does not override the
   later Stop failure or satisfy independent verification. No push was performed.
 
-## Later Verification — Stop Failure
+## Historical Later Verification — Stop Failure
 
 - The later Stop reported VERIFY_REQUIRED_FAILED for bash tests/run.sh, exit 1.
   The failing test was tests/authority-system-trust.bats:298, "local issuer
@@ -72,22 +95,21 @@
 - Source: the subsequent Stop hook output supplied in the checkpoint handoff.
   This demonstrates a bind-occupied failure in that execution. The competing
   process/socket state and cause of any other intermittence remain unknown.
-- The latest reported full verification was not approved. No rerun or technical
-  fix is claimed by this memory reconciliation.
+- That execution was not approved. Both doctor tests passed in the later
+  final technical CI run above; this non-reproduction does not establish a fix.
 
-## Independent Verification — Pending
+## Independent Trust Establishment
 
-- Independent verification remains pending/untrusted. The last reported warning
-  was RISK_ATTESTATION_UNTRUSTED / trusted-file-modified; its current cause has
-  not been reassessed after the workflow was committed in da0fe3d.
-- Review of the current verifier baseline and establishment procedure belongs
-  to the next separate phase. No trust-anchor change or local attestation is
-  authorized here, and no external SHA-bound evidence is claimed.
+- The former trusted-file-modified warning no longer reproduced after the
+  workflow was committed. The owner reviewed da0fe3d's exact trust-file hashes
+  out of band; that human review was not CI or independent attestation.
+- Workflow, verifier, config and agent-md.toml remained unchanged through
+  23082db and 17be88e. Independent evidence for 17be88e came from its own
+  successful external CI run and the configured verifier, as recorded above.
 
 ## Historical State Warning
 
-HEAD:memory/progress.md still declares done for the previous task. The work was
-reopened and the true local status is verifying. The direct HEAD-to-worktree
-comparison can therefore still emit STATE_TRANSITION_INVALID until a new
-operational baseline is established. This is an advisory history warning, not
-permission to fabricate done -> active -> verifying or to release a real block.
+The reopened 32eab15 baseline declared done and its verifying proposal produced
+an advisory historical transition warning. Later operational commits established
+verifying. The owner now approves verifying -> done, an allowed transition;
+no intermediate state is fabricated and no blocking guarantee is released.

@@ -2,24 +2,23 @@
 
 ## Current Phase
 
-Reconcile the operational state of checkpoint da0fe3d, then investigate
-independent verification trust as a separate phase. The timeout bootstrap and
-technical consolidation are complete; the checkpoint remains verifying.
+The owner approved completion of technical checkpoint
+17be88ea1502deabca963b4c034dd2922813f0bc after its ordinary, external CI and
+independent gates passed. Record operational closure with Status done and
+Risk high; use normal hooks and push, without changing technical policy.
 
 Local issuance, authenticated receipts, Stop reuse, isolated execution and
 system trust are implemented. Their architecture is not being reopened.
 
 ## Remaining Work
 
-1. Review the completed reconciliation and structural validation of the four
-   approved memory files before authorizing the next phase.
-2. After review, investigate the independent verifier baseline, declared trust
-   files and the procedure for valid external evidence bound to the correct HEAD.
-3. Keep the later system-trust doctor bind failure as a separate functional
-   blocker; obtain owner direction before technical follow-up.
-4. Complete the applicable official and independent verification gates on the
-   intended final content before claiming completion. No new full suite is
-   authorized during memory reconciliation.
+No technical work remains in this checkpoint. The operational closure commit
+must pass normal hooks and receive fresh external evidence for its own SHA;
+17be88e's attestation cannot cover a descendant. No extra manual suite is
+authorized beyond what the hooks require.
+
+The historical TLS bind failure remains a known observation, not a current
+reproduced blocker or a claimed fix. See memory/gotchas.md.
 
 ## Decisions Still In Force
 
@@ -39,8 +38,8 @@ system trust are implemented. Their architecture is not being reopened.
   independent identity samples used during receipt validation. Do not cache
   across samples or hide concurrent workspace mutation.
 - Ordinary receipts never satisfy independent verification or approval.
-- Local working memory remains outside receipt identity and technical staging
-  or commits; this reconciliation creates no commit.
+- Local working memory remains outside receipt identity. Its authorized closure
+  commit is separate from technical changes and never supplies attestation.
 
 ## Deferred / Out of Scope
 
@@ -48,12 +47,12 @@ system trust are implemented. Their architecture is not being reopened.
 - Further performance investigation, timeout changes or architectural redesign
   without new concrete evidence and owner direction; the budget is now 750/900.
 - Technical code, CI, external documentation or trust-anchor changes during
-  memory reconciliation. Independent trust investigation comes afterward.
-- Commits, hook bypasses, push or a done claim in this phase.
+  operational closure.
+- Further TLS changes without new evidence and owner direction.
+- Hook bypasses, force push or reuse of a previous SHA's independent evidence.
 
 ## Operational Warning
 
-HEAD still records the previous task as done in memory/progress.md. Work was
-reopened and the true local status is verifying. STATE_TRANSITION_INVALID may
-remain visible until a new operational baseline is established; do not invent
-or manufacture intermediate status transitions to suppress it.
+The earlier done-to-verifying warning belonged to the reopened 32eab15
+baseline. Operational commits established verifying; the current owner-approved
+transition is verifying -> done. No intermediate status is fabricated.
