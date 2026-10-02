@@ -88,10 +88,10 @@
 **Evidence:** tests/install-host-config-policy.bats
 **Added:** 2026-09
 
-## Historical local TLS startup intermittence
+## Local TLS listener allocation
 
-**Rule:** Preserve bounded server.log, PID, port and process-liveness diagnostics when a local TLS probe fails; absence of recurrence does not establish a fix.
-**Why:** A Stop execution observed BIO_bind: Address already in use at port 50889 with the probe process dead. The competing socket/process was not identified. Both doctor tests later passed, without a change to the TLS probe.
-**Scope:** examples/local-issuer/authority-lib.sh, tests/authority-containment.bats, tests/authority-system-trust.bats
-**Evidence:** Historical VERIFY_REQUIRED_FAILED diagnostic; both doctor cases passed in GitHub Actions run 36968346146 for 17be88ea1502deabca963b4c034dd2922813f0bc.
+**Rule:** Let each doctor TLS server allocate/reserve its loopback port at bind to port zero and use the post-listen ACCEPT endpoint. Preserve bounded startup diagnostics and use noninteractive server mode when retaining ACCEPT output.
+**Why:** Random ports remained unreserved until bind; occupied-port collisions were reproduced in trusted and untrusted probes. Kernel allocation at bind eliminates that race. Interactive OpenSSL can close on stdin EOF even with -ign_eof.
+**Scope:** examples/local-issuer/authority-lib.sh, tests/authority-system-trust.bats
+**Evidence:** Competing-bind regression failed before the fix and passed afterward; startup/readiness cases verify fail-closed diagnostics and cleanup.
 **Added:** 2026-10

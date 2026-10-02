@@ -298,3 +298,114 @@ PY
   [ "$status" -eq 0 ] || { printf '%s\n' "$output" >&2; return 1; }
   [[ "$output" == *'trusted local HTTPS passed; untrusted certificate rejected'* ]]
 }
+
+@test "local issuer doctor keeps both TLS listeners allocated despite a competing bind" {
+  mkdir "$FIXTURE/bin"
+  cat > "$FIXTURE/bin/openssl" <<'SH'
+#!/bin/bash
+if [ "$1" != s_server ]; then exec "$TLS_REAL_OPENSSL" "$@"; fi
+exec python3 - "$@" <<'PY'
+import os
+import socket
+import sys
+from pathlib import Path
+
+args = sys.argv[1:]
+endpoint = args[args.index('-accept') + 1]
+key = Path(args[args.index('-key') + 1])
+phase = 'untrusted' if key.name == 'untrusted.key' else 'trusted'
+root = Path(os.environ['TLS_TEST_DIR'])
+with socket.socket() as competitor:
+    # Occupy the requested port before the real server binds, without listening.
+    competitor.bind(('127.0.0.1', int(endpoint.rsplit(':', 1)[1])))
+    competitor.set_inheritable(True)
+    (root / f'{phase}.pid').write_text(str(os.getpid()))
+    (root / f'{phase}.probe').write_text(str(key.parent))
+    (root / f'{phase}.competitor-port').write_text(str(competitor.getsockname()[1]))
+    os.execv(os.environ['TLS_REAL_OPENSSL'], [os.environ['TLS_REAL_OPENSSL'], *args])
+PY
+SH
+  chmod +x "$FIXTURE/bin/openssl"
+  run env TLS_TEST_DIR="$FIXTURE" TLS_REAL_OPENSSL="$(command -v openssl)" \
+    PATH="$FIXTURE/bin:$PATH" bash \
+    "$BATS_TEST_DIRNAME/../examples/local-issuer/agent-md-authority" doctor --root "$FIXTURE/staging"
+  [ "$status" -eq 0 ] || { printf '%s\n' "$output" >&2; return 1; }
+  [[ "$output" == *'trusted local HTTPS passed; untrusted certificate rejected'* ]]
+  for phase in trusted untrusted; do
+    [ -s "$FIXTURE/$phase.competitor-port" ]
+    run kill -0 "$(cat "$FIXTURE/$phase.pid")"
+    [ "$status" -ne 0 ]
+    [ ! -e "$(cat "$FIXTURE/$phase.probe")" ]
+  done
+}
+
+@test "local issuer doctor preserves startup diagnostics and cleanup for either dead TLS server" {
+  mkdir "$FIXTURE/bin"
+  local phase
+  cat > "$FIXTURE/bin/openssl" <<'SH'
+#!/bin/bash
+if [ "$1" != s_server ]; then exec "$TLS_REAL_OPENSSL" "$@"; fi
+args=("$@")
+phase=trusted
+while [ "$1" != -key ]; do shift; done
+key=$2
+[[ "$key" != */untrusted.key ]] || phase=untrusted
+printf '%s' "$$" > "$TLS_TEST_DIR/$phase.pid"
+dirname "$key" > "$TLS_TEST_DIR/$phase.probe"
+if [ "$phase" = "$TLS_FAIL_PHASE" ]; then
+  printf 'forced TLS startup failure\n' >&2
+  exit 23
+fi
+exec "$TLS_REAL_OPENSSL" "${args[@]}"
+SH
+  chmod +x "$FIXTURE/bin/openssl"
+  for phase in trusted untrusted; do
+    run env TLS_TEST_DIR="$FIXTURE" TLS_REAL_OPENSSL="$(command -v openssl)" \
+      TLS_FAIL_PHASE="$phase" PATH="$FIXTURE/bin:$PATH" bash \
+      "$BATS_TEST_DIRNAME/../examples/local-issuer/agent-md-authority" doctor --root "$FIXTURE/staging"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *'local TLS server did not start'* ]]
+    [[ "$output" == *"pid=$(cat "$FIXTURE/$phase.pid") port=0 alive=no exit_status=23"* ]]
+    [[ "$output" == *'server.log: forced TLS startup failure'* ]]
+    if [ "$phase" = untrusted ]; then
+      [[ "$output" == *'untrusted local TLS server did not start'* ]]
+    fi
+    for record in "$FIXTURE"/*.pid; do
+      run kill -0 "$(cat "$record")"
+      [ "$status" -ne 0 ]
+      [ ! -e "$(cat "${record%.pid}.probe")" ]
+    done
+  done
+}
+
+@test "local issuer doctor rejects an invalid readiness port from a live TLS server" {
+  mkdir "$FIXTURE/bin"
+  cat > "$FIXTURE/bin/openssl" <<'SH'
+#!/bin/bash
+if [ "$1" != s_server ]; then exec "$TLS_REAL_OPENSSL" "$@"; fi
+exec python3 - "$@" <<'PY'
+import os
+import signal
+import sys
+from pathlib import Path
+
+root = Path(os.environ['TLS_TEST_DIR'])
+key = Path(sys.argv[sys.argv.index('-key') + 1])
+(root / 'server.pid').write_text(str(os.getpid()))
+(root / 'server.probe').write_text(str(key.parent))
+print('ACCEPT 127.0.0.1:65536', flush=True)
+signal.pause()
+PY
+SH
+  chmod +x "$FIXTURE/bin/openssl"
+  run env TLS_TEST_DIR="$FIXTURE" TLS_REAL_OPENSSL="$(command -v openssl)" \
+    PATH="$FIXTURE/bin:$PATH" bash \
+    "$BATS_TEST_DIRNAME/../examples/local-issuer/agent-md-authority" doctor --root "$FIXTURE/staging"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *'local TLS server did not start'* ]]
+  [[ "$output" == *"pid=$(cat "$FIXTURE/server.pid") port=0 alive=yes exit_status=unavailable"* ]]
+  [[ "$output" == *'server.log: ACCEPT 127.0.0.1:65536'* ]]
+  run kill -0 "$(cat "$FIXTURE/server.pid")"
+  [ "$status" -ne 0 ]
+  [ ! -e "$(cat "$FIXTURE/server.probe")" ]
+}

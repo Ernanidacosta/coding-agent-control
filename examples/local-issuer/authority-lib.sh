@@ -1001,7 +1001,7 @@ authority_tls_startup_diagnostic() {
 # and the server remain outside the project sandbox.
 authority_sandbox_tls_capability() (
   local probe='' prefix=() runner_uid port server='' ready=0 attempt
-  local output reason
+  local output reason bound_port
   probe=$(mktemp -d "${TMPDIR:-/tmp}/agent-md-tls-probe.XXXXXX") || return 1
   trap 'if [ -n "$server" ]; then kill "$server" 2>/dev/null || true; wait "$server" 2>/dev/null || true; fi; chmod -R u+w "$probe" 2>/dev/null; rm -rf "$probe"' EXIT
   chmod 0755 "$probe"
@@ -1042,13 +1042,18 @@ authority_sandbox_tls_capability() (
   fi
   authority_sandbox_arguments "$probe/snapshot" "$probe/scratch" /usr/bin:/bin \
     "$probe/view" || { printf 'cannot construct the local TLS sandbox'; return 1; }
-  port=$((20000 + RANDOM % 40000))
-  openssl s_server -accept "127.0.0.1:$port" -cert "$probe/server.pem" \
-    -key "$probe/server.key" -quiet > "$probe/server.log" 2>&1 &
+  # The server allocates its own port at bind; -www avoids interactive stdin EOF
+  # while retaining the ACCEPT endpoint emitted after listen.
+  port=0
+  openssl s_server -accept 127.0.0.1:0 -cert "$probe/server.pem" \
+    -key "$probe/server.key" -www </dev/null > "$probe/server.log" 2>&1 &
   server=$!
   for attempt in {1..100}; do
-    if ( : > "/dev/tcp/127.0.0.1/$port" ) 2>/dev/null; then ready=1; break; fi
     kill -0 "$server" 2>/dev/null || break
+    bound_port=$(sed -n 's/^ACCEPT 127\.0\.0\.1:\([0-9]*\)$/\1/p' "$probe/server.log")
+    if [[ "$bound_port" =~ ^[1-9][0-9]{0,4}$ ]] && [ "$bound_port" -le 65535 ]; then
+      port=$bound_port; ready=1; break
+    fi
     sleep 0.02
   done
   if [ "$ready" -ne 1 ]; then
@@ -1067,14 +1072,17 @@ authority_sandbox_tls_capability() (
   kill "$server" 2>/dev/null || true
   wait "$server" 2>/dev/null || true
   server=''
-  port=$((20000 + RANDOM % 40000))
-  openssl s_server -accept "127.0.0.1:$port" -cert "$probe/snapshot/untrusted.pem" \
-    -key "$probe/untrusted.key" -quiet > "$probe/untrusted-server.log" 2>&1 &
+  port=0
+  openssl s_server -accept 127.0.0.1:0 -cert "$probe/snapshot/untrusted.pem" \
+    -key "$probe/untrusted.key" -www </dev/null > "$probe/untrusted-server.log" 2>&1 &
   server=$!
   ready=0
   for attempt in {1..100}; do
-    if ( : > "/dev/tcp/127.0.0.1/$port" ) 2>/dev/null; then ready=1; break; fi
     kill -0 "$server" 2>/dev/null || break
+    bound_port=$(sed -n 's/^ACCEPT 127\.0\.0\.1:\([0-9]*\)$/\1/p' "$probe/untrusted-server.log")
+    if [[ "$bound_port" =~ ^[1-9][0-9]{0,4}$ ]] && [ "$bound_port" -le 65535 ]; then
+      port=$bound_port; ready=1; break
+    fi
     sleep 0.02
   done
   if [ "$ready" -ne 1 ]; then
