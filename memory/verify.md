@@ -1,6 +1,6 @@
 # Verification
 
-- Confirm one canonical procedure covers prior HEAD, approved diff, explicit owner approval, one establishment act, intact hooks/configuration, no manufactured evidence, full later verification, verifying state and created-SHA/content audit.
-- Validate directive mirrors, local links/anchors, git diff --check and progress format with the shared state validator; preserve direct done -> active -> verifying -> done transitions and the established high Risk.
-- Run existing focused directives/public wording/policy checks and relevant conservative-baseline tests. Do not run the full suite manually before a commit.
-- Owner authorized consolidation with normal hooks and pushes. Require external CI and SHA-bound independent verification for the documentary and each operational checkpoint; run the full verify.sh entry point on the final done HEAD. The documented administrative exception is not authorized for use in this task. Keep public documentation unchanged and stop after this checkpoint sequence.
+- Confirm one canonical procedure identifies trust-changing SHA and committed paths/modes/hashes, external review and explicit owner baseline approval, refusal of self-attestation, a legitimate unchanged descendant, external CI, exact-SHA attestation and normal gates in verifying.
+- Preserve distinctions: human review, ordinary receipts and pre-commit PASS do not replace independent verification; different-SHA evidence is stale and there is no executor self-approval or automatic bypass.
+- Validate directive mirrors, local links/anchors, git diff --check and progress with the shared state validator; preserve done -> active and the existing high Risk proposal without changing project policy.
+- Run focused directives/policy/public wording checks and existing provider/core trust cases. No manual full suite before commit; this handoff authorizes no commit, push or bootstrap execution. Keep active and stop after the bounded documentation task.

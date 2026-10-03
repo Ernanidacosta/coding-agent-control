@@ -58,28 +58,11 @@ writes GitHub state. Authentication may come from a protected host login,
 `A verifier cannot bootstrap trust in the same untrusted change that introduces
 or modifies it.`
 
-```text
-untrusted verifier change
-        -> human/operational review outside the executor
-        -> checkpoint commit
-        -> verifier, config, dependencies, and workflow become HEAD baseline
-        -> future commit
-        -> external CI
-        -> exact-SHA attestation
-        -> coding-agent-control verification
-```
-
-For this repository:
-
-1. Commit and review the generic Trust & Attestation hardening.
-2. Add this verifier, its non-secret config, tests, and trusted-file declaration.
-3. Commit and review that bootstrap change. The verifier deliberately refuses
-   to attest this commit because its own trust chain changed versus `HEAD^`.
-4. Let GitHub Actions run for the bootstrap SHA as ordinary CI evidence, without
-   treating it as the independent attestation that approves its own verifier.
-5. On a later high-risk commit that does not alter the verifier, config, or
-   target workflow, run the verifier and feed its JSON to
-   coding-agent-control normally.
+Follow the [canonical independent verification trust bootstrap procedure](../../docs/architecture.md#independent-verification-trust-bootstrap).
+It binds the owner's baseline approval to the exact trust-changing SHA and
+reviewed file hashes, then requires a legitimate descendant preserving that
+chain, external CI and attestation for the descendant's own SHA. An empty commit
+just to make the provider eligible is not permitted.
 
 This root is established out-of-band. There is no force-trust, skip-attestation,
 automatic-baseline, or self-approval mechanism. A bootstrap CI success is

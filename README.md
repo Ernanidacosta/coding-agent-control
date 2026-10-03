@@ -877,23 +877,17 @@ HTML scraping, token persistence, or automatic `gh` installation.
 Bootstrap is deliberately out-of-band and non-circular: **a verifier cannot
 bootstrap trust in the same untrusted change that introduces or modifies it.**
 
-```text
-untrusted verifier change
-        -> human/operational review outside the executor
-        -> checkpoint commit
-        -> verifier, config, dependencies, and workflow become HEAD baseline
-        -> future commit
-        -> external CI
-        -> exact-SHA attestation
-        -> verification
-```
+Follow the [canonical independent verification trust bootstrap procedure](docs/architecture.md#independent-verification-trust-bootstrap)
+to review and approve the exact trust-changing SHA and committed file hashes.
+Its first attestable successor must have a legitimate purpose and preserve the
+reviewed chain; it needs its own external CI and exact-SHA attestation.
 
 The reference verifier rejects a HEAD commit that changes its executable,
 provider config, or target workflow relative to `HEAD^`. CI for the bootstrap
 commit may be useful smoke information, but cannot independently approve the
-trust anchor that defines that CI evidence. Bootstrap is operationally accepted
-only after external review creates the checkpoint and doctor observes the
-committed anchor and dependencies clean in HEAD. There is no `--force-trust`,
+trust anchor that defines that CI evidence. Core/doctor eligibility after commit
+reports local integrity, not human approval or a passing provider result.
+There is no `--force-trust`,
 `trust=true`, `skip-attestation`, automatic baseline, or self-approval path.
 
 #### First future high-risk cycle

@@ -189,7 +189,7 @@ Approval to edit a policy is not approval to skip a commit gate. A hook's
 
 This administrative approval does not replace a configured `verify.approval`
 verifier for Risk downgrades or critical completion. Introducing or modifying a
-trust anchor still follows the separate [root-of-trust bootstrap](../README.md#root-of-trust-bootstrap): it cannot
+trust anchor still follows the separate [independent verification trust bootstrap](#independent-verification-trust-bootstrap): it cannot
 attest its own introduction. Necessary adapter synchronization must preserve
 normal enforcement; see [Completion deadline and host envelopes](#completion-deadline-and-host-envelopes).
 
@@ -203,6 +203,98 @@ rejected alternatives remain outside this procedure:
 | Change the baseline/proposal resolver | Weakens the conservative boundary for ordinary work |
 | Add a special variable or flag to coding-agent-control | Creates a generic product bypass interface |
 | Use Git plumbing to create a commit and advance refs | Avoids the normal commit interface and makes the exception harder to audit |
+
+### Independent verification trust bootstrap
+
+This is the canonical procedure when a change introduces or modifies the chain
+that supplies independent verification. The human project owner must approve
+the new baseline after review outside the executor; the executor cannot approve
+its own trust change. Git records content and history, not proof of that review.
+
+For the GitHub Actions reference provider, the trusted files are its executable,
+`examples/github-actions/github-actions-independent.conf`, and the workflow
+named by that config (here `.github/workflows/ci.yml`). `agent-md.toml` declares
+the executable, trusted dependencies and capabilities; review those declarations
+as well. The core checks the command and trust declarations against `HEAD`, the
+executable implicitly, and every declared dependency explicitly.
+
+These checks answer different questions. Core `trusted-file-modified` means a
+declared dependency differs from `HEAD` under `git diff --quiet HEAD`; a modified
+executable has reason `modified`, and changed declarations have their own
+configuration reasons. After a commit, `clean-vs-head` eligibility proves local
+integrity, not human approval or successful independent execution. Separately,
+the reference provider compares its executable, companion config and configured
+workflow between `HEAD^` (the first parent) and `HEAD` using `git diff-tree`.
+Any change in their content or modes prevents that SHA from attesting itself;
+a root commit without a parent is also refused. This parent comparison does not
+cover all of `agent-md.toml` or infer whether human review occurred.
+
+```text
+trusted baseline -> trust-changing commit A -> human review of A
+                 -> legitimate descendant B with unchanged trust chain
+                 -> external CI for B -> independent attestation for B
+                 -> normal completion gates
+```
+
+1. **Identify the trust-changing SHA.** Record the full commit A, its first
+   parent (or absence), exact committed diff and affected trust paths. Use normal commit
+   gates; this procedure grants no commit exception or push authorization.
+2. **Review the committed material externally.** The owner, or a reviewer
+   accountable to the owner and separate from the executor, inspects A's
+   executable, config, workflow, declared dependencies and policy declarations.
+   Record paths, modes and hashes of their committed contents, bound to A, in
+   the external review record. Inspect what the workflow actually verifies and
+   the provider's repository/workflow binding, not merely the file names.
+   For this repository and a non-root A, set `trust_change_sha` to its full SHA:
+
+   ```bash
+   git show -s --format=fuller "$trust_change_sha"
+   git diff --no-ext-diff --no-textconv --binary --full-index "$trust_change_sha^" "$trust_change_sha"
+   git ls-tree "$trust_change_sha" -- agent-md.toml examples/github-actions/github-actions-independent.sh examples/github-actions/github-actions-independent.conf .github/workflows/ci.yml
+   ```
+
+   `git ls-tree` supplies committed blob hashes and modes. Hashes bind reviewed
+   contents; an executor-generated hash or note does not prove owner approval.
+3. **Approve A explicitly as the human baseline.** The owner records approval
+   naming A and the reviewed material/hashes, reviewer and review reference.
+   This authorizes that trust baseline only. Human review is not an attestation,
+   does not prove checks ran or passed, and does not satisfy configured final
+   independent or approval evidence requirements. Keep the work in `verifying`.
+4. **Do not self-attest A.** Its external CI may provide diagnostics, but must
+   not be accepted as independent attestation approving the chain that produced
+   it. Neither `pre-commit` PASS nor an ordinary verification receipt substitutes
+   for independent verification. The provider's refusal remains in force even
+   when the core reports the files clean against `HEAD`.
+5. **Produce a legitimate descendant B.** B must have its own reviewed purpose,
+   such as a necessary operational handoff or a real subsequent change; never
+   create an empty commit merely to satisfy the provider. Preserve the reviewed
+   trust material and declarations from A through B. The first candidate
+   attestable SHA is such a descendant with the provider's three trust paths
+   unchanged against its own first parent, not A itself. If the chain changes
+   again, review that new trust-changing SHA and restart this procedure.
+6. **Obtain external CI for B.** Follow ordinary commit/push authority and run
+   the configured external workflow for B's full SHA. For the reference
+   provider, the newest matching run must be `completed` with `success`; an
+   older success cannot override a newer pending or failed run. Missing external
+   capability or failed CI supplies no passing evidence.
+7. **Validate the exact attestation.** With B as `HEAD` and no uncommitted
+   operational changes, obtain evidence from the eligible established verifier.
+   Require exit zero and one JSON object with
+   `status: pass`, `kind: independent`, an allowed validated origin and
+   `target.commit` equal to B's full SHA. An attestation for A or any different
+   SHA is stale/invalid for B, even if that earlier SHA passed CI.
+8. **Finish through normal gates.** Keep `verifying` until all applicable
+   verification, state, Risk and approval gates pass. Obtain final Risk evidence
+   before requesting `done`; the full `./.agent-md/bin/verify.sh` entry point
+   validates the final claim and its conditional Risk evidence normally. Every subsequent
+   operational SHA, including a final state checkpoint, needs its own applicable
+   CI and exact-SHA attestation. Review, commit success, ordinary receipts and
+   local checks do not release a failed, timed-out or unavailable required gate.
+
+There is no automatic bypass, force-trust or executor self-approval in this
+bootstrap. Human baseline approval establishes authority for the reviewed chain;
+independent attestation proves only the validated external result for its exact
+target. Both remain separate from any configured critical human approval gate.
 
 ## Optional Capabilities
 

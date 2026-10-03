@@ -188,18 +188,12 @@ implement the same JSON attestation contract without core changes.
 #### Root-of-Trust Bootstrap
 
 A new or modified trust anchor begins untrusted and cannot validate its own
-introduction. The initial root of trust is established by human or operational review outside the executor:
-
-```text
-untrusted verifier change
-        -> human review
-        -> checkpoint commit
-        -> verifier, config, dependencies, and workflow become the HEAD baseline
-        -> future commit
-        -> external CI
-        -> SHA-bound attestation
-        -> verification
-```
+introduction. The initial root of trust is established by human review outside the executor,
+under the human project owner's authority. Follow the
+[canonical independent verification trust bootstrap procedure](https://github.com/Ernanidacosta/coding-agent-control/blob/main/docs/architecture.md#independent-verification-trust-bootstrap)
+for approval of the exact trust-changing SHA and reviewed file hashes, followed
+by a legitimate descendant with unchanged trust material and its own external
+CI and SHA-bound attestation. Never create an empty commit just to become eligible.
 
 The bootstrap commit may use its CI result as diagnostic information, but not
 as independent evidence approving that same trust-anchor change. There is no trust bypass,
