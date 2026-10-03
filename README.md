@@ -637,6 +637,10 @@ before starting an expensive check and fails closed with
 `VERIFY_HOST_TIMEOUT_INCOMPATIBLE` when an edited policy and installed adapter
 are out of sync. Rerun the installer after changing the total budget.
 
+If the current baseline obstructs committing an approved replacement policy,
+follow the owner-controlled [administrative policy bootstrap procedure](docs/architecture.md#administrative-policy-bootstrap).
+The establishment exception is not verification and grants no push permission.
+
 Legacy configuration does not silently reinterpret 300 seconds per check as
 300 seconds total. When only a per-check timeout exists, the core derives a
 ceiling from every potentially executable ordinary/provider stage plus a
@@ -1207,7 +1211,8 @@ Use Codex skills with `$agent-md-verify` or `$visual-evidence`.
 
 - A rules file cannot force judgment by itself.
 - Hooks only cover events exposed by the host agent.
-- Pre-commit hooks can be bypassed with `git commit --no-verify`.
+- Git permits `git commit --no-verify` to skip its commit gates. This is not
+  authorization: administrative use is limited to the [reviewed policy bootstrap](docs/architecture.md#administrative-policy-bootstrap).
 - Bash safety hooks are guardrails, not a sandbox.
 - Cursor and Windsurf get rules plus optional git-hook fallback, not
   native runtime enforcement from this repo.

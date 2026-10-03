@@ -101,6 +101,109 @@ This is deliberately not a general private control-state system. Projects that
 require deterministic authorship or durable approval provenance must supply an
 external authority and repository protections appropriate to that guarantee.
 
+### Administrative policy bootstrap
+
+This is the canonical procedure for establishing a legitimately reviewed policy
+when the current baseline can prevent its own replacement. It is an exceptional
+owner-controlled administrative act, not an alternative verification path.
+Use normal commit hooks whenever they can establish the reviewed policy.
+
+The conservative resolver remains unchanged. For example, a baseline with
+`timeout_seconds = 600` and an approved proposal with `750` still resolves to
+`600` before establishment. Non-deterministic timeouts under that ceiling can
+block the very commit that would make `750` the baseline. An executor may report
+this obstruction; it cannot authorize an exception for itself.
+
+Only the human project owner may explicitly authorize the following procedure.
+Approval to edit a policy is not approval to skip a commit gate. A hook's
+`--no-verify` hint is diagnostic, not authorization.
+
+1. **Identify the prior baseline and obstruction.** Record the full previous
+   `HEAD` SHA, the affected policy requirements and the evidence that the old
+   baseline obstructs establishment. Preserve any failed check's command, exit
+   status and diagnostic; never relabel it as passing. This procedure does not
+   excuse an unrelated failing check or an invalid replacement policy.
+2. **Prepare the bounded proposal.** Stage only the reviewed policy changes and
+   necessary checkpoint metadata, following the project's tracking policy.
+   Keep `memory/progress.md` in `verifying` once the proposal is ready; preserve
+   valid state and Risk declarations. Do not disable, rename or repoint hooks,
+   or change hook-selection configuration to make the commit possible.
+3. **Capture the exact authorization target.** Save the complete staged patch
+   against the prior SHA, including paths, content and modes, and the proposed
+   commit message. For example, with `previous_head` set to that recorded SHA:
+
+   ```bash
+   git diff --cached --no-ext-diff --no-textconv --binary --full-index "$previous_head"
+   ```
+
+   Keep this patch and the obstruction evidence in the project's review record.
+4. **Obtain explicit owner approval.** The owner's record must name the prior
+   SHA, exact patch or its immutable reference, policy change and reason,
+   reviewed message, and permission for **one** establishment commit using
+   `git commit --no-verify`. It must acknowledge that both `pre-commit` and
+   `commit-msg` are skipped and that complete verification follows. Record the
+   owner and approval reference in the audit trail; an executor-written note,
+   boolean or hash is not owner authorization or an approval attestation.
+5. **Recheck the binding immediately before execution.** Compare current `HEAD`
+   with the approved prior SHA and repeat the staged diff above. Inspect the
+   actual message and authorship as well, because `commit-msg` will not run.
+   If the SHA, patch or message differs, stop and obtain new approval. No
+   unrelated change, automatic amend or retry is covered by this authorization.
+6. **Establish once.** The owner performs the act, or explicitly authorizes the
+   executor to perform that exact invocation. With `approved_message_file`
+   naming the reviewed message, the permitted Git operation is:
+
+   ```bash
+   git commit --no-verify -F "$approved_message_file"
+   ```
+
+   The exception expires with this one invocation. It creates no persistent
+   bypass setting and grants no permission to push. Host/repository protections
+   and fatal Safety results remain in force.
+7. **Audit what was established.** Record the full created SHA, its parent,
+   actual message and committed patch, and compare them with the authorization:
+
+   ```bash
+   git rev-parse HEAD HEAD^
+   git show -s --format=fuller HEAD
+   git diff --no-ext-diff --no-textconv --binary --full-index "$previous_head" HEAD
+   ```
+
+   Preserve the owner-approval reference and all differences or errors. Git
+   binds content and history; it does not prove human authorship. Any mismatch
+   remains unaccepted and requires owner review, not silent correction.
+8. **Do not manufacture evidence.** Commit exit zero proves only that Git
+   created a commit. The exception and its audit record are not PASS, receipt,
+   independent evidence or approval attestation. They cannot satisfy required
+   verification or authorize a completion claim.
+9. **Verify under the established baseline.** Keep `verifying` and run
+   `./.agent-md/bin/verify.sh` with normal enforcement for the created SHA,
+   without unreviewed operational changes. An unchanged proposal
+   now matches the new `HEAD`; any further proposal still merges conservatively.
+   Complete applicable runtime/smoke, state, Risk, independent and approval gates
+   with evidence bound to the resulting SHA. If final Risk evidence is deferred
+   until `done` by the core, obtain it before requesting that transition and
+   validate the final done claim normally. Any new operational SHA needs its own
+   applicable evidence. A failure, timeout or unavailable required capability
+   stays blocking; the commit exception cannot be reused to accept it.
+
+This administrative approval does not replace a configured `verify.approval`
+verifier for Risk downgrades or critical completion. Introducing or modifying a
+trust anchor still follows the separate [root-of-trust bootstrap](../README.md#root-of-trust-bootstrap): it cannot
+attest its own introduction. Necessary adapter synchronization must preserve
+normal enforcement; see [Completion deadline and host envelopes](#completion-deadline-and-host-envelopes).
+
+The execution choice stays limited to Git's per-invocation option. The previously
+rejected alternatives remain outside this procedure:
+
+| Alternative | Why it is not the administrative mechanism |
+|---|---|
+| Change `core.hooksPath`, including a command-local override | Changes which hooks run and obscures the intended commit-gate exception |
+| Rename or remove a hook | Alters enforcement files and introduces restoration risk |
+| Change the baseline/proposal resolver | Weakens the conservative boundary for ordinary work |
+| Add a special variable or flag to coding-agent-control | Creates a generic product bypass interface |
+| Use Git plumbing to create a commit and advance refs | Avoids the normal commit interface and makes the exception harder to audit |
+
 ## Optional Capabilities
 
 External capabilities are conditional. Missing optional capability must not

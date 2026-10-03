@@ -495,6 +495,12 @@ Stop validates a completion claim and does not require a commit; pre-commit
 validates the declared commit boundary and should contain expensive checks
 only when the project explicitly configures them.
 
+Administrative establishment of an approved replacement policy is a separate
+owner-controlled act. Follow the [canonical administrative policy bootstrap procedure](https://github.com/Ernanidacosta/coding-agent-control/blob/main/docs/architecture.md#administrative-policy-bootstrap).
+Approval to edit policy, a hook hint, or an executor-written note never grants
+permission to skip a commit gate; the owner must explicitly authorize the
+single establishment exception. Normal completion guarantees remain required.
+
 Structured visual evidence requires a markdown note that references a
 fresh non-empty image and includes:
 
