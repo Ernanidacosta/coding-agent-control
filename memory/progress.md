@@ -2,25 +2,20 @@
 
 ## Current
 
-Status: active
+Status: verifying
 Task: Document owner-authorized administrative policy establishment under conservative baselines.
 Risk: high
 
 ## Scope
 
-- AGENT.md
-- AGENTS.md
-- CLAUDE.md
-- README.md
-- docs/architecture.md
 - memory/progress.md
 - memory/plan.md
 - memory/verify.md
 
 ## Next
 
-- Hand off the canonical procedure for owner review; no commit, push or administrative exception is authorized by this documentation task.
-- Keep this first checkpoint active; normal project verification remains required for any later completion claim. Stop here without starting the next task.
+- Commit and publish this operational checkpoint with normal hooks; obtain fresh CI and independent verification for its exact SHA before transitioning to done.
+- Validate the final done SHA with its own CI, independent verification and full verify.sh entry point. Stop without starting the next task.
 
 ## Blockers
 
@@ -28,7 +23,7 @@ None
 
 ## Recently Completed
 
-- Audited authority, verification, Git hooks, baseline/proposal resolution and state/Risk enforcement. Existing invariants are sufficient; the administrative establishment procedure is incomplete and partly implicit.
+- Owner accepted the procedure. Documentation checkpoint ce1d9146dadef0fc330dd0aac97579fa06175a14 passed normal hooks, external CI 4/4 and SHA-bound independent verification (run 37135873570); published normally to origin/main.
 - Confirmed the existing resolver keeps 600 for a 600/750 proposal and resolves 750 when both snapshots use the established replacement; no runtime change is needed.
 - Confirmed Git --no-verify skips both pre-commit and commit-msg; hook hints do not grant owner approval or prove verification.
 - Added one canonical nine-step procedure with exact HEAD/diff/owner binding, one-use commit exception, created-SHA audit, no manufactured evidence and all normal post-establishment gates.
