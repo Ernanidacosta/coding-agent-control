@@ -402,6 +402,13 @@ file.
 Codex hooks are repo-local. Use `codex features list` to confirm hook
 support in the installed Codex version.
 
+Codex installs both `Stop` and `SubagentStop` through the same completion/state
+wrapper. Child termination retains its `SubagentStop` payload and retry flag;
+required failures block and advisory remains nonblocking. Reinstall with the
+default hook merge to add this event to an existing installation while keeping
+third-party hooks. Review the new hook through Codex `/hooks` before relying on
+native enforcement.
+
 ### Commit Authority and Commit Authorship
 
 These are two controls, and neither substitutes for the other.

@@ -256,6 +256,47 @@ EOF
   [ "$(find "$TARGET_DIR" -name 'hooks.json.bak*' | wc -l)" -eq "$first" ]
 }
 
+@test "Codex upgrade adds child completion and preserves third-party hooks across reinstalls" {
+  write_explicit_budget 7
+  install_agent_md --agent=codex
+  jq '
+    del(.hooks.SubagentStop) |
+    .hooks.Stop += [{hooks: [{type: "command", command: "third-party stop", timeout: 4}]}] |
+    .hooks.SubagentStop = [{matcher: "reviewer", hooks: [
+      {type: "command", command: "third-party child", timeout: 5}
+    ]}]
+  ' "$TARGET_DIR/.codex/hooks.json" > "$TARGET_DIR/.codex/legacy.json"
+  mv "$TARGET_DIR/.codex/legacy.json" "$TARGET_DIR/.codex/hooks.json"
+  before_backups=$(hook_backup_count)
+  install_agent_md --agent=codex
+  [ "$(hook_backup_count)" -eq "$((before_backups + 1))" ]
+  settled=$(sha256sum < "$TARGET_DIR/.codex/hooks.json")
+  settled_backups=$(hook_backup_count)
+  install_agent_md --agent=codex
+  install_agent_md --agent=codex
+  [ "$settled" = "$(sha256sum < "$TARGET_DIR/.codex/hooks.json")" ]
+  [ "$(hook_backup_count)" -eq "$settled_backups" ]
+  jq -e '
+    [.hooks.SubagentStop[]?.hooks[]? |
+      select(.command | contains(".codex/hooks/stop.sh"))] as $child |
+    [.hooks.Stop[]?.hooks[]? |
+      select(.command | contains(".codex/hooks/stop.sh"))] as $parent |
+    ($child | length) == 1 and ($parent | length) == 1 and
+    $child[0].timeout == 57 and $child[0] == $parent[0] and
+    ([.hooks.SubagentStop[]? | select(.matcher == "reviewer")] ==
+      [{matcher: "reviewer", hooks: [{type: "command", command: "third-party child", timeout: 5}]}]) and
+    ([.hooks.Stop[]?.hooks[]? | select(.command == "third-party stop")] ==
+      [{type: "command", command: "third-party stop", timeout: 4}])
+  ' "$TARGET_DIR/.codex/hooks.json" >/dev/null
+  write_explicit_budget 9
+  install_agent_md --agent=codex
+  jq -e '
+    [.hooks.Stop, .hooks.SubagentStop] |
+    all(.[]; [.[]?.hooks[]? |
+      select(.command | contains(".codex/hooks/stop.sh")) | .timeout] == [59])
+  ' "$TARGET_DIR/.codex/hooks.json" >/dev/null
+}
+
 @test "a pure object-key reorder is not treated as a change" {
   install_agent_md --agent=all
   # Reverse top-level and event key order without touching any handler array,

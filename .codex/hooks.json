@@ -26,6 +26,18 @@
         ]
       }
     ],
+    "SubagentStop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"$(git rev-parse --show-toplevel)/.codex/hooks/stop.sh\"",
+            "timeout": 950,
+            "statusMessage": "Running final verification..."
+          }
+        ]
+      }
+    ],
     "Stop": [
       {
         "hooks": [

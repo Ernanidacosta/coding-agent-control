@@ -438,12 +438,15 @@ materialize_stop_timeout() {
   reserve=$(completion_host_reservation_seconds "$host")
   desired=$((total + reserve))
   updated=$(mktemp)
-  if jq --arg needle "$needle" --argjson desired "$desired" '
-    .hooks.Stop |= map(
+  if jq --arg needle "$needle" --arg host "$host" --argjson desired "$desired" '
+    def set_owned_timeout: map(
       .hooks |= map(
         if ((.command // "") | contains($needle)) then .timeout = $desired else . end
       )
-    )
+    );
+    .hooks.Stop |= set_owned_timeout |
+    if $host == "codex" and .hooks.SubagentStop != null
+    then .hooks.SubagentStop |= set_owned_timeout else . end
   ' "$candidate" > "$updated"; then
     mv "$updated" "$candidate"
     INSTALL_STOP_ENVELOPE_NOTE="${host} Stop timeout (${desired}s = ${total}s core + ${reserve}s reserved)"

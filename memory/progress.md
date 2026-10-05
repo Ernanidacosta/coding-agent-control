@@ -2,18 +2,27 @@
 
 ## Current
 
-Status: done
-Task: Formalize owner-reviewed independent verification trust bootstrap and the first attestable descendant.
+Status: active
+Task: Consolidate the accepted Codex SubagentStop wiring through normal commit and external verification checkpoints; preserve the separate native fixture evidence.
 Risk: high
 
 ## Scope
 
+- .codex/hooks.json
+- .claude/hooks/_lib.sh
+- .claude/hooks/stop-verify.sh
+- install.sh
+- tests/codex-hooks.bats
+- tests/install-host-config-policy.bats
+- tests/install-idempotence.bats
+- README.md
+- memory/plan.md
 - memory/progress.md
+- memory/verify.md
 
 ## Next
 
-- Commit and publish this final operational checkpoint with normal hooks. Accept its done claim only after fresh CI, independent verification and full verify.sh pass for its exact HEAD.
-- Stop after the final gates with a clean working tree and synchronized local/origin main; do not start the next roadmap item.
+- Make the single newly authorized normal commit attempt, then push and obtain exact-SHA CI plus independent verification before active -> verifying -> done checkpoints. Each checkpoint retains normal gates; full verify.sh is required at final HEAD. Stop on hook failure without automatic retry or bypass.
 
 ## Blockers
 
@@ -21,8 +30,8 @@ None
 
 ## Recently Completed
 
-- Verifying checkpoint 051014d0ce0857da2d66f8ca9cbf1df4224e084e passed normal hooks, external CI 4/4 and SHA-bound independent verification (run 37147831945); published normally to origin/main. Public documentation remained unchanged.
-- Owner accepted the procedure. Documentation checkpoint e3c33a49efb8f9b3edf84fc189d84d32c17decdc passed normal hooks, external CI 4/4 and SHA-bound independent verification (run 37145995997); published normally to origin/main.
-- Confirmed core trusted-file-modified compares declared dependencies with HEAD; provider separately compares executable/config/workflow with the first parent. Clean core eligibility does not prove owner review or provider PASS.
-- Focused evidence passed: provider self-bootstrap/workflow refusal and later eligibility 3/3, core clean/dependency/stale cases 3/3, directives/policy 25/25 and public wording 3/3. No implementation change is needed.
-- Validated one canonical eight-step procedure, six links/anchors, preserved headings, identical directive mirrors, diff check and done -> active without warnings. Documentation checkpoint changed only eight tracked Markdown files.
+- Confirmed missing Codex lifecycle registration was the cause; existing wrapper already forwards child payload and shared handlers understand SubagentStop. Seven pre-fix regressions failed while four existing protocol/retry tests passed.
+- Added SubagentStop to the existing wrapper and installer target envelope. A separate failing test proved child preflight previously consulted Stop; it now selects the actual Codex event, retaining Stop defaults and event-specific diagnostics.
+- Focused checks passed: Codex hooks 9/9, install/config/idempotence 39/39, Stop protocol 24/24, existing installer cases 4/4, envelope checks 2/2, wording 1/1 and ShellCheck. Eight new regressions cover installation, dispatch and child semantics; parent Stop and tool hooks remain unchanged.
+- Owner approved only the exact fixture SubagentStop hash through native /hooks. Real children proved allowed completion and two repeated STATE_PROGRESS_INVALID blocks (retry false/true), followed by success only after valid fixture state was restored. Registry confirms other hooks unchanged; global config unchanged and temporary auth removed. Evidence: .agent/codex-subagent-stop-20261004/verification.md (ignored).
+- Budget diagnosis closed: the previous 900s timeout was not reproduced. Two complete suites passed 983/983 in 548.29s and 495.02s, with 351.71s and 404.98s margins; observed external concurrency prevents attributing the prior timeout to an exact cause. Policy remains 750/900 unchanged; no further profiling or performance work. Evidence: /tmp/cac-budget-diagnosis-20261004-qkqqnlp7/report.md.

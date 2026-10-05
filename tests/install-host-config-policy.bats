@@ -85,6 +85,19 @@ stale_the_envelope() {
   jq -e . "$TARGET_DIR/.codex/hooks.json" >/dev/null
 }
 
+@test "fresh Codex install registers SubagentStop with the target completion envelope" {
+  install_agent_md --agent=codex
+  jq -e '
+    [.hooks.SubagentStop[]?.hooks[]? |
+      select(.command | contains(".codex/hooks/stop.sh"))] as $child |
+    [.hooks.Stop[]?.hooks[]? |
+      select(.command | contains(".codex/hooks/stop.sh"))] as $parent |
+    ($child | length) == 1 and ($parent | length) == 1 and
+    $child[0].command == $parent[0].command and
+    $child[0].timeout == 61 and $child[0].timeout == $parent[0].timeout
+  ' "$TARGET_DIR/.codex/hooks.json" >/dev/null
+}
+
 @test "fresh install under claude-settings=skip is created complete" {
   install_agent_md --agent=claude --claude-settings=skip
   [ -f "$TARGET_DIR/.claude/settings.json" ]
@@ -100,6 +113,7 @@ stale_the_envelope() {
   [ -f "$TARGET_DIR/.codex/hooks.json" ]
   jq -e . "$TARGET_DIR/.codex/hooks.json" >/dev/null
   [ "$(stop_timeout codex)" -eq 61 ]
+  jq -e '.hooks.SubagentStop[0].hooks[0].timeout == 61' "$TARGET_DIR/.codex/hooks.json" >/dev/null
   [ "$(backup_count)" -eq 0 ]
 }
 
@@ -107,6 +121,7 @@ stale_the_envelope() {
   install_agent_md --agent=all --no-overwrite
   [ "$(stop_timeout claude)" -eq 41 ]
   [ "$(stop_timeout codex)" -eq 61 ]
+  jq -e '.hooks.SubagentStop[0].hooks[0].timeout == 61' "$TARGET_DIR/.codex/hooks.json" >/dev/null
   [ "$(backup_count)" -eq 0 ]
 }
 

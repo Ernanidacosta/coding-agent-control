@@ -37,9 +37,13 @@ HOOK_INPUT=$(cat)
 completion_evaluation_begin
 CONTEXT=$(completion_evaluation_context_json worktree host)
 HOST=${CODING_AGENT_CONTROL_HOST:-claude}
-HOST_TIMEOUT=$(completion_host_timeout_seconds "$HOST" 2>/dev/null || true)
+HOST_EVENT=Stop
+if [ "$HOST" = codex ]; then
+  HOST_EVENT=$(hook_input_stop_event "$HOOK_INPUT")
+fi
+HOST_TIMEOUT=$(completion_host_timeout_seconds "$HOST" "" "$HOST_EVENT" 2>/dev/null || true)
 HOST_PREFLIGHT=$(completion_host_preflight_json \
-  "$(printf '%s' "$CONTEXT" | jq -c '.budget')" "$HOST" "$HOST_TIMEOUT")
+  "$(printf '%s' "$CONTEXT" | jq -c '.budget')" "$HOST" "$HOST_TIMEOUT" "$HOST_EVENT")
 if [ "$(printf '%s' "$HOST_PREFLIGHT" | jq -r '.valid')" != true ]; then
   emit_stop_block "$(policy_human_message "$(printf '%s' "$HOST_PREFLIGHT" | jq -c '.result')")"
   exit 0

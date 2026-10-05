@@ -3028,7 +3028,8 @@ completion_total_timeout_result_json() {
 
 completion_host_timeout_seconds() {
   local host="$1" root="${2:-$(git rev-parse --show-toplevel 2>/dev/null || pwd)}"
-  local config needle
+  local config needle event="${3:-Stop}"
+  case "$event" in Stop|SubagentStop) ;; *) return 1 ;; esac
   case "$host" in
     claude)
       config="$root/.claude/settings.json"
@@ -3041,8 +3042,8 @@ completion_host_timeout_seconds() {
     *) return 1 ;;
   esac
   [ -f "$config" ] || return 1
-  jq -er --arg needle "$needle" '
-    [.hooks.Stop[]?.hooks[]? |
+  jq -er --arg needle "$needle" --arg event "$event" '
+    [.hooks[$event][]?.hooks[]? |
       select((.command // "") | contains($needle)) |
       .timeout] | unique |
     if length == 1 and (.[0] | type) == "number" and .[0] > 0 and (.[0] | floor) == .[0]
@@ -3059,15 +3060,15 @@ completion_host_reservation_seconds() {
   printf '%s\n' "$reserve"
 }
 
-# completion_host_preflight_json <budget-json> <claude|codex> <handler-timeout>
+# completion_host_preflight_json <budget-json> <claude|codex> <handler-timeout> [event]
 # Returns a structured blocking result before checks when the finite host
 # transport cannot honor the core evaluation budget.
 completion_host_preflight_json() {
-  local budget="$1" host="$2" handler_timeout="${3:-}" reserve capacity base
+  local budget="$1" host="$2" handler_timeout="${3:-}" event="${4:-Stop}" reserve capacity base
   reserve=$(completion_host_reservation_seconds "$host")
   if [ -z "$handler_timeout" ]; then
     base=$(policy_result_json fail error VERIFY_HOST_TIMEOUT_INCOMPATIBLE \
-      "The ${host} Stop handler timeout could not be resolved, so its transport envelope cannot be verified." \
+      "The ${host} ${event} handler timeout could not be resolved, so its transport envelope cannot be verified." \
       "Reinstall or synchronize the coding-agent-control ${host} hook configuration before completion.")
     jq -cn --argjson result "$base" --arg host "$host" \
       '{valid:false,host:$host,result:$result}'
@@ -3076,7 +3077,7 @@ completion_host_preflight_json() {
   capacity=$((handler_timeout - reserve))
   if [ "$(printf '%s' "$budget" | jq -r '.bounded')" != true ]; then
     base=$(policy_result_json fail error VERIFY_HOST_TIMEOUT_INCOMPATIBLE \
-      "The effective completion budget is legacy-unbounded, but the ${host} Stop handler has a finite ${handler_timeout}-second envelope." \
+      "The effective completion budget is legacy-unbounded, but the ${host} ${event} handler has a finite ${handler_timeout}-second envelope." \
       "Declare verify.policy.total_timeout_seconds and rerun the installer to synchronize the ${host} hook.")
     jq -cn --argjson result "$base" --arg host "$host" \
       --argjson handler "$handler_timeout" --argjson reserve "$reserve" \
@@ -3085,8 +3086,8 @@ completion_host_preflight_json() {
   fi
   if [ "$capacity" -lt "$(printf '%s' "$budget" | jq -r '.seconds')" ]; then
     base=$(policy_result_json fail error VERIFY_HOST_TIMEOUT_INCOMPATIBLE \
-      "The ${host} Stop handler allows ${handler_timeout} seconds, but the core completion budget plus reserved transport time requires more." \
-      "Rerun the coding-agent-control installer after changing timeout policy, or synchronize the owned ${host} Stop handler timeout by hand. An installer run using skip or --no-overwrite for this host config leaves the envelope untouched and will not resolve this.")
+      "The ${host} ${event} handler allows ${handler_timeout} seconds, but the core completion budget plus reserved transport time requires more." \
+      "Rerun the coding-agent-control installer after changing timeout policy, or synchronize the owned ${host} ${event} handler timeout by hand. An installer run using skip or --no-overwrite for this host config leaves the envelope untouched and will not resolve this.")
     jq -cn --argjson result "$base" --arg host "$host" \
       --argjson handler "$handler_timeout" --argjson reserve "$reserve" \
       --argjson required "$(printf '%s' "$budget" | jq '.seconds')" \
