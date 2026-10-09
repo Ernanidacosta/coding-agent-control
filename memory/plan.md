@@ -1,7 +1,6 @@
 # Plan
 
-- Implement only owner-approved Claude SubagentStart/Stop correlation by session_id + agent_id; agent_type is diagnostic only. Reuse .agent scratch storage with atomic per-child publication.
-- Reuse existing verification/state/advisory handlers, preserve the actual event and payload, parent Stop, tool safety and retry semantics; make preflight consult the child event when appropriate.
-- Focused regressions cover configuration/install/upgrade/third-party preservation, event eligibility, payload, block/advisory, concurrency and preflight. Age expiry demonstrably releases unresolved blocks, so registered identities must not expire without confirmed termination.
-- Use an isolated native fixture for real allow/block and retry evidence; never alter global configuration. Keep Instructions, SubagentStart context, Codex, policy, receipts and directive size out of scope.
-- Preserve active/high. Stop before commit, push, full manual suite or operational consolidation.
+- Consolidate only the approved Claude lifecycle implementation; no further code changes or roadmap work.
+- Technical active checkpoint c08807bc3794143571bdc4dc157098a46d5ac469 is published with passing hooks, external CI and exact-SHA independent attestation.
+- Publish verifying with normal hooks and require CI plus independent verification of that SHA before done. Publish done the same way, then run verify.sh on the final HEAD and confirm clean, synchronized Git state.
+- Preserve Risk high, policy 750/900 and accepted limitations: retain orphans until confirmed termination; Start registration failure is diagnostic because the host cannot block creation. Keep directive injection/truncation, Codex and new roadmap items out of scope.

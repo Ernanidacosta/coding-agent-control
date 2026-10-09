@@ -2,27 +2,19 @@
 
 ## Current
 
-Status: active
-Task: Connect Claude SubagentStop to existing completion/state gates with safe event eligibility, focused regressions and isolated native allow/block proof.
+Status: verifying
+Task: Consolidate the approved Claude subagent lifecycle implementation through published checkpoints and exact-SHA external verification.
 Risk: high
 
 ## Scope
 
-- .gitignore
-- .claude/settings.json
-- .claude/hooks/*.sh
-- install.sh
-- tests/*claude*.bats
-- tests/install-*.bats
-- tests/stop-hook-active.bats
-- README.md
 - memory/plan.md
 - memory/progress.md
 - memory/verify.md
 
 ## Next
 
-- Review final focused and native evidence, then stop before commit or consolidation. Owner approved retaining orphan identities until confirmed termination; no automatic identity expiry or new liveness mechanism.
+- Commit and publish this verifying checkpoint with normal hooks; require its CI and independent attestation before done. Then publish done, validate that exact SHA externally and run the full verify.sh entry point. No further implementation or roadmap work.
 
 ## Blockers
 
@@ -30,8 +22,7 @@ None
 
 ## Recently Completed
 
-- Claude lifecycle wiring correlates exact session/child identities, preserves payload/retry behavior and ignores internal events. Focused checks cover 113 distinct cases; native allow, block/retry/recovery and internal exclusion passed again after the host-boundary fix with source-matched scripts and unchanged global configuration. Evidence: .agent/claude-lifecycle-20261007/native-summary-hostfix.json.
-- Owner approved retaining orphan registrations until confirmed termination. A regression reproduced age-based release of an unresolved block; registered identities no longer expire. No instruction injection, policy change, commit or push.
-- Required Stop verification exposed inherited CODING_AGENT_CONTROL_HOST=codex in the Claude preflight test. Reproduced deterministically, fixed by setting claude in the Claude lifecycle wrapper, and covered explicitly: lifecycle/Stop protocol 41/41 with inherited Codex host and six jobs. No budget change; the complete gate was not rerun manually.
-- Claude 2.1.290 native audit completed: general-purpose received all 38,033 substantive directive bytes; Explore/Plan/omitClaudeMd had no CAC instruction attachment. All four children enforced the existing Bash safety canary and emitted SubagentStop, but no child completion/state handler ran; all three handlers ran only at parent Stop. Instructions D, tool safety A within the tested boundary, completion D. Evidence: .agent/claude-subagent-audit-20261006/audit.md (ignored).
-- Focused checks passed 56/56 plus installer/reinstall/preservation 4/4. Global configuration and credentials unchanged, temporary credentials removed, no implementation change or full suite. Audit stops before any correction or commit.
+- Technical commit c08807bc3794143571bdc4dc157098a46d5ac469 published with normal hooks: lint, smoke, test and operational state passed; commit duration 684.45s. Its CI passed all four jobs: https://github.com/Ernanidacosta/coding-agent-control/actions/runs/37873929500. The established independent verifier returned pass, kind independent, origin ci, bound to that exact SHA.
+- Owner-approved full local verify.sh passed before the technical commit: exit 0, 786.33s, 1001 tests passed, none failed/skipped, lint/smoke/test passed, zero gate warnings/blocking failures. Contract remains 750/900; evidence outside checkout: /tmp/cac-claude-official-gate.NujsJf/.
+- Native allow, block/retry/recovery and internal-event exclusion passed with source-matched scripts; parent Stop stayed separate and global configuration unchanged. Evidence: .agent/claude-lifecycle-20261007/native-summary-hostfix.json. Focused coverage: 113 distinct cases; host-inheritance regression and Stop protocol also passed 41/41 under inherited codex with six jobs.
+- Accepted limitations: orphan identities remain until termination is confirmed; failed Start registration diagnoses missing tracking but Claude cannot block creation at that event. No automatic identity expiry, directive injection or policy relaxation.
