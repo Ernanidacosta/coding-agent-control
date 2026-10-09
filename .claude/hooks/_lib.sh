@@ -3034,6 +3034,7 @@ completion_host_timeout_seconds() {
     claude)
       config="$root/.claude/settings.json"
       needle='.claude/hooks/stop-verify.sh'
+      if [ "$event" = SubagentStop ]; then needle='.claude/hooks/subagent-lifecycle.sh'; fi
       ;;
     codex)
       config="$root/.codex/hooks.json"
@@ -3052,9 +3053,9 @@ completion_host_timeout_seconds() {
 }
 
 completion_host_reservation_seconds() {
-  local host="$1" reserve
+  local host="$1" event="${2:-Stop}" reserve
   reserve=$(completion_transport_margin_seconds)
-  if [ "$host" = codex ]; then
+  if [ "$host" = codex ] || { [ "$host" = claude ] && [ "$event" = SubagentStop ]; }; then
     reserve=$((reserve + $(completion_state_handler_budget_seconds) + $(completion_sensory_handler_budget_seconds)))
   fi
   printf '%s\n' "$reserve"
@@ -3065,7 +3066,7 @@ completion_host_reservation_seconds() {
 # transport cannot honor the core evaluation budget.
 completion_host_preflight_json() {
   local budget="$1" host="$2" handler_timeout="${3:-}" event="${4:-Stop}" reserve capacity base
-  reserve=$(completion_host_reservation_seconds "$host")
+  reserve=$(completion_host_reservation_seconds "$host" "$event")
   if [ -z "$handler_timeout" ]; then
     base=$(policy_result_json fail error VERIFY_HOST_TIMEOUT_INCOMPATIBLE \
       "The ${host} ${event} handler timeout could not be resolved, so its transport envelope cannot be verified." \

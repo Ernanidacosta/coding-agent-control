@@ -297,6 +297,35 @@ EOF
   ' "$TARGET_DIR/.codex/hooks.json" >/dev/null
 }
 
+@test "Claude upgrade registers lifecycle and preserves third parties and parent across reinstalls" {
+  write_explicit_budget 7
+  install_agent_md --agent=claude
+  jq '.hooks.Stop' "$TARGET_DIR/.claude/settings.json" > "$TARGET_DIR/parent.json"
+  jq 'del(.hooks.SubagentStart, .hooks.SubagentStop, .hooks.SessionEnd) |
+    .hooks.SubagentStop = [{matcher:"reviewer",hooks:[{type:"command",command:"third-party child",timeout:4}]}]' \
+    "$TARGET_DIR/.claude/settings.json" > "$TARGET_DIR/legacy.json"
+  mv "$TARGET_DIR/legacy.json" "$TARGET_DIR/.claude/settings.json"
+  install_agent_md --agent=claude
+  settled=$(sha256sum < "$TARGET_DIR/.claude/settings.json")
+  backups=$(hook_backup_count)
+  install_agent_md --agent=claude
+  install_agent_md --agent=claude
+  [ "$settled" = "$(sha256sum < "$TARGET_DIR/.claude/settings.json")" ]
+  [ "$backups" -eq "$(hook_backup_count)" ]
+  jq -e --slurpfile parent "$TARGET_DIR/parent.json" '
+    .hooks.Stop == $parent[0] and
+    ([.hooks.SubagentStart,.hooks.SubagentStop,.hooks.SessionEnd] |
+      all(.[]; [.[]?.hooks[]? | select(.command | contains("subagent-lifecycle.sh"))] | length == 1)) and
+    ([.hooks.SubagentStop[]?.hooks[]? | select(.command | contains("subagent-lifecycle.sh")) | .timeout] == [57]) and
+    ([.hooks.SubagentStop[] | select(.matcher == "reviewer")] ==
+      [{matcher:"reviewer",hooks:[{type:"command",command:"third-party child",timeout:4}]}])' \
+    "$TARGET_DIR/.claude/settings.json"
+  write_explicit_budget 9
+  install_agent_md --agent=claude
+  jq -e '[.hooks.SubagentStop[]?.hooks[]? | select(.command | contains("subagent-lifecycle.sh")) | .timeout] == [59]' \
+    "$TARGET_DIR/.claude/settings.json"
+}
+
 @test "a pure object-key reorder is not treated as a change" {
   install_agent_md --agent=all
   # Reverse top-level and event key order without touching any handler array,

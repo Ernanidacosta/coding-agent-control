@@ -418,7 +418,7 @@ materialize_stop_timeout() {
   # leaving it in place would install one project's budget into another.
   # Failure leaves the candidate as it is and is reported, never silently
   # downgraded.
-  local candidate="$1" host="$2" total reserve desired needle updated
+  local candidate="$1" host="$2" total reserve desired needle updated child_needle child_desired
   INSTALL_STOP_ENVELOPE_NOTE=""
   case "$host" in
     claude) needle='.claude/hooks/stop-verify.sh' ;;
@@ -437,16 +437,21 @@ materialize_stop_timeout() {
   fi
   reserve=$(completion_host_reservation_seconds "$host")
   desired=$((total + reserve))
+  child_needle="$needle"
+  if [ "$host" = claude ]; then child_needle='.claude/hooks/subagent-lifecycle.sh'; fi
+  child_desired=$((total + $(completion_host_reservation_seconds "$host" SubagentStop)))
   updated=$(mktemp)
-  if jq --arg needle "$needle" --arg host "$host" --argjson desired "$desired" '
+  if jq --arg needle "$needle" --arg child_needle "$child_needle" --argjson child_desired "$child_desired" --argjson desired "$desired" '
     def set_owned_timeout: map(
       .hooks |= map(
         if ((.command // "") | contains($needle)) then .timeout = $desired else . end
       )
     );
     .hooks.Stop |= set_owned_timeout |
-    if $host == "codex" and .hooks.SubagentStop != null
-    then .hooks.SubagentStop |= set_owned_timeout else . end
+    if .hooks.SubagentStop != null then
+      .hooks.SubagentStop |= map(.hooks |= map(
+        if ((.command // "") | contains($child_needle)) then .timeout = $child_desired else . end
+      )) else . end
   ' "$candidate" > "$updated"; then
     mv "$updated" "$candidate"
     INSTALL_STOP_ENVELOPE_NOTE="${host} Stop timeout (${desired}s = ${total}s core + ${reserve}s reserved)"

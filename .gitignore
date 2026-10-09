@@ -8,3 +8,9 @@
 !/.agent-md/templates/
 !/.agent-md/templates/memory/
 !/.agent-md/templates/memory/*.md
+# Keep the new installed lifecycle source visible despite global host ignores.
+!/.claude/
+/.claude/*
+!/.claude/hooks/
+/.claude/hooks/*
+!/.claude/hooks/subagent-lifecycle.sh

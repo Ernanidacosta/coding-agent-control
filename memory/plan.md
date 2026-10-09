@@ -1,7 +1,7 @@
 # Plan
 
-- Focused Codex child-termination wiring is implemented through the existing completion/state wrapper; parent Stop, tool safety, child payload, advisory and retries are preserved.
-- Installer source/merge/materialization and child-specific transport preflight are covered by regressions; no new enforcement system, policy, receipts or other host changes.
-- Establish trust only for the exact isolated-fixture SubagentStop through owner review in native /hooks; capture real child callback, allowed completion, controlled gate block and advisory/retry semantics. No automatic trust/bypass or global configuration changes.
-- Accepted implementation stays unchanged. After native proof, normal commit/push and exact-SHA CI plus independent verification precede each operational transition active -> verifying -> done; run full verify.sh at final HEAD. A failed commit hook stops consolidation without retry.
-- Evidence: .agent/codex-subagent-stop-20261004/verification.md. No next roadmap item.
+- Implement only owner-approved Claude SubagentStart/Stop correlation by session_id + agent_id; agent_type is diagnostic only. Reuse .agent scratch storage with atomic per-child publication.
+- Reuse existing verification/state/advisory handlers, preserve the actual event and payload, parent Stop, tool safety and retry semantics; make preflight consult the child event when appropriate.
+- Focused regressions cover configuration/install/upgrade/third-party preservation, event eligibility, payload, block/advisory, concurrency and preflight. Age expiry demonstrably releases unresolved blocks, so registered identities must not expire without confirmed termination.
+- Use an isolated native fixture for real allow/block and retry evidence; never alter global configuration. Keep Instructions, SubagentStart context, Codex, policy, receipts and directive size out of scope.
+- Preserve active/high. Stop before commit, push, full manual suite or operational consolidation.

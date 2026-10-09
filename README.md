@@ -409,6 +409,31 @@ default hook merge to add this event to an existing installation while keeping
 third-party hooks. Review the new hook through Codex `/hooks` before relying on
 native enforcement.
 
+Claude registers `SubagentStart` and `SubagentStop` with a lifecycle wrapper.
+Only an exact `session_id` + `agent_id` registration runs the existing
+verification, state and sensory gates at child completion. `agent_type` is
+diagnostic metadata: internal operations such as `/btw` can inherit the main
+agent's type, so an unmatched stop is ignored. Parent `Stop` and tool safety
+hooks are unchanged. Reinstall with the default settings merge to add these
+events while preserving third-party hooks.
+
+Private, atomic identity records live in `.agent/claude-subagents/`, with no
+prompts or transcripts. Blocks and advisory continuations retain the record
+for retries; a silent successful finish removes only that child. `SessionEnd`
+cleans that session. Subsequent starts reap incomplete writes and empty
+directories older than seven days. Registered identities never expire by age:
+that could release a still-blocked retry. A killed parent that emits no
+`SessionEnd` can leave orphan records; remove its session directory only after
+confirming that session has ended. Correlation is local routing state, not
+tamper-proof evidence or an attestation.
+
+Claude cannot block child creation from `SubagentStart`. Registration failures
+produce an explicit diagnostic, but a child whose registration was never
+written cannot be distinguished from an internal event at stop. Restore
+storage before starting another child; no verification success is implied by
+an unmatched event. A corrupt matching record blocks visibly. This wiring
+does not supply missing directives or inject `additionalContext` at start.
+
 ### Commit Authority and Commit Authorship
 
 These are two controls, and neither substitutes for the other.
@@ -638,8 +663,8 @@ not fully evaluated. Both bounds require `timeout` or `gtimeout`.
 Claude and Codex timeouts are outer transport envelopes, not verification
 policy. The installer uses the same effective budget resolver, including legacy
 derived ceilings, to materialize them above the core total: Claude adds
-30 seconds for finalization; the serial Codex wrapper additionally reserves 10
-seconds each for state and sensory enforcement. Stop validates that relationship
+30 seconds for finalization; serial child completion in Claude and the Codex
+wrapper additionally reserve 10 seconds each for state and sensory enforcement. Stop validates that relationship
 before starting an expensive check and fails closed with
 `VERIFY_HOST_TIMEOUT_INCOMPATIBLE` when an edited policy and installed adapter
 are out of sync. Rerun the installer after changing the total budget.
