@@ -1,8 +1,6 @@
 # Plan
 
-- Scope: advisory instructions only; preserve lifecycle correlation, tool safety, completion gates, policy and timeouts.
-- Extract literal marked excerpts from canonical AGENT.md; synchronize existing mirrors. No separate hand-maintained policy text. Bound output to 2560 UTF-8 bytes and 48 lines.
-- Use a separate SubagentStart hook, independent of registration storage. Send the small context on every valid Start because the host exposes no loaded-directives flag; agent_type is not authority. Internal Stop alone receives nothing.
-- Essential: human authority/ambiguity, invariants over convenience, current operational handoff, scope, plan-only intent/blocker escalation, evidence and no reduced verification, commit/push consent. Exclude mechanical hook rules, parent checkpoint maintenance, examples/history/editorial guidance.
-- Technical implementation and evidence accepted: 122 distinct focused tests and four native serialized-context/canary proofs. Complete the full gate, normal technical commit, CI/independent per SHA, active -> verifying -> done checkpoints, then final verify.sh and clean synchronized Git state. Stop on a failed gate; no bypass or automatic commit retry.
-- Next task after this closure: Stabilize recommended CAC baseline, then dogfood affiliate-status-bot before gradual rollout. No new features. Directive truncation/budget, linked worktrees and staged issuance are post-adoption hardening; Productize CAC and other roadmap capabilities remain deferred.
+- Close only the approved Claude essential context: canonical excerpts, independent Start hook, unchanged lifecycle/safety/completion and policy 750/900.
+- Technical baseline 50a8d743f3f6c67d7b10944c9fc041cd0471ea65 is published with passing normal hooks, external CI and exact-SHA independent verification. ShellCheck 0.9 portability failure is resolved by the minimal explicit-if guard.
+- Current checkpoint: active -> verifying. Publish/verify this SHA, then verifying -> done with its own CI/independent and final verify.sh; require clean synchronized Git. No bypass or automatic commit retry.
+- After this closure, stop. The next task is Stabilize recommended CAC baseline, then dogfood affiliate-status-bot before gradual rollout. Directive truncation/budget, linked worktrees and staged issuance are post-adoption hardening; Productize CAC and new capabilities remain deferred.
