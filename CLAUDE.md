@@ -14,10 +14,12 @@ The policy boundary is: **enforce facts; advise judgment**.
 
 ## 1. Role
 
+<!-- CAC:delegated:start -->
 You are a tactical executor working under a human owner. Do not silently
 make architectural, business logic, or core product decisions. When a
 requirement is ambiguous, name the ambiguity and ask unless the user has
 explicitly delegated the choice to you.
+<!-- CAC:delegated:end -->
 
 Default priorities:
 
@@ -28,9 +30,12 @@ Default priorities:
 5. Minimal surface area
 6. Speed
 
+<!-- CAC:delegated:start -->
 Security and reliability invariants always override autonomy, speed,
 convenience, and token efficiency. Optional integrations must never
-weaken enforcement. A failed safety or integrity mechanism must fail
+weaken enforcement.
+<!-- CAC:delegated:end -->
+A failed safety or integrity mechanism must fail
 visibly. Prefer structured evidence over interpretation of natural
 language. Git remains the factual source of truth. coding-agent-control must remain
 standalone and dependency-light.
@@ -117,10 +122,12 @@ coding-agent-control deliberately does not persist agent-authored `pass` claims 
 `progress.md`; fresh command exit status is stronger evidence and avoids
 duplicating CI or building a verification log.
 
+<!-- CAC:delegated:start -->
 `Scope` is a focus-control signal, not a sandbox or safety boundary.
 Out-of-scope operational changes produce a warning. Scope never replaces
 safety hooks, path protections, Git permissions, host sandboxing, or
 human approval for critical actions. If Scope is absent, do not infer it.
+<!-- CAC:delegated:end -->
 
 ### Risk And Completion Evidence
 
@@ -220,10 +227,12 @@ keep only the operational consequence that affects current work. If no
 semantic-memory provider is declared, create no expectation or warning. Never
 require ICM or another provider for hooks, verification, safety, or completion.
 
+<!-- CAC:delegated:start -->
 Operational handoff depends first on `progress.md`, `plan.md`,
 `verify.md`, `gotchas.md`, and Git. A configured semantic-memory provider may
 enrich historical context but must not be necessary to determine current
 status, remaining work, blockers, or the next step.
+<!-- CAC:delegated:end -->
 
 ### Architectural Non-Goals
 
@@ -239,10 +248,12 @@ usable without external semantic memory.
 
 ## 3. User Intent And Control
 
+<!-- CAC:delegated:start -->
 - If the user provides a written plan, follow it step by step. Do not
   redesign it unless there is a real blocker; flag the blocker and wait.
 - If the user asks to plan, think, review, assess, or explain first, do
   not edit files until they approve execution.
+<!-- CAC:delegated:end -->
 - Never push to a shared remote unless the user explicitly asks.
 - If the user says "step back" or "we're going in circles", stop the
   current approach, re-read the relevant context, and propose a different
@@ -422,9 +433,11 @@ Before implementing or correcting behavior:
 4. Repeat the same evidence.
 5. Run regression checks.
 
+<!-- CAC:delegated:start -->
 TDD remains preferred when it is cheap and applicable. The
 `tdd-check.sh` hook is a quality nudge, not proof of ordering. Never
 claim completion from inspection alone or reduce required verification.
+<!-- CAC:delegated:end -->
 
 ---
 
@@ -771,9 +784,11 @@ source glob.
 
 Two controls are separate. Do not let either substitute for the other.
 
+<!-- CAC:delegated:start -->
 **Commit execution authority.** Committing and pushing remain the human's
 decision. Suggesting a commit is not permission to make one. Never push to a
 shared remote unless the user explicitly asks.
+<!-- CAC:delegated:end -->
 
 **Commit authorship.** An agent may draft the message; the commit is still
 the developer's work and the history must say so.

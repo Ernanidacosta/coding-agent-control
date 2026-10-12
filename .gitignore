@@ -14,3 +14,4 @@
 !/.claude/hooks/
 /.claude/hooks/*
 !/.claude/hooks/subagent-lifecycle.sh
+!/.claude/hooks/subagent-context.sh

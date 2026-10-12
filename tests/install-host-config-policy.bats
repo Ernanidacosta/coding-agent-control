@@ -84,6 +84,34 @@ stale_the_envelope() {
       all(.[]; .hooks[0].command == "$CLAUDE_PROJECT_DIR/.claude/hooks/subagent-lifecycle.sh"))' \
     "$TARGET_DIR/.claude/settings.json" >/dev/null
   [ -x "$TARGET_DIR/.claude/hooks/subagent-lifecycle.sh" ]
+  [ -x "$TARGET_DIR/.claude/hooks/subagent-context.sh" ]
+  jq -e '[.hooks.SubagentStart[].hooks[] | select(.command | endswith("/subagent-context.sh"))] | length == 1' \
+    "$TARGET_DIR/.claude/settings.json"
+  printf '%s' '{"hook_event_name":"SubagentStart","session_id":"installed","agent_id":"child","agent_type":"Explore"}' |
+    CLAUDE_PROJECT_DIR="$TARGET_DIR" bash "$TARGET_DIR/.claude/hooks/subagent-context.sh" |
+    jq -e '.hookSpecificOutput.additionalContext | contains("flag the blocker and wait")'
+}
+
+@test "Claude context upgrade preserves third-party Start and reinstalls without duplication" {
+  install_agent_md --agent=claude
+  jq '.hooks.SubagentStart[0].hooks |= map(select(.command | endswith("/subagent-context.sh") | not)) |
+    .hooks.SubagentStart += [{"matcher":"Explore","hooks":[{"type":"command","command":"third-party child context","timeout":7}]}]' \
+    "$TARGET_DIR/.claude/settings.json" > "$TARGET_DIR/previous.json"
+  mv "$TARGET_DIR/previous.json" "$TARGET_DIR/.claude/settings.json"
+  rm "$TARGET_DIR/.claude/hooks/subagent-context.sh"
+  parent_before=$(jq -c '.hooks.Stop' "$TARGET_DIR/.claude/settings.json")
+  install_agent_md --agent=claude
+  settled=$(sha256sum < "$TARGET_DIR/.claude/settings.json")
+  backups=$(backup_count)
+  install_agent_md --agent=claude
+  [ "$settled" = "$(sha256sum < "$TARGET_DIR/.claude/settings.json")" ]
+  [ "$backups" -eq "$(backup_count)" ]
+  [ "$parent_before" = "$(jq -c '.hooks.Stop' "$TARGET_DIR/.claude/settings.json")" ]
+  [ -x "$TARGET_DIR/.claude/hooks/subagent-context.sh" ]
+  jq -e '([.hooks.SubagentStart[].hooks[] | select(.command | endswith("/subagent-context.sh"))] | length) == 1 and
+    ([.hooks.SubagentStart[] | select(.matcher == "Explore") | .hooks[] |
+      select(.command == "third-party child context" and .timeout == 7)] | length) == 1' \
+    "$TARGET_DIR/.claude/settings.json"
 }
 
 @test "fresh Codex install carries this project's effective envelope" {

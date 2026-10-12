@@ -431,8 +431,22 @@ Claude cannot block child creation from `SubagentStart`. Registration failures
 produce an explicit diagnostic, but a child whose registration was never
 written cannot be distinguished from an internal event at stop. Restore
 storage before starting another child; no verification success is implied by
-an unmatched event. A corrupt matching record blocks visibly. This wiring
-does not supply missing directives or inject `additionalContext` at start.
+an unmatched event. A corrupt matching record blocks visibly.
+
+A separate `SubagentStart` hook supplies minimal advisory context, including
+human authority, scope, blockers and verification obligations, even when
+Explore, Plan or a custom `omitClaudeMd` agent skips `CLAUDE.md`. It extracts
+the `CAC:delegated` marked passages directly from canonical `AGENT.md`, limited
+to 2560 UTF-8 bytes and 48 lines. These markers select existing rules; they
+do not maintain a second policy. Keep them when customizing the source.
+The host does not report whether directives loaded, so every valid Start gets
+the same small supplement, including general-purpose; no type grants authority.
+Missing, malformed or oversized excerpts produce a diagnostic rather than
+silently truncating rules. Context delivery and lifecycle registration are
+independent hooks; neither one's success proves the other succeeded. Start
+cannot block creation, so restore a failed context source before delegating.
+Internal events without a Start receive no supplement. This is advisory
+context, not a replacement for tool safety or completion enforcement.
 
 ### Commit Authority and Commit Authorship
 

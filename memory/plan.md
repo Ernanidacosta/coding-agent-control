@@ -1,6 +1,8 @@
 # Plan
 
-- Consolidate only the approved Claude lifecycle implementation; no further code changes or roadmap work.
-- Technical active checkpoint c08807bc3794143571bdc4dc157098a46d5ac469 is published with passing hooks, external CI and exact-SHA independent attestation.
-- Verifying checkpoint a8deaa76cb398472fe1604557abc5d5cafc66fb6 is published with passing hooks, CI and exact-SHA independent verification. Final acceptance requires the published done checkpoint's own CI, independent attestation and full verify.sh, with clean, synchronized Git state.
-- Preserve Risk high, policy 750/900 and accepted limitations: retain orphans until confirmed termination; Start registration failure is diagnostic because the host cannot block creation. Keep directive injection/truncation, Codex and new roadmap items out of scope.
+- Scope: advisory instructions only; preserve lifecycle correlation, tool safety, completion gates, policy and timeouts.
+- Extract literal marked excerpts from canonical AGENT.md; synchronize existing mirrors. No separate hand-maintained policy text. Bound output to 2560 UTF-8 bytes and 48 lines.
+- Use a separate SubagentStart hook, independent of registration storage. Send the small context on every valid Start because the host exposes no loaded-directives flag; agent_type is not authority. Internal Stop alone receives nothing.
+- Essential: human authority/ambiguity, invariants over convenience, current operational handoff, scope, plan-only intent/blocker escalation, evidence and no reduced verification, commit/push consent. Exclude mechanical hook rules, parent checkpoint maintenance, examples/history/editorial guidance.
+- Technical implementation and evidence accepted: 122 distinct focused tests and four native serialized-context/canary proofs. Complete the full gate, normal technical commit, CI/independent per SHA, active -> verifying -> done checkpoints, then final verify.sh and clean synchronized Git state. Stop on a failed gate; no bypass or automatic commit retry.
+- Next task after this closure: Stabilize recommended CAC baseline, then dogfood affiliate-status-bot before gradual rollout. No new features. Directive truncation/budget, linked worktrees and staged issuance are post-adoption hardening; Productize CAC and other roadmap capabilities remain deferred.
