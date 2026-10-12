@@ -30,8 +30,10 @@ CONTEXT=$(LC_ALL=C awk '
   inside { print; lines++ }
   END { if (bad || inside || !blocks || !lines) exit 1 }
 ' "$ROOT/AGENT.md") || unavailable 'Malformed or absent excerpt markers.'
-[ "$(LC_ALL=C printf '%s' "$CONTEXT" | wc -c)" -le 2560 ] &&
-  [ "$(printf '%s\n' "$CONTEXT" | wc -l)" -le 48 ] || unavailable 'Excerpt exceeds 2560 bytes or 48 lines.'
+if ! [ "$(LC_ALL=C printf '%s' "$CONTEXT" | wc -c)" -le 2560 ] ||
+  ! [ "$(printf '%s\n' "$CONTEXT" | wc -l)" -le 48 ]; then
+  unavailable 'Excerpt exceeds 2560 bytes or 48 lines.'
+fi
 
 jq -cn --arg context "$CONTEXT" \
   '{hookSpecificOutput:{hookEventName:"SubagentStart",additionalContext:$context}}'

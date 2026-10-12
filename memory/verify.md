@@ -8,3 +8,7 @@
 - ShellCheck, git diff --check, canonical/mirror comparisons and progress validation pass. done -> active valid; Risk high preserved. Owner now authorizes consolidation: official full gate, normal commit hooks, exact-SHA external CI/independent for technical/verifying/done commits, and verify.sh on final HEAD. Final acceptance requires done/high, a clean index/worktree and synchronized origin/main. No policy or timeout changes.
 
 - Official pre-consolidation verify.sh: exit 0, 629.53s, 1013/1013 tests, lint/smoke/test passed, zero warnings/blocking failures; logs outside checkout at /tmp/cac-context-close-20261011.i6o4Zr/precommit-gate/.
+
+- Technical 0eeca1fb16790c05382fc4ba139e2b77bb712fa6 hooks passed (648.76s, 1013 tests), but CI 38284866938 failed ShellCheck 0.9.0 SC2015 on the budget guard. Reproduced with official 0.9.0 in /tmp; explicit if preserves both bound checks and fails closed on invalid counts. ShellCheck 0.9.0/0.11.0 and focused context/lifecycle/Stop/safety pass; normal commit hooks must rerun the full contract before replacement publication. No policy/workflow/timeout change.
+
+- Updated native proof after the final guard correction passes for all four types with exact context attachments and source hashes: .agent/claude-context-20261012-final/native-summary.json; globals unchanged and temporary credentials removed.
