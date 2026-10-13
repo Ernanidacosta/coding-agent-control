@@ -2,8 +2,8 @@
 
 ## Current
 
-Status: done
-Task: Consolidate Claude essential context through exact-SHA external gates and the final done checkpoint before stabilization.
+Status: active
+Task: Consolidate the approved v1.0.0-rc1 recommended baseline through normal operational checkpoints and publish an immutable tag at the final done SHA.
 Risk: high
 
 ## Scope
@@ -14,7 +14,7 @@ Risk: high
 
 ## Next
 
-None
+- Publish the approved active checkpoint after normal hooks and obtain its exact-SHA CI/independent evidence; advance through verifying and done, run final verify.sh, then publish the annotated tag. Roll out v1.0.0-rc1 to affiliate-status-bot only in the next separate task.
 
 ## Blockers
 
@@ -22,8 +22,7 @@ None
 
 ## Recently Completed
 
-- Technical baseline 50a8d743f3f6c67d7b10944c9fc041cd0471ea65 published: normal hooks passed (689.76s, 1013/1013 tests), CI 38304773383 passed all four jobs, independent verifier returned pass bound to that exact SHA. Initial 0eeca1f CI rejected SC2015 under ShellCheck 0.9.0; the minimal explicit-if guard correction passed both 0.9.0 and local 0.11.0 without changing limits or policy.
-- Separate SubagentStart context extracts seven literal AGENT.md excerpts: 1698 UTF-8 bytes / 32 lines, bounded at 2560 bytes / 48 lines; normative text unchanged and mirrors synchronized. Every valid Start receives the supplement because loading state is not exposed by the host.
-- Native proof after the final guard correction: general-purpose retains complete rules; Explore, Plan and omitClaudeMd receive one exact hook_additional_context attachment without CLAUDE.md. All four report the fixture scope blocker via harmless printf, then pass the unchanged three completion gates. Sources byte-matched, globals unchanged, temporary credentials removed; .agent/claude-context-20261012-final/native-summary.json.
-- Verifying defb9fce232e3bf6fa67ed58bf409b357c862970 published after valid active-to-verifying transition and normal hooks (672.25s, 1013 tests). CI 38308248985 passed all four jobs and independent verification returned pass bound to that exact SHA. Done acceptance remains subject to the final checkpoint's own external gates and verify.sh; contract 750/900 unchanged.
-- Accepted limits: Start cannot prevent creation after context/registration failure; explicit diagnostics remain. Orphan retention is unchanged. Directive truncation/budget, linked worktrees and staged issuance are post-adoption hardening; next task is stabilization readiness, not a new feature.
+- Owner approved v1.0.0-rc1 based on readiness candidate 42499a8f23aedcc0cf6f929677f633745fbf688d, with zero concrete blockers. The published tag must target the final done operational descendant, not necessarily this original candidate.
+- Readiness passed: fresh install, update/reinstall, Claude/Codex, idempotent hooks, doctor, verification contract, state/Risk, independent verification, optional local authority/receipts and existing-project upgrade; focused adoption tests 123/123, exit 0 in 63.72s.
+- Candidate CI 38314001771 and exact-SHA independent verification passed; final official verify.sh exited 0 in 709.78s with policy 750/900 and no summary warnings or blocking failures.
+- Accepted nonblocking limitations: Claude orphan lifecycle records until confirmed termination; SubagentStart cannot block creation after registration failure; directive budget/truncation hardening; local authority without linked worktrees; staged issuance unsupported.
