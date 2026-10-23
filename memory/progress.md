@@ -2,7 +2,7 @@
 
 ## Current
 
-Status: active
+Status: verifying
 Task: CAC-STATE-PROGRESS-DELETION-1: stop STATE_PROGRESS_STALE from treating a staged deletion as a missing source under the gitignored-progress mtime fallback.
 Risk: high
 
@@ -14,7 +14,8 @@ Risk: high
 
 ## Next
 
-- Owner sequence: active technical checkpoint, then active -> verifying, then verifying -> done; each pushed with CI and exact-SHA independent verification, then final verify.sh.
+- Technical active checkpoint 6c38060ee0b411ced231ecee1e38f99a068ca388: pre-commit hooks passed (675s), CI 39999627723 passed all four jobs, exact-SHA independent verification passed. Full verify.sh before that commit passed (744s, 1021 tests).
+- Remaining owner sequence: this verifying checkpoint with its own CI and independent verification, then verifying -> done with CI, independent verification and final verify.sh.
 - ENROLLMENT-SOURCE-ELIGIBILITY-1 is parked in `git stash` (.gitignore /.agent/ + tests/authority-source-identity.bats 23-26). Restore it byte-identical only after this task is done, clean and synchronized; do not commit it in this round.
 
 ## Blockers
