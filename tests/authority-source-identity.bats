@@ -296,3 +296,60 @@ seed() {
   [ "$(printf '%s' "$developer" | fingerprint)" = "$(printf '%s' "$runner" | fingerprint)" ]
   [ "$(printf '%s' "$developer" | jq -cS .)" = "$(printf '%s' "$runner" | jq -cS .)" ]
 }
+
+# Hook scratch state: a private event log, a "latest" symlink and a FIFO. None
+# of them is source, and none of them can be hashed by a runner that does not
+# own them.
+seed_agent_scratch() {
+  mkdir -p .agent/run
+  printf '{"event":1}\n' > .agent/run/events.jsonl
+  chmod 0600 .agent/run/events.jsonl
+  ln -s run .agent/latest
+  mkfifo .agent/run/pipe
+}
+
+@test "23 repo-ignored .agent/ keeps private, symlink and FIFO entries out of the identity" {
+  seed
+  printf '/.agent/\n' > .gitignore
+  git add .gitignore
+  git commit -qm ignore
+  seed_agent_scratch
+  assert_identity_parity
+  authority_manifest | jq -e '.valid and all(.entries[]; (.path | startswith(".agent/")) | not)' >/dev/null
+}
+
+@test "24 a tracked file inside a repo-ignored directory stays in the identity" {
+  seed
+  printf '/.agent/\n' > .gitignore
+  mkdir -p .agent
+  printf 'kept\n' > .agent/kept.txt
+  git add .gitignore
+  git add -f .agent/kept.txt
+  git commit -qm ignore
+  seed_agent_scratch
+  printf 'changed\n' > .agent/kept.txt
+  assert_identity_parity
+  authority_manifest | jq -e '
+    any(.entries[]; .path == ".agent/kept.txt" and .index.state == "present")
+    and ([.entries[].path | select(startswith(".agent/"))] == [".agent/kept.txt"])' >/dev/null
+}
+
+# The boundary this repository's own .gitignore exists for: the authority runs
+# without the developer's global config, so a path ignored only there is
+# untracked source to the runner, special entries included.
+@test "25 .agent/ ignored only by global excludes stays in the authority identity" {
+  seed
+  git config --unset core.excludesFile
+  seed_agent_scratch
+  printf '.agent/\n' > "$REPO/global-ignore"
+  printf '[core]\n\texcludesFile = %s\n' "$REPO/global-ignore" > "$REPO/developer.gitconfig"
+  [ -z "$(GIT_CONFIG_GLOBAL="$REPO/developer.gitconfig" git ls-files --others --exclude-standard -- .agent)" ]
+  GIT_CONFIG_GLOBAL=/dev/null authority_manifest | jq -e '
+    any(.entries[]; .path == ".agent/run/events.jsonl")
+    and any(.entries[]; .path == ".agent/latest")' >/dev/null
+}
+
+@test "26 this repository ignores .agent/ without the developer's global config" {
+  GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 HOME=/nonexistent \
+    git -C "$BATS_TEST_DIRNAME/.." check-ignore -q .agent/run/events.jsonl
+}

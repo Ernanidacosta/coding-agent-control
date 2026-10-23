@@ -8,6 +8,9 @@
 !/.agent-md/templates/
 !/.agent-md/templates/memory/
 !/.agent-md/templates/memory/*.md
+# Hook scratch state is local. Declared here, not only in a global ignore file,
+# because the local authority enumerates source without the developer's config.
+/.agent/
 # Keep the new installed lifecycle source visible despite global host ignores.
 !/.claude/
 /.claude/*
