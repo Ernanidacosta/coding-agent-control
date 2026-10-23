@@ -2,7 +2,7 @@
 
 ## Current
 
-Status: active
+Status: verifying
 Task: ENROLLMENT-SOURCE-ELIGIBILITY-1: declare /.agent/ in the repository .gitignore so the local authority, which runs without the developer's global Git config, keeps hook scratch state out of source identity; tests/authority-source-identity.bats 23-26.
 Risk: high
 
@@ -15,7 +15,8 @@ Risk: high
 ## Next
 
 - Audit closed: without /.agent/ the authority identity of this repo is invalid (884 .agent/ entries, 9 nested repos as unsupported special entries); with it, valid with none. Tests 23-25 are coverage-only (pass at HEAD); 26 fails at HEAD and passes with the fix. No production change.
-- Consolidate active -> verifying -> done with CI and exact-SHA independent verification at each checkpoint, then final verify.sh. stash@{0} is kept until done.
+- Active checkpoint f26f48c8c00bf5ec2814f73823e84f194927c8d2: pre-commit hooks passed (598s), CI 40013382466 passed all four jobs, exact-SHA independent verification passed.
+- Remaining: this verifying checkpoint with its own CI and independent verification, then verifying -> done with CI, independent verification and final verify.sh. stash@{0} is kept until done.
 - Separate observation, not this task: full verify.sh took ~744s against the 750s per-check limit; harden only if it keeps reproducing.
 
 ## Blockers
