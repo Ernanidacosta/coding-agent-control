@@ -2,23 +2,24 @@
 
 ## Current
 
-Status: done
-Task: Consolidate the approved v1.0.0-rc1 recommended baseline through normal operational checkpoints and publish an immutable tag at the final done SHA.
+Status: active
+Task: CAC-STATE-PROGRESS-DELETION-1: stop STATE_PROGRESS_STALE from treating a staged deletion as a missing source under the gitignored-progress mtime fallback.
 Risk: high
 
 ## Scope
 
-- memory/plan.md
+- .claude/hooks/_lib.sh
+- tests/state-enforcement.bats
 - memory/progress.md
-- memory/verify.md
 
 ## Next
 
-- Publish the annotated v1.0.0-rc1 tag at this final done checkpoint only after its own CI, independent verification and final verify.sh pass with clean synchronized Git. Next separate task: Roll out v1.0.0-rc1 to affiliate-status-bot; do not begin that rollout here.
+- Owner sequence: active technical checkpoint, then active -> verifying, then verifying -> done; each pushed with CI and exact-SHA independent verification, then final verify.sh.
+- ENROLLMENT-SOURCE-ELIGIBILITY-1 is parked in `git stash` (.gitignore /.agent/ + tests/authority-source-identity.bats 23-26). Restore it byte-identical only after this task is done, clean and synchronized; do not commit it in this round.
 
 ## Blockers
 
-None
+- Risk high needs independent verification bound to each pushed checkpoint SHA.
 
 ## Recently Completed
 

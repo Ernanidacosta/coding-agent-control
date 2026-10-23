@@ -4202,18 +4202,26 @@ state_enforcement_result() {
   # stuck at 0 forever once any relevant file changes. Fall back to mtime:
   # progress.md newer than every modified relevant file counts as updated.
   if [ "$progress_changed" -eq 0 ] && git check-ignore -q memory/progress.md 2>/dev/null; then
-    local progress_mtime newest_source_mtime file file_mtime all_sources_exist
+    local progress_mtime newest_source_mtime file file_mtime all_sources_exist staged_deletions
     progress_mtime=$(stat_mtime memory/progress.md)
     progress_mtime=${progress_mtime:-0}
     newest_source_mtime=0
     all_sources_exist=1
+    staged_deletions=$(git diff --cached --name-only --no-renames --diff-filter=D -- 2>/dev/null)
     while IFS= read -r file; do
       [ -z "$file" ] && continue
       if [ ! -e "$file" ]; then
-        all_sources_exist=0
-        continue
+        # A deletion the index records has no file left to stat. It cannot
+        # predate HEAD, so HEAD's commit time is the floor progress must meet.
+        # A path missing only from the worktree is still unexplained.
+        if ! printf '%s\n' "$staged_deletions" | grep -Fxq -- "$file"; then
+          all_sources_exist=0
+          continue
+        fi
+        file_mtime=$(git log -1 --format=%ct HEAD 2>/dev/null)
+      else
+        file_mtime=$(stat_mtime "$file")
       fi
-      file_mtime=$(stat_mtime "$file")
       file_mtime=${file_mtime:-0}
       if [ "$file_mtime" -gt "$newest_source_mtime" ]; then
         newest_source_mtime=$file_mtime

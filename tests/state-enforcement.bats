@@ -237,3 +237,107 @@ EOF
   out=$(run_hook state-enforcement.sh '{"stop_hook_active":false}')
   [ -z "$out" ]
 }
+
+# A gitignored progress.md is invisible to the index, so the classifier falls
+# back to mtimes. These fixtures pin every mtime explicitly (see the
+# mtime-granularity gotcha) and exercise the commit boundary.
+ignore_progress_and_commit() {
+  git rm --cached -q memory/progress.md
+  echo 'memory/' > .git/info/exclude
+  git add -A
+  git commit -q -m "fixture"
+  # Every tracked file predates the fixture's own edits.
+  touch -t 202001010000 "$@"
+}
+
+@test "pre-commit: staged deletion with updated gitignored progress passes" {
+  echo "export const x = 1" > gone.ts
+  ignore_progress_and_commit gone.ts memory/progress.md
+  git rm -q gone.ts
+  touch memory/progress.md
+  run bash .githooks/pre-commit
+  [ "$status" -eq 0 ] || { printf 'pre-commit exit %s:\n%s\n' "$status" "$output" >&2; false; }
+}
+
+@test "pre-commit: staged deletion does not hide an existing change newer than progress" {
+  echo "export const x = 1" > gone.ts
+  echo "export const y = 1" > kept.ts
+  ignore_progress_and_commit gone.ts kept.ts memory/progress.md
+  git rm -q gone.ts
+  echo "export const y = 2" > kept.ts
+  git add kept.ts
+  touch -t 202101010000 memory/progress.md
+  run bash .githooks/pre-commit
+  [ "$status" -eq 1 ]
+  echo "$output" | grep -q 'ERROR STATE_PROGRESS_STALE'
+}
+
+@test "pre-commit: staged deletion alone still requires progress newer than HEAD" {
+  # A deletion has no mtime, so HEAD's commit time stands in as its floor.
+  # Without it a deletion-only change would pass with any old progress.md.
+  echo "export const x = 1" > gone.ts
+  ignore_progress_and_commit gone.ts memory/progress.md
+  git rm -q gone.ts
+  run bash .githooks/pre-commit
+  [ "$status" -eq 1 ]
+  echo "$output" | grep -q 'ERROR STATE_PROGRESS_STALE'
+}
+
+@test "pre-commit: staged deletion outside the relevant globs stays out of enforcement" {
+  mkdir -p docs
+  echo "# Guide" > docs/guide.md
+  ignore_progress_and_commit docs/guide.md memory/progress.md
+  git rm -q docs/guide.md
+  run bash .githooks/pre-commit
+  [ "$status" -eq 0 ] || { printf 'pre-commit exit %s:\n%s\n' "$status" "$output" >&2; false; }
+  ! echo "$output" | grep -q 'STATE_PROGRESS_STALE'
+}
+
+@test "stop: unstaged deletion with gitignored progress keeps blocking" {
+  echo "export const x = 1" > gone.ts
+  ignore_progress_and_commit gone.ts memory/progress.md
+  rm gone.ts
+  touch memory/progress.md
+  out=$(run_hook state-enforcement.sh '{"stop_hook_active":false}')
+  echo "$out" | jq -e '.decision == "block"' > /dev/null
+  echo "$out" | jq -e '.reason | test("STATE_PROGRESS_STALE")' > /dev/null
+}
+
+@test "pre-commit: modified source newer than gitignored progress blocks" {
+  echo "export const x = 1" > src.ts
+  ignore_progress_and_commit src.ts memory/progress.md
+  echo "export const x = 2" > src.ts
+  git add src.ts
+  touch -t 202101010000 memory/progress.md
+  run bash .githooks/pre-commit
+  [ "$status" -eq 1 ]
+  echo "$output" | grep -q 'ERROR STATE_PROGRESS_STALE'
+}
+
+@test "pre-commit: added source follows the gitignored progress mtime contract" {
+  ignore_progress_and_commit memory/progress.md
+  echo "export const x = 1" > added.ts
+  git add added.ts
+  run bash .githooks/pre-commit
+  [ "$status" -eq 1 ]
+  echo "$output" | grep -q 'ERROR STATE_PROGRESS_STALE'
+
+  touch memory/progress.md
+  run bash .githooks/pre-commit
+  [ "$status" -eq 0 ] || { printf 'pre-commit exit %s:\n%s\n' "$status" "$output" >&2; false; }
+}
+
+@test "pre-commit: renamed source follows the gitignored progress mtime contract" {
+  echo "export const x = 1" > old.ts
+  ignore_progress_and_commit old.ts memory/progress.md
+  git mv old.ts new.ts
+  touch new.ts
+  touch -t 202101010000 memory/progress.md
+  run bash .githooks/pre-commit
+  [ "$status" -eq 1 ]
+  echo "$output" | grep -q 'ERROR STATE_PROGRESS_STALE'
+
+  touch memory/progress.md
+  run bash .githooks/pre-commit
+  [ "$status" -eq 0 ] || { printf 'pre-commit exit %s:\n%s\n' "$status" "$output" >&2; false; }
+}
