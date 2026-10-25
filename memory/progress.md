@@ -2,7 +2,7 @@
 
 ## Current
 
-Status: active
+Status: verifying
 Task: Stabilize release-aware installation and provenance: `install.sh --ref=<tag|sha>` installs an immutable GitHub archive with no fallback, records `.agent-md/install-provenance.json`, and doctor reports it.
 Risk: high
 
@@ -18,11 +18,9 @@ Risk: high
 
 ## Next
 
-- Implemented test-first: tests/install-provenance.bats failed 24/24 at HEAD 5cffe0f and passes 24/24; install.bats Quickstart contract now pins the stable tag path and keeps main as development. Focused install/doctor suites, ShellCheck and a real --ref=v1.0.0-rc1 install (archive_commit 25943d7) passed.
-- First full verify.sh failed (617s) on a flaky assertion in the new no-timestamp test: `[0-9]{10}` matched digits inside the random fixture archive_commit. Fixed test-only (commit checked by exact shape, timestamp search excludes it); owner approved one rerun.
-- Then active -> verifying -> done with CI and exact-SHA independent verification at each checkpoint.
-- README Quickstart names v1.0.0-rc2, which does not exist until the separate Publish v1.0.0-rc2 task tags it.
-- Do not create the v1.0.0-rc2 tag in this task.
+- Active checkpoint 91ad8aa0f94b8c892634289120b407c9b14473c8: tests/install-provenance.bats failed 24/24 at 5cffe0f and passes 24/24; full verify.sh passed on the approved rerun (522s, 1049 tests) after a flaky test-only assertion was fixed; pre-commit hooks passed (544s), CI 40169461124 passed all four jobs, exact-SHA independent verification passed.
+- Remaining: this verifying checkpoint with its own CI and independent verification, then verifying -> done with CI, independent verification and final verify.sh.
+- README Quickstart names v1.0.0-rc2, which does not exist until the separate Publish v1.0.0-rc2 task tags it. Do not create the tag in this task.
 
 ## Blockers
 
