@@ -73,13 +73,28 @@ Public coverage terms are precise:
 
 ## Quickstart
 
+### Stable (recommended)
+
+Install a release. The installer and the package both come from the same tag:
+
 ```bash
 # From inside your project directory
+curl -fsSL https://raw.githubusercontent.com/Ernanidacosta/coding-agent-control/refs/tags/v1.0.0-rc2/install.sh | bash -s -- --ref=v1.0.0-rc2
+```
+
+`--ref` takes a release tag or a full 40-character commit SHA. It always
+installs that GitHub archive and fails instead of falling back to another ref.
+Use a release tag for production and dogfooding baselines.
+
+### Development
+
+```bash
+# Tracks the moving main branch; not a stable baseline
 curl -fsSL https://raw.githubusercontent.com/Ernanidacosta/coding-agent-control/main/install.sh | bash
 ```
 
-This downloads coding-agent-control from its standalone GitHub repository. It
-is not the upstream installation URL.
+Both commands download coding-agent-control from its standalone GitHub
+repository. It is not the upstream installation URL.
 
 The installer adds support for Claude Code, Codex, Cursor, and Windsurf by default.
 No `agent-md.toml`, CI provider, `gh`, attestation verifier, approval system,
@@ -129,6 +144,7 @@ your-project/
   .windsurf/rules/agent-md.md      # Windsurf workspace rule
 
   .agent-md/
+    install-provenance.json        # which source was installed (metadata only)
     bin/
       discover_helpers.sh
       doctor.sh
@@ -546,7 +562,66 @@ the behavior it had before the contract existed.
 ./install.sh --codex-hooks=skip .
 ./install.sh --codex-hooks=merge .
 ./install.sh --codex-hooks=replace .
+
+# Pinned source: a release tag or a full commit SHA
+./install.sh --ref=v1.0.0-rc2 .
 ```
+
+### Pinned Installs And Provenance
+
+The installer takes its package from exactly one source:
+
+| Source | Selected by | Recorded `source` |
+|---|---|---|
+| Release tag or commit | `--ref=<tag or full SHA>` | `github-ref` |
+| Local package | running `install.sh` from a package checkout | `package` |
+| Local archive | `CODING_AGENT_CONTROL_SOURCE_ARCHIVE=<file.tar.gz>` (works offline) | `archive-local` |
+| Custom URL | `CODING_AGENT_CONTROL_SOURCE_URL=<url>` | `url` |
+| Moving `main` | piped execution with none of the above | `development` |
+
+`--ref` fetches `archive/refs/tags/<tag>.tar.gz`, or `archive/<sha>.tar.gz`
+for a full SHA, even when the script runs from a local package. A tag is
+requested only as a tag, so a branch with the same name is never installed
+instead. Combining `--ref` with either environment override is an error, and a
+ref that cannot be fetched fails with no fallback. `--dry-run` reports the
+source and ref it would use and writes nothing.
+
+Every real install records `.agent-md/install-provenance.json`:
+
+```json
+{
+  "schema": 1,
+  "project": "coding-agent-control",
+  "source": "github-ref",
+  "ref": "v1.0.0-rc2",
+  "source_url": "https://github.com/Ernanidacosta/coding-agent-control/archive/refs/tags/v1.0.0-rc2.tar.gz",
+  "archive_commit": "<40-character commit ID>"
+}
+```
+
+- `ref` is the ref that was requested (`main` for `development`, `null` for a
+  local package or archive).
+- `source_url` is recorded only when it plainly carries no credentials: a URL
+  with userinfo, a query string or a fragment is stored as `null`.
+- `archive_commit` is the commit the archive declares about itself
+  (`git get-tar-commit-id`), or `null` when it carries none. It is not looked
+  up or verified.
+- There is no timestamp, so reinstalling the same ref leaves the file
+  byte-identical. Self-install into the source package records nothing.
+
+To upgrade, rerun the installer with the new ref. It prints
+`installed: github-ref v1.0.0-rc1 → target: github-ref v1.0.0-rc2` and keeps
+everything a reinstall already keeps: `memory/`, `agent-md.toml`,
+`.project-control.toml`, third-party hooks, and anything outside the installed
+files, such as authority enrollment and credentials. An install made before
+provenance existed is upgraded the same way. `doctor.sh` prints the recorded
+source, ref, archive commit and the `install.sh --ref=...` command that
+reproduces it; when no provenance exists it says so without failing.
+
+Provenance is operational metadata. It is not a receipt, attestation, or trust
+anchor. It does not prove package integrity, does not show that installed files
+still match the package, and does not replace Git, CI, or independent
+verification.
 
 The installer backs up existing top-level rule files before replacing
 them, and leaves a file that already matches untouched, so reinstalling

@@ -120,14 +120,38 @@ suprimido. Detalhes em
 
 ## Início rápido
 
-Dentro do diretório do seu projeto:
+### Estável (recomendado)
+
+Instale uma release. O installer e o pacote vêm da mesma tag:
 
 ```bash
+# Dentro do diretório do seu projeto
+curl -fsSL https://raw.githubusercontent.com/Ernanidacosta/coding-agent-control/refs/tags/v1.0.0-rc2/install.sh | bash -s -- --ref=v1.0.0-rc2
+```
+
+`--ref` aceita uma tag de release ou um SHA de commit completo (40 caracteres).
+Ele sempre instala esse archive do GitHub e falha em vez de cair para outro ref.
+Use uma tag de release como baseline de produção e dogfooding.
+
+### Desenvolvimento
+
+```bash
+# Acompanha a branch móvel main; não é baseline estável
 curl -fsSL https://raw.githubusercontent.com/Ernanidacosta/coding-agent-control/main/install.sh | bash
 ```
 
-Esse endereço baixa coding-agent-control de seu repositório GitHub standalone.
-Não é a URL de instalação do upstream.
+Os dois comandos baixam coding-agent-control de seu repositório GitHub
+standalone. Não é a URL de instalação do upstream.
+
+Toda instalação real grava `.agent-md/install-provenance.json` com `source`
+(`github-ref`, `package`, `archive-local`, `url` ou `development`), `ref`,
+`source_url` sem credenciais e `archive_commit`, o commit que o próprio archive
+declara. Não há timestamp. `./.agent-md/bin/doctor.sh` mostra esses dados e o
+comando `install.sh --ref=...` que reproduz a instalação. Uma instalação antiga
+sem provenance continua funcionando. Provenance é metadata operacional: não é
+receipt, attestation nem trust anchor, não prova integridade do pacote e não
+substitui Git, CI ou verificação independente. Detalhes em
+[Pinned Installs And Provenance](README.md#pinned-installs-and-provenance).
 
 O installer adiciona suporte a Claude Code, Codex, Cursor e Windsurf. Não é
 necessário criar `agent-md.toml`, instalar `gh`, configurar CI, verifier,

@@ -2,21 +2,27 @@
 
 ## Current
 
-Status: done
-Task: ENROLLMENT-SOURCE-ELIGIBILITY-1: declare /.agent/ in the repository .gitignore so the local authority, which runs without the developer's global Git config, keeps hook scratch state out of source identity; tests/authority-source-identity.bats 23-26.
+Status: active
+Task: Stabilize release-aware installation and provenance: `install.sh --ref=<tag|sha>` installs an immutable GitHub archive with no fallback, records `.agent-md/install-provenance.json`, and doctor reports it.
 Risk: high
 
 ## Scope
 
-- .gitignore
-- tests/authority-source-identity.bats
+- install.sh
+- .agent-md/bin/doctor.sh
+- README.md
+- README.pt-BR.md
+- tests/install-provenance.bats
+- tests/install.bats
 - memory/progress.md
 
 ## Next
 
-- Owner step, optional: `sudo ./examples/local-issuer/agent-md-authority enroll /home/ernani/agent-md`, stopping at the approval prompt; expected status eligible.
-- Next separate task: Stabilize release-aware installation and provenance.
-- Separate observation: full verify.sh took ~744s against the 750s per-check limit; harden only if it keeps reproducing.
+- Implemented test-first: tests/install-provenance.bats failed 24/24 at HEAD 5cffe0f and passes 24/24; install.bats Quickstart contract now pins the stable tag path and keeps main as development. Focused install/doctor suites, ShellCheck and a real --ref=v1.0.0-rc1 install (archive_commit 25943d7) passed.
+- First full verify.sh failed (617s) on a flaky assertion in the new no-timestamp test: `[0-9]{10}` matched digits inside the random fixture archive_commit. Fixed test-only (commit checked by exact shape, timestamp search excludes it); owner approved one rerun.
+- Then active -> verifying -> done with CI and exact-SHA independent verification at each checkpoint.
+- README Quickstart names v1.0.0-rc2, which does not exist until the separate Publish v1.0.0-rc2 task tags it.
+- Do not create the v1.0.0-rc2 tag in this task.
 
 ## Blockers
 

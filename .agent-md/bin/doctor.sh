@@ -385,6 +385,39 @@ EOF
   fi
 fi
 
+# Install provenance is operational metadata the installer records. Doctor only
+# reports it: a legacy install without it, or an unreadable record, never fails
+# the installation, and nothing here contacts the source it names.
+INSTALL_PROVENANCE=.agent-md/install-provenance.json
+printf 'Installation:\n'
+if [ ! -f "$INSTALL_PROVENANCE" ]; then
+  printf '  provenance: not recorded (legacy, self or pre-provenance install)\n'
+  printf '  Effect: none; enforcement does not depend on it.\n'
+  printf '  Recovery: reinstall with install.sh --ref=<release tag> to record a reproducible source.\n'
+elif ! PROVENANCE_FIELDS=$(jq -er '
+    select(.project == "coding-agent-control" and (.source | type) == "string") |
+    [.source, (.ref // "-"), (.archive_commit // ""), (.source_url // "")] | @tsv
+  ' "$INSTALL_PROVENANCE" 2>/dev/null); then
+  warn "install provenance is unreadable: $INSTALL_PROVENANCE"
+else
+  IFS=$'\t' read -r PROVENANCE_SOURCE PROVENANCE_REF PROVENANCE_COMMIT PROVENANCE_URL <<EOF
+$PROVENANCE_FIELDS
+EOF
+  printf '  source: %s\n' "$PROVENANCE_SOURCE"
+  printf '  ref: %s\n' "$PROVENANCE_REF"
+  if [ -n "$PROVENANCE_COMMIT" ]; then
+    printf '  archive commit: %s (declared by the archive, not verified)\n' "$PROVENANCE_COMMIT"
+  else
+    printf '  archive commit: not recorded\n'
+  fi
+  [ -z "$PROVENANCE_URL" ] || printf '  source url: %s\n' "$PROVENANCE_URL"
+  case "$PROVENANCE_SOURCE" in
+    github-ref) printf '  reproduce: install.sh --ref=%s\n' "$PROVENANCE_REF" ;;
+    development) printf '  note: main is a moving branch; reinstall with --ref=<release tag> for a stable baseline\n' ;;
+  esac
+  printf '  Provenance is operational metadata: not a receipt, attestation or trust anchor, and no proof that installed files are unmodified.\n'
+fi
+
 # Semantic memory is optional. ICM is the current reference integration;
 # detection is read-only and doctor never starts it or calls a daemon/API.
 ICM_ENABLED=""

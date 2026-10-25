@@ -12,9 +12,14 @@
 #   ./install.sh --claude-settings=merge .          # default: idempotent hook merge
 #   ./install.sh --claude-settings=replace .        # back up + overwrite
 #   ./install.sh --codex-hooks=skip .               # leave an existing .codex/hooks.json unchanged
+#   ./install.sh --ref=v1.0.0-rc2 .                 # install that release tag (or full commit SHA)
 #
-# Or via curl (from inside your project dir):
-#   curl -fsSL https://raw.githubusercontent.com/Ernanidacosta/coding-agent-control/main/install.sh | bash
+# Or via curl (from inside your project dir), pinned to a release:
+#   curl -fsSL https://raw.githubusercontent.com/Ernanidacosta/coding-agent-control/refs/tags/v1.0.0-rc2/install.sh | bash -s -- --ref=v1.0.0-rc2
+#
+# --ref always fetches that GitHub archive, even when run from a local package,
+# and fails instead of falling back to another ref. Without --ref, piped
+# execution installs the moving main branch.
 #
 # Agents supported: claude, codex, cursor, windsurf, all (default)
 #
@@ -38,6 +43,8 @@
 #   .githooks/ (pre-commit + commit-msg) is installed but NOT activated on
 #     curl|bash. You get a printed command to activate it manually.
 #   .agent/ is auto-added to .gitignore (hook scratch + visual evidence).
+#   .agent-md/install-provenance.json records which source was installed. It is
+#     operational metadata, not a receipt, attestation or integrity proof.
 
 set -e
 
@@ -48,10 +55,13 @@ DRY_RUN=0
 NO_OVERWRITE=0
 CLAUDE_SETTINGS="merge"
 CODEX_HOOKS="merge"
+REF=""
+REF_GIVEN=0
 
 for ARG in "$@"; do
   case $ARG in
     --agent=*)     AGENT="${ARG#*=}" ;;
+    --ref=*)       REF="${ARG#*=}"; REF_GIVEN=1 ;;
     --githooks)    GITHOOKS="yes" ;;
     --no-githooks) GITHOOKS="no" ;;
     --dry-run)     DRY_RUN=1 ;;
@@ -59,7 +69,7 @@ for ARG in "$@"; do
     --claude-settings=*) CLAUDE_SETTINGS="${ARG#*=}" ;;
     --codex-hooks=*) CODEX_HOOKS="${ARG#*=}" ;;
     --help|-h)
-      sed -n '2,30p' "$0"; exit 0 ;;
+      sed -n '2,24p' "$0"; exit 0 ;;
     *)
       [ -z "$TARGET" ] && TARGET="$ARG"
       ;;
@@ -75,6 +85,22 @@ case "$CODEX_HOOKS" in
   skip|replace|merge) ;;
   *) echo "Error: --codex-hooks must be skip|replace|merge (got '$CODEX_HOOKS')"; exit 1 ;;
 esac
+
+# A ref names one GitHub archive. Its shape is checked before anything is
+# fetched, and it never shares the decision with another source override:
+# picking a winner silently would install something the caller did not name.
+if [ "$REF_GIVEN" -eq 1 ]; then
+  case "$REF" in
+    ''|-*|/*|*/|*.|*..*|*//*|*.lock|*[!A-Za-z0-9._/-]*)
+      echo "Error: --ref must be a release tag or a full commit SHA (got '$REF')"; exit 1 ;;
+  esac
+  if [ -n "${CODING_AGENT_CONTROL_SOURCE_ARCHIVE:-}" ]; then
+    echo "Error: --ref cannot be combined with CODING_AGENT_CONTROL_SOURCE_ARCHIVE; choose one source"; exit 1
+  fi
+  if [ -n "${CODING_AGENT_CONTROL_SOURCE_URL:-}" ]; then
+    echo "Error: --ref cannot be combined with CODING_AGENT_CONTROL_SOURCE_URL; choose one source"; exit 1
+  fi
+fi
 
 TARGET="${TARGET:-.}"
 
@@ -97,8 +123,36 @@ done
 # adopted only when this script is running from a real file inside it. Piped
 # execution (curl | bash) has no source file, so it always fetches the archive
 # instead of mistaking the target project for the package.
-SOURCE_ARCHIVE_URL="${CODING_AGENT_CONTROL_SOURCE_URL:-https://github.com/Ernanidacosta/coding-agent-control/archive/main.tar.gz}"
+#
+# Every run classifies its source for the install provenance:
+#   package        this script's own package directory
+#   archive-local  CODING_AGENT_CONTROL_SOURCE_ARCHIVE
+#   github-ref     --ref, a tag or full commit SHA archive on GitHub
+#   url            CODING_AGENT_CONTROL_SOURCE_URL
+#   development    the default archive of the moving main branch
+GITHUB_ARCHIVE_BASE=https://github.com/Ernanidacosta/coding-agent-control/archive
 SOURCE_ARCHIVE_FILE="${CODING_AGENT_CONTROL_SOURCE_ARCHIVE:-}"
+if [ "$REF_GIVEN" -eq 1 ]; then
+  INSTALL_SOURCE_KIND="github-ref"
+  # A full SHA names a commit. Anything else is requested as a tag through
+  # refs/tags/, so a branch of the same name can never be installed instead.
+  if printf '%s' "$REF" | grep -Eq '^[0-9a-f]{40}$'; then
+    SOURCE_ARCHIVE_URL="$GITHUB_ARCHIVE_BASE/$REF.tar.gz"
+  else
+    SOURCE_ARCHIVE_URL="$GITHUB_ARCHIVE_BASE/refs/tags/$REF.tar.gz"
+  fi
+elif [ -n "$SOURCE_ARCHIVE_FILE" ]; then
+  INSTALL_SOURCE_KIND="archive-local"
+  SOURCE_ARCHIVE_URL=""
+elif [ -n "${CODING_AGENT_CONTROL_SOURCE_URL:-}" ]; then
+  INSTALL_SOURCE_KIND=url
+  SOURCE_ARCHIVE_URL="$CODING_AGENT_CONTROL_SOURCE_URL"
+else
+  INSTALL_SOURCE_KIND=development
+  REF=main
+  SOURCE_ARCHIVE_URL=https://github.com/Ernanidacosta/coding-agent-control/archive/main.tar.gz
+fi
+ARCHIVE_COMMIT=""
 PACKAGE_MARKERS="install.sh AGENT.md .claude/hooks/_lib.sh .agent-md/bin/doctor.sh agent-md.toml.example"
 
 is_source_package() {
@@ -140,8 +194,20 @@ fetch_source_package() {
     archive="$INSTALL_TMPDIR/package.tar.gz"
     # Download to a file rather than piping into tar: a piped curl failure is
     # hidden behind tar's exit status.
-    curl -fsSL "$SOURCE_ARCHIVE_URL" -o "$archive" \
-      || { echo "Error: cannot download or unpack $SOURCE_ARCHIVE_URL"; exit 1; }
+    if ! curl -fsSL "$SOURCE_ARCHIVE_URL" -o "$archive"; then
+      echo "Error: cannot download or unpack $SOURCE_ARCHIVE_URL"
+      if [ "$INSTALL_SOURCE_KIND" = github-ref ]; then
+        echo "  ref '$REF' was not obtained; no fallback to another ref is attempted"
+      fi
+      exit 1
+    fi
+  fi
+  # git archive, which GitHub uses, embeds the commit it was made from. That is
+  # what the archive declares about itself, recorded as such; nothing here
+  # verifies it.
+  if command -v git >/dev/null 2>&1 && command -v gzip >/dev/null 2>&1; then
+    ARCHIVE_COMMIT=$(gzip -dc "$archive" 2>/dev/null | git get-tar-commit-id 2>/dev/null || true)
+    printf '%s' "$ARCHIVE_COMMIT" | grep -Eq '^[0-9a-f]{40}$' || ARCHIVE_COMMIT=""
   fi
   tar -xzf "$archive" -C "$INSTALL_TMPDIR" \
     || { echo "Error: cannot unpack the coding-agent-control source archive"; exit 1; }
@@ -159,7 +225,7 @@ fetch_source_package() {
 
 SCRIPT_DIR=""
 INSTALL_SOURCE_MODE="package"
-if [ -n "${BASH_SOURCE[0]:-}" ] && [ -f "${BASH_SOURCE[0]}" ]; then
+if [ "$REF_GIVEN" -eq 0 ] && [ -n "${BASH_SOURCE[0]:-}" ] && [ -f "${BASH_SOURCE[0]}" ]; then
   if SCRIPT_CANDIDATE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd 2>/dev/null)"; then
     :
   else
@@ -170,7 +236,14 @@ if [ -n "${BASH_SOURCE[0]:-}" ] && [ -f "${BASH_SOURCE[0]}" ]; then
   fi
 fi
 
-if [ -z "$SCRIPT_DIR" ]; then
+if [ -n "$SCRIPT_DIR" ]; then
+  if [ -n "$SOURCE_ARCHIVE_FILE" ] || [ -n "${CODING_AGENT_CONTROL_SOURCE_URL:-}" ]; then
+    echo "  ! CODING_AGENT_CONTROL_SOURCE_* is ignored: this script runs from its own package"
+  fi
+  INSTALL_SOURCE_KIND=package
+  REF=""
+  SOURCE_ARCHIVE_URL=""
+else
   INSTALL_SOURCE_MODE="archive"
   fetch_source_package
 fi
@@ -206,7 +279,11 @@ fi
 
 echo "▸ Installing coding-agent-control directives → $TARGET"
 if [ "$INSTALL_SOURCE_MODE" = archive ]; then
-  echo "▸ Source: fetched package archive"
+  case "$INSTALL_SOURCE_KIND" in
+    github-ref) echo "▸ Source: fetched package archive (github-ref $REF)" ;;
+    development) echo "▸ Source: fetched package archive (development main — a moving branch; pin a release with --ref)" ;;
+    *) echo "▸ Source: fetched package archive ($INSTALL_SOURCE_KIND)" ;;
+  esac
 else
   echo "▸ Source: $SCRIPT_DIR"
 fi
@@ -743,6 +820,83 @@ if [ "$DRY_RUN" -eq 0 ]; then
   echo "  ✓ .agent-md/bin/   (plain helper scripts)"
 else
   echo "  → would write     .agent-md/bin/*"
+fi
+
+# --- Install provenance (.agent-md/install-provenance.json) ---
+# Only facts this run can state: the source kind, the ref it was asked for, the
+# URL it fetched and the commit the archive declares. No timestamp, so the same
+# install writes the same bytes. It is operational metadata, never a receipt,
+# attestation or trust anchor, and it cannot show that installed files still
+# match the package.
+PROVENANCE_REL=.agent-md/install-provenance.json
+
+provenance_safe_url() {
+  # A URL is persisted only when it plainly carries no credentials: no
+  # userinfo, query or fragment, and nothing that would need JSON escaping.
+  case "$1" in
+    *@*|*\?*|*#*|*\"*|*\\*|*[[:space:]]*|*[[:cntrl:]]*) return 1 ;;
+    https://*|http://*|file://*) printf '%s\n' "$1" ;;
+    *) return 1 ;;
+  esac
+}
+
+provenance_json_value() {
+  # Every value is validated before it gets here, so none needs escaping.
+  if [ -n "$1" ]; then printf '"%s"' "$1"; else printf 'null'; fi
+}
+
+provenance_json() {
+  local url
+  url=$(provenance_safe_url "$SOURCE_ARCHIVE_URL") || url=""
+  printf '{\n'
+  printf '  "schema": 1,\n'
+  printf '  "project": "coding-agent-control",\n'
+  printf '  "source": "%s",\n' "$INSTALL_SOURCE_KIND"
+  printf '  "ref": %s,\n' "$(provenance_json_value "$REF")"
+  printf '  "source_url": %s,\n' "$(provenance_json_value "$url")"
+  printf '  "archive_commit": %s\n' "$(provenance_json_value "$ARCHIVE_COMMIT")"
+  printf '}\n'
+}
+
+provenance_summary() {
+  # file. Reads the installer's own fixed layout; anything else is reported
+  # as unrecognized rather than guessed at.
+  local source ref
+  source=$(sed -n 's/^  "source": "\([a-z-]*\)",$/\1/p' "$1" | head -n 1)
+  ref=$(sed -n 's/^  "ref": "\([^"]*\)",$/\1/p' "$1" | head -n 1)
+  if [ -z "$source" ]; then
+    printf 'unrecognized provenance\n'
+  else
+    printf '%s %s\n' "$source" "${ref:--}"
+  fi
+}
+
+PROVENANCE_TARGET_SUMMARY="$INSTALL_SOURCE_KIND ${REF:--}"
+PROVENANCE_DST="$TARGET/$PROVENANCE_REL"
+if same_file "$SCRIPT_DIR" "$TARGET"; then
+  echo "  · provenance not recorded (target is the source package)"
+elif [ "$DRY_RUN" -eq 1 ]; then
+  echo "  → would record     $PROVENANCE_REL ($PROVENANCE_TARGET_SUMMARY)"
+elif ! skip_existing "$PROVENANCE_DST"; then
+  PROVENANCE_STAGED=$(mktemp "$TARGET/.agent-md/.install-provenance.XXXXXX")
+  INSTALL_HOOK_CANDIDATE="$PROVENANCE_STAGED"
+  provenance_json > "$PROVENANCE_STAGED"
+  if [ -f "$PROVENANCE_DST" ] && cmp -s "$PROVENANCE_STAGED" "$PROVENANCE_DST"; then
+    rm -f "$PROVENANCE_STAGED"
+    echo "  · already current  $PROVENANCE_REL"
+  else
+    if [ -f "$PROVENANCE_DST" ]; then
+      echo "  · installed: $(provenance_summary "$PROVENANCE_DST") → target: $PROVENANCE_TARGET_SUMMARY"
+    else
+      echo "  · installed: no provenance recorded → target: $PROVENANCE_TARGET_SUMMARY"
+    fi
+    # The previous record is installer-owned and summarized above; the
+    # project's own history keeps it if the project versions it.
+    chmod "$(printf '%o' "$((0666 & ~0$(umask)))")" "$PROVENANCE_STAGED"
+    mv "$PROVENANCE_STAGED" "$PROVENANCE_DST"
+    echo "  ✓ $PROVENANCE_REL ($PROVENANCE_TARGET_SUMMARY)"
+  fi
+  INSTALL_HOOK_CANDIDATE=""
 fi
 
 # --- Config template (never overwrite a real agent-md.toml) ---
