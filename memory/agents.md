@@ -3,6 +3,7 @@
 ## Active Agents
 
 - Codex — implementation, repository verification, and handoff.
+- Claude Code — implementation, repository verification, and handoff.
 
 ## Integrations
 
