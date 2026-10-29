@@ -77,6 +77,13 @@ O vocabulário público é preciso:
 - **Experimental** — existe integração, mas ela ainda não sustenta uma garantia
   pública estável.
 
+Hosts leem só parte de um arquivo de regras longo. O Codex lê no máximo
+`project_doc_max_bytes` do `AGENTS.md`, 32 KiB por padrão conforme observado no
+codex-cli 0.163.0, somando todos os `AGENTS.md` do caminho, e descarta o resto
+em silêncio. O `AGENT.md` distribuído fica em até 30 KiB, fixado por teste;
+acréscimos do projeto consomem o restante. Cursor e Windsurf não publicam um
+limite estável, então o orçamento deles depende da implementação.
+
 Consulte a [matriz detalhada no README principal](README.md#enforcement-matrix)
 antes de depender de um bloqueio específico.
 

@@ -71,6 +71,14 @@ Public coverage terms are precise:
 - **Experimental** — an integration exists, but does not yet support a stable
   public enforcement claim.
 
+Hosts read only part of a long rules file. Codex reads at most
+`project_doc_max_bytes` of `AGENTS.md`, 32 KiB by default as observed in
+codex-cli 0.163.0, shared by every `AGENTS.md` on the path, and drops the rest
+silently. The shipped `AGENT.md` stays at or below 30 KiB, pinned by a test, so
+project additions to `AGENTS.md` count against the remaining budget. Cursor
+and Windsurf publish no limit this project treats as stable, so their rule
+budgets are implementation-dependent; keep project additions short.
+
 ## Quickstart
 
 ### Stable (recommended)

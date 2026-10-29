@@ -157,3 +157,53 @@
     "$BATS_TEST_DIRNAME/../install.sh"
   [ "$status" -ne 0 ]
 }
+
+# Codex reads at most project_doc_max_bytes of AGENTS.md (32 KiB by default in
+# codex-cli 0.163.0, shared by every AGENTS.md on the path) and drops the rest
+# silently. The shipped directives keep 2 KiB of that budget free.
+@test "directives fit the Codex project-doc budget with margin" {
+  size=$(wc -c < "$BATS_TEST_DIRNAME/../AGENT.md")
+  [ "$size" -le 30720 ] || { echo "AGENT.md is $size bytes; budget is 30720" >&2; false; }
+}
+
+@test "directives keep every essential section after the budget reduction" {
+  for heading in '## 1. Role' '## 2. Working State And Control Boundaries' \
+    '### Risk And Completion Evidence' '#### Root-of-Trust Bootstrap' \
+    '## 3. User Intent And Control' '## 7. Evidence-First Changes' \
+    '## 8. Verification' '## 9. Edit Safety' '### Severity And Control Categories' \
+    '### Blocking Enforcement And Advisory Context At Stop' \
+    '## 15. Installed Agent Targets' '## 16. Commit Hygiene — AI Authorship'; do
+    grep -Fxq -- "$heading" "$BATS_TEST_DIRNAME/../AGENT.md" \
+      || { echo "missing section: $heading" >&2; false; }
+  done
+  for rule in 'Never push to a shared remote unless the user explicitly asks.' \
+    'Do not stage local `memory/`' \
+    'Never commit ephemeral scratch state or visual evidence artifacts.' \
+    '`Scope` is a focus-control signal, not a sandbox or safety boundary.' \
+    'Allowed status transitions are' \
+    'Required failure, unavailability, timeout, or invalid enforcement' \
+    'bypass a fatal destructive-command or path-protection result'; do
+    grep -Fq -- "$rule" "$BATS_TEST_DIRNAME/../AGENT.md" \
+      || { echo "missing rule: $rule" >&2; false; }
+  done
+}
+
+@test "directives keep balanced delegated markers" {
+  starts=$(grep -cFx '<!-- CAC:delegated:start -->' "$BATS_TEST_DIRNAME/../AGENT.md")
+  ends=$(grep -cFx '<!-- CAC:delegated:end -->' "$BATS_TEST_DIRNAME/../AGENT.md")
+  [ "$starts" -eq 7 ]
+  [ "$ends" -eq 7 ]
+}
+
+@test "installed directive aliases stay byte-identical to AGENT.md" {
+  target=$(mktemp -d)
+  git -C "$target" init -q
+  bash "$BATS_TEST_DIRNAME/../install.sh" --no-githooks "$target" </dev/null >/dev/null
+  cmp "$BATS_TEST_DIRNAME/../AGENT.md" "$target/AGENT.md"
+  cmp "$BATS_TEST_DIRNAME/../AGENT.md" "$target/AGENTS.md"
+  cmp "$BATS_TEST_DIRNAME/../AGENT.md" "$target/CLAUDE.md"
+  for rule in "$target/.cursor/rules/agent-md.mdc" "$target/.windsurf/rules/agent-md.md"; do
+    tail -n +5 "$rule" | cmp - "$BATS_TEST_DIRNAME/../AGENT.md"
+  done
+  rm -rf "$target"
+}

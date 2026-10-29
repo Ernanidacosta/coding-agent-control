@@ -23,8 +23,8 @@ Risk: high
 ## Next
 
 - RC3-4 done in 6b10267: --githooks writes core.hooksPath only when unset; .githooks is idempotent; any other local or global value is left unchanged with guidance (tests/install-hookspath.bats).
-- RC3-2: installer (dry-run included) reports ignored critical files with rule and scope (global/host, repository .gitignore, local exclude); doctor warns CONTROL_NOT_GIT_BOUND and CRITICAL_FILE_IGNORED (tests/ignored-critical-files.bats). Commit next.
-- RC3-3: AGENT.md under the 32 KiB Codex project-doc budget with a size test (TDD).
+- RC3-2 done in d10fb12: installer (dry-run included) reports ignored critical files with rule and scope (global/host, repository .gitignore, local exclude); doctor warns CONTROL_NOT_GIT_BOUND and CRITICAL_FILE_IGNORED (tests/ignored-critical-files.bats).
+- RC3-3: AGENT.md reduced from 38426 to 30679 bytes (budget test <= 30720, 2 KiB under the Codex 32 KiB default) by compressing reference and rationale; every rule, delegated marker and tested phrase kept; installed aliases pinned byte-identical; README documents host budgets. Commit next.
 - RC3-1 (trust/mechanism-changing, commit A): strict agent-md.toml parser, CONFIG_INVALID for invalid TOML, receipt reuse only for a valid contract. Push for diagnostic CI, then stop for the owner's external review of A's SHA and mechanism hashes before descendant B (verifying) and closing C (done).
 - Post-GB-1 P1 backlog stays out of RC3: VERIFY_UNAVAILABLE wording, .bak cleanup, .project-control.toml guidance, cherry-pick UX, linked worktrees, staged issuance, ubuntu-26.04, verify timeout, githooks NOT active message, dry-run precision, authority reapproval UX, provenance SHA line, truncation-check false positive, WAHA deploy margin (consumer).
 
