@@ -231,6 +231,20 @@ Check obrigatório com falha, indisponível ou em timeout bloqueia. Check
 opcional nessas condições produz warning. Um check não configurado nunca é
 apresentado como executado.
 
+O `agent-md.toml` é lido de forma estrita: TOML inválido (chave ou tabela
+duplicada, texto solto, aspas quebradas) torna o arquivo inteiro
+`CONFIG_INVALID`, sem aplicar nenhuma parte dele. O diagnóstico indica o
+snapshot (`HEAD baseline`, `worktree` ou `staged`), a linha e a causa, sem
+repetir o conteúdo. Construções TOML fora do subconjunto suportado (strings
+multilinha, inline tables, chaves pontuadas ou entre aspas, floats, datas) são
+recusadas explicitamente. Escapes precisam ser TOML válido, mas o texto entre
+as aspas é mantido como escrito, como nas releases anteriores e na authority.
+
+Ao atualizar para a v1.0.0-rc3 ou posterior, valide e commite o `agent-md.toml`
+com a release ainda instalada; com uma authority local, um administrador
+precisa rodar `agent-md-authority reapprove`, porque o `_lib.sh` faz parte do
+mecanismo aprovado por digest. Até lá o Stop roda a verificação completa.
+
 ## Estado operacional
 
 `memory/` contém working state local e volátil: status/claim atual, tarefa,

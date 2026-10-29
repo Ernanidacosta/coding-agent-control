@@ -353,7 +353,9 @@ find_project_by_workspace() {
 # privileged program must never guess what a hostile file meant. The rule the
 # golden parity tests enforce is one-directional:
 #
-#   authority accepts  =>  the core accepts and agrees
+#   authority accepts  =>  the core accepts and agrees, or the core refuses the
+#                          whole document as invalid TOML (completion then
+#                          never consults a receipt)
 #   authority refuses  =>  ineligible, and no receipt is ever possible
 #
 # Refusing is always safe: it costs an acceleration, never a guarantee.

@@ -5,11 +5,15 @@
 # two readers disagree about what was configured, so the invariant is
 # one-directional and pinned here:
 #
-#   authority accepts  =>  the core accepts, and both describe the same contract
+#   authority accepts  =>  the core accepts and both describe the same contract,
+#                          or the core refuses the document as invalid TOML
 #   authority refuses  =>  ineligible, and no receipt is ever possible
 #
-# The authority is allowed to be stricter. It is never allowed to accept a
-# contract the core reads differently.
+# The authority is allowed to be stricter about the contract keys. The core
+# validates the whole document while the authority reads only those keys, so
+# the core may refuse a file the authority accepts; completion then fails
+# CONFIG_INVALID and never consults a receipt (tests/toml-strict.bats). The
+# authority is never allowed to accept a contract the core reads differently.
 
 load helpers
 
@@ -65,8 +69,14 @@ assert_parity() {
   if authority_contract >/dev/null 2>&1; then
     run core_contract
     [ "$status" -eq 0 ]
-    printf '%s' "$output" | jq -e '.valid == true' >/dev/null \
-      || { echo "authority accepted a contract the core rejects" >&2; return 1; }
+    if ! printf '%s' "$output" | jq -e '.valid == true' >/dev/null; then
+      # Only a document-level refusal is acceptable here, never a contract
+      # the core understood differently.
+      printf '%s' "$output" | jq -e '.error.code == "CONFIG_INVALID" and
+        (.error.message | test(": line [0-9]+: "))' >/dev/null \
+        || { echo "authority accepted a contract the core rejects" >&2; return 1; }
+      return 0
+    fi
     local core auth
     core=$(core_projection)
     auth=$(authority_projection)
@@ -310,9 +320,8 @@ required = ["test", "test"]'
   printf '%s' "$output" | jq -e '.valid == false' >/dev/null
 }
 
-@test "16 a duplicate verify key is refused by the authority" {
-  # The core silently keeps the first value. The authority refuses rather than
-  # approve a file whose meaning depends on reader order.
+@test "16 a duplicate verify key is refused by both" {
+  # A file whose meaning would depend on reader order is invalid TOML.
   write_toml '[verify]
 test = "bats tests/"
 test = "true"
@@ -322,12 +331,14 @@ required = ["test"]'
   run authority_contract
   [ "$status" -ne 0 ]
   [[ "$(authority_error)" == *duplicate* ]]
+  run core_contract
+  printf '%s' "$output" | jq -e '.valid == false and (.error.message | contains("duplicate key verify.test"))' >/dev/null
   assert_parity
 }
 
 @test "17 a comment marker inside a command is refused by the authority" {
-  # The core strips from the first # before removing quotes, which silently
-  # truncates the command. The authority refuses the ambiguity instead.
+  # The core keeps a # inside a quoted value as part of the command. The
+  # authority refuses the construct instead, which is safe.
   write_toml '[verify]
 test = "bats tests/ # not a comment"
 
@@ -336,6 +347,8 @@ required = ["test"]'
   run authority_contract
   [ "$status" -ne 0 ]
   [[ "$(authority_error)" == *"comment marker"* ]]
+  run core_contract
+  printf '%s' "$output" | jq -e '[.checks[] | select(.name == "test")][0].command == "bats tests/ # not a comment"' >/dev/null
   assert_parity
 }
 
@@ -386,4 +399,43 @@ test = "bats tests/"'
 @test "23 the repository's own contract has parity" {
   cp "$BATS_TEST_DIRNAME/../agent-md.toml" agent-md.toml
   assert_parity
+}
+
+@test "24 text outside the contract keys is refused by the core" {
+  # The authority reads only the contract keys and ignores this line; the
+  # core validates the whole document and refuses it.
+  write_toml '[verify]
+test = "bats tests/"
+
+[verify.policy]
+required = ["test"]
+
+[state]
+Remember to update the source globs.'
+  authority_contract >/dev/null
+  run core_contract
+  printf '%s' "$output" | jq -e '.valid == false and (.error.message | contains("line 8:"))' >/dev/null
+  assert_parity
+}
+
+@test "25 an invalid escape sequence the authority keeps raw is refused by the core" {
+  write_toml '[verify]
+test = "grep -E \.py$ files.txt"
+
+[verify.policy]
+required = ["test"]'
+  authority_contract >/dev/null
+  run core_contract
+  printf '%s' "$output" | jq -e '.valid == false and (.error.message | contains("invalid escape sequence"))' >/dev/null
+  assert_parity
+}
+
+@test "26 a valid escape sequence is kept verbatim on both sides" {
+  write_toml '[verify]
+test = "grep -E \\.py$ files.txt"
+
+[verify.policy]
+required = ["test"]'
+  assert_parity
+  [ "$(authority_projection | jq -r '.checks[0].command')" = 'grep -E \\.py$ files.txt' ]
 }

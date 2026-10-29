@@ -92,7 +92,7 @@ EOF
   cat > agent-md.toml <<'EOF'
 [state]
 source_globs = []
-ignore_globs = [docs/**]
+ignore_globs = [1]
 EOF
   . .claude/hooks/_lib.sh
   run read_toml_array agent-md.toml state source_globs
@@ -100,6 +100,20 @@ EOF
   [ -z "$output" ]
   run read_toml_array agent-md.toml state absent
   [ "$status" -eq 1 ]
+  run read_toml_array agent-md.toml state ignore_globs
+  [ "$status" -eq 2 ]
+}
+
+@test "read_toml_array: an invalid document is never read in part" {
+  cat > agent-md.toml <<'EOF'
+[state]
+source_globs = []
+ignore_globs = [docs/**]
+EOF
+  . .claude/hooks/_lib.sh
+  run read_toml_array agent-md.toml state source_globs
+  [ "$status" -eq 2 ]
+  [ -z "$output" ]
   run read_toml_array agent-md.toml state ignore_globs
   [ "$status" -eq 2 ]
 }

@@ -1,0 +1,82 @@
+{
+  "checks": [
+    {
+      "capabilities": [],
+      "command": "npx --no-install tsc --noEmit",
+      "name": "typecheck",
+      "origin": "configured",
+      "requirement": "required",
+      "trusted_files": []
+    },
+    {
+      "capabilities": [],
+      "command": "ruff check .",
+      "name": "lint",
+      "origin": "configured",
+      "requirement": "required",
+      "trusted_files": []
+    },
+    {
+      "capabilities": [],
+      "command": "poetry run pytest -q -m \"not slow\"",
+      "name": "test",
+      "origin": "configured",
+      "requirement": "required",
+      "trusted_files": []
+    },
+    {
+      "capabilities": [],
+      "command": "",
+      "name": "integration",
+      "origin": "not configured",
+      "requirement": "optional",
+      "trusted_files": []
+    },
+    {
+      "capabilities": [],
+      "command": "./scripts/smoke.sh",
+      "name": "smoke",
+      "origin": "configured",
+      "requirement": "optional",
+      "trusted_files": []
+    },
+    {
+      "capabilities": [],
+      "command": "",
+      "name": "runtime",
+      "origin": "not configured",
+      "requirement": "optional",
+      "trusted_files": []
+    },
+    {
+      "capabilities": [
+        "gh"
+      ],
+      "command": "./scripts/verify-ci-attestation.sh",
+      "name": "independent",
+      "origin": "configured",
+      "requirement": "conditional",
+      "trusted_files": [
+        "scripts/ci-attestation.conf",
+        ".github/workflows/ci.yml"
+      ]
+    },
+    {
+      "capabilities": [],
+      "command": "",
+      "name": "approval",
+      "origin": "not configured",
+      "requirement": "conditional",
+      "trusted_files": []
+    }
+  ],
+  "policy": "explicit",
+  "preparation": {
+    "command": "poetry sync --no-root",
+    "provider": "poetry",
+    "timeout_seconds": 120
+  },
+  "timeout_seconds": 300,
+  "total_timeout_seconds": 600,
+  "valid": true
+}

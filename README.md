@@ -192,6 +192,19 @@ Run the complete current contract with:
 ./.agent-md/bin/verify.sh
 ```
 
+`agent-md.toml` is read strictly. A file that is not valid TOML (a duplicate
+key or table, free text, broken quoting) is `CONFIG_INVALID` as a whole, and
+nothing in it is applied, so no reader can disagree about what it means. The
+diagnostic names the snapshot (`HEAD baseline`, `worktree` or `staged`), the
+line and the cause, never the line's content. The policy uses a TOML subset:
+`[table]` headers, bare keys, single-line strings, booleans, decimal integers
+and arrays of these. Valid TOML outside that subset (multi-line strings, inline
+tables, dotted or quoted keys, floats, dates) is refused explicitly instead of
+being guessed at. A string's value is the text between its quotes: escape
+sequences must be valid TOML, but they are kept as written rather than decoded,
+exactly as earlier releases and the local authority read them. A single-quoted
+literal string avoids the question for commands that need backslashes.
+
 ## Operational State
 
 `memory/` records local status, plan, verification criteria, and still-useful
@@ -633,6 +646,26 @@ files, such as authority enrollment and credentials. An install made before
 provenance existed is upgraded the same way. `doctor.sh` prints the recorded
 source, ref, archive commit and the `install.sh --ref=...` command that
 reproduces it; when no provenance exists it says so without failing.
+
+Upgrading to v1.0.0-rc3 or later:
+
+- **Check the policy first.** Strict reading makes an invalid `agent-md.toml`
+  block completion and every commit. Before upgrading, confirm it parses as
+  TOML (for example `python3 -c "import tomllib; tomllib.load(open('agent-md.toml', 'rb'))"`)
+  and stays inside the supported subset, and commit any correction under the
+  release you have installed. If an invalid policy is already the committed
+  baseline, the correction needs the
+  [administrative policy bootstrap](docs/architecture.md#administrative-policy-bootstrap).
+- **Reapprove a local authority.** rc3 changes `.claude/hooks/_lib.sh`, one of
+  the mechanism files a local authority approves by digest. After the upgrade
+  the authority refuses evaluation (`REFUSED_MECHANISM_CHANGED`) and Stop falls
+  back to full verification until an administrator reviews the new mechanism
+  with `agent-md-authority reapprove`. Earlier receipts never become current
+  for the new mechanism. Reinstall the authority from the same release too: its
+  vendored identity functions (`phase-a-source.sh`) carry the strict reader.
+  An older authority stays safe, because completion never consults a receipt
+  for a contract the core refuses and a policy the two read differently never
+  matches a receipt, but it accelerates less.
 
 Provenance is operational metadata. It is not a receipt, attestation, or trust
 anchor. It does not prove package integrity, does not show that installed files
@@ -1393,6 +1426,11 @@ Use Codex skills with `$agent-md-verify` or `$visual-evidence`.
 - Strong attestation currently binds only to a clean operational HEAD. The
   authenticated worktree receipts used by Stop are not strong attestation.
   Staged receipt issuance and reuse remain unsupported.
+- A local authority approves mechanism files by digest and does not recognize
+  release provenance. Any upgrade that changes `.claude/hooks/_lib.sh`,
+  `.claude/hooks/stop-verify.sh` or `.agent-md/bin/verify.sh` needs an
+  administrator's reapproval before receipts are issued again; until then
+  completion runs full verification.
 - Runtime applicability cannot be inferred generally. No configured
   runtime/smoke command produces a warning rather than false enforcement.
 - Independent evidence is conditional enforcement, not orchestration.

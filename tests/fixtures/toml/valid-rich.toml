@@ -1,0 +1,39 @@
+# Project policy for a representative consumer.
+
+[verify]
+typecheck = "npx --no-install tsc --noEmit"
+lint = "ruff check ."   # trailing comment
+test = 'poetry run pytest -q -m "not slow"'
+smoke = "./scripts/smoke.sh"
+independent = "./scripts/verify-ci-attestation.sh"
+lint_file = "case {file} in *.py) ruff check {file} ;; esac"
+
+[verify.policy]
+required = [
+  "typecheck",  # static
+  "lint",
+  "test",
+]
+timeout_seconds = 300
+total_timeout_seconds = 600
+
+[verify.preparation]
+provider = "poetry"
+command = "poetry sync --no-root"
+timeout_seconds = 120
+
+[verify.attestation]
+independent_files = ["scripts/ci-attestation.conf", ".github/workflows/ci.yml"]
+independent_capabilities = ["gh"]
+
+[visual]
+required = false
+artifacts_dir = ".agent/visual"
+freshness_seconds = 3600
+
+[state]
+source_globs = ["src/**", "tests/**", "*.py"]
+ignore_globs = ["docs/**", ".gitignore"]
+
+[integrations.icm]
+enabled = true

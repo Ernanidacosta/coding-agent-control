@@ -17,6 +17,8 @@ Risk: high
 - README.pt-BR.md
 - docs/**
 - examples/local-issuer/README.md
+- examples/local-issuer/authority-lib.sh
+- examples/local-issuer/phase-a-source.sh
 - tests/**
 - memory/**
 
@@ -24,8 +26,8 @@ Risk: high
 
 - RC3-4 done in 6b10267: --githooks writes core.hooksPath only when unset; .githooks is idempotent; any other local or global value is left unchanged with guidance (tests/install-hookspath.bats).
 - RC3-2 done in d10fb12: installer (dry-run included) reports ignored critical files with rule and scope (global/host, repository .gitignore, local exclude); doctor warns CONTROL_NOT_GIT_BOUND and CRITICAL_FILE_IGNORED (tests/ignored-critical-files.bats).
-- RC3-3: AGENT.md reduced from 38426 to 30679 bytes (budget test <= 30720, 2 KiB under the Codex 32 KiB default) by compressing reference and rationale; every rule, delegated marker and tested phrase kept; installed aliases pinned byte-identical; README documents host budgets. Commit next.
-- RC3-1 (trust/mechanism-changing, commit A): strict agent-md.toml parser, CONFIG_INVALID for invalid TOML, receipt reuse only for a valid contract. Push for diagnostic CI, then stop for the owner's external review of A's SHA and mechanism hashes before descendant B (verifying) and closing C (done).
+- RC3-3 done in d1ff260: AGENT.md reduced from 38426 to 30679 bytes (budget test <= 30720, 2 KiB under the Codex 32 KiB default) by compressing reference and rationale; every rule, delegated marker and tested phrase kept; installed aliases pinned byte-identical; README documents host budgets.
+- RC3-1 is commit A (mechanism-changing: .claude/hooks/_lib.sh): strict whole-document TOML reader, CONFIG_INVALID naming snapshot, line and cause without content, receipt-first only for a valid contract; escapes validated but kept verbatim as rc2 and the authority read them; strict reader re-vendored mechanically into phase-a-source.sh (47/47 functions identical to the core); parity invariant restated (authority-lib.sh comment only). First commit attempt was blocked by pre-commit on identity parity (contract 14/15) before the re-vendoring. Real-config corpus: 55/55 valid configs resolve to the rc2 contract, 3 invalid-TOML configs (tempo-inmet, traduz-manual, projects/ia-search-jobs) now CONFIG_INVALID. Push for diagnostic CI, then stop for the owner's external review of A's SHA and mechanism hashes before descendant B (verifying) and closing C (done).
 - Post-GB-1 P1 backlog stays out of RC3: VERIFY_UNAVAILABLE wording, .bak cleanup, .project-control.toml guidance, cherry-pick UX, linked worktrees, staged issuance, ubuntu-26.04, verify timeout, githooks NOT active message, dry-run precision, authority reapproval UX, provenance SHA line, truncation-check false positive, WAHA deploy margin (consumer).
 
 ## Blockers

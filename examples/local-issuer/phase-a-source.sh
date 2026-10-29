@@ -15,36 +15,238 @@
 # single file cannot see.
 # shellcheck disable=SC2034,SC2317,SC2329
 
-# authority_pa_read_toml <file> <section> <key>
-# Prints the value or nothing. Handles `key = "value"` or `key = value`.
-# Skips lines after `#`. Not a full TOML parser — just enough for our use.
-authority_pa_read_toml() {
-  local file="$1" section="$2" key="$3"
-  [ -f "$file" ] || return 0
-  awk -v section="$section" -v key="$key" '
-    BEGIN { in_sec = 0 }
-    /^[[:space:]]*#/ { next }
-    /^[[:space:]]*\[/ {
-      sec = $0
-      sub(/^[[:space:]]*\[/, "", sec); sub(/\][[:space:]]*$/, "", sec)
-      gsub(/[[:space:]]/, "", sec)
-      in_sec = (sec == section) ? 1 : 0
-      next
+# agent-md.toml is read strictly. authority_pa_toml_document parses the whole file once and
+# prints its records only when every line is valid TOML inside the subset the
+# policy uses; anything else yields one ERROR record and exit status 2, so an
+# invalid file is never interpreted in part and no two readers can disagree
+# about what it means.
+#
+# Supported: [table] headers with bare dotted names, bare keys, single-line
+# basic and literal strings, booleans, decimal integers, and arrays of those
+# (multi-line, trailing comma, comments). A string's value is the text between
+# its quotes, verbatim: escape sequences must be valid TOML but are not
+# decoded, which keeps the meaning every earlier release and the authority
+# give them. Everything else valid in TOML is refused explicitly rather than
+# guessed at: quoted or dotted keys, multi-line strings, inline tables, arrays
+# of tables, nested arrays, floats, and dates.
+#
+# Records are separated by newlines and fields by \037:
+#   K <table> <key> <string|boolean|integer|array> <value>
+#   E <table> <key> <type> <value>      one per array element, in order
+#   ERROR <line> <reason>               reasons never quote file content
+authority_pa_toml_document() {
+  local file="$1"
+  awk '
+    function fail_at(line, reason) {
+      printf "ERROR\037%d\037%s\n", line, reason
+      failed = 1
+      exit 2
     }
-    in_sec && index($0, "=") > 0 {
-      k = substr($0, 1, index($0, "=") - 1)
-      v = substr($0, index($0, "=") + 1)
-      gsub(/^[[:space:]]+|[[:space:]]+$/, "", k)
-      sub(/[[:space:]]*#.*$/, "", v)
-      gsub(/^[[:space:]]+|[[:space:]]+$/, "", v)
-      if (k == key) {
-        if (v ~ /^".*"$/)      { gsub(/^"|"$/, "", v) }
-        else if (v ~ /^'\''.*'\''$/) { gsub(/^'\''|'\''$/, "", v) }
-        print v
-        exit
+    function fail(reason) { fail_at(NR, where == "" ? reason : reason " in " where) }
+    function skip_ws() {
+      while (pos <= len && (substr(text, pos, 1) == " " || substr(text, pos, 1) == "\t")) pos++
+    }
+    function at_end_or_comment() {
+      skip_ws()
+      return pos > len || substr(text, pos, 1) == "#"
+    }
+    function check_comment(    i, c) {
+      for (i = pos + 1; i <= len; i++) {
+        c = substr(text, i, 1)
+        if (c ~ /[\001-\010\012-\037\177]/) fail("control character in a comment")
       }
     }
+    function bare_key(    start, key) {
+      start = pos
+      while (pos <= len && substr(text, pos, 1) ~ /[A-Za-z0-9_-]/) pos++
+      key = substr(text, start, pos - start)
+      if (key == "") {
+        if (substr(text, pos, 1) == "\"" || substr(text, pos, 1) == "\047")
+          fail("quoted keys are not supported; use a bare key")
+        fail("expected a bare key")
+      }
+      return key
+    }
+    # Parses one single-line string at pos; sets value to the text between the
+    # quotes, verbatim. Escape sequences must be valid TOML so the string ends
+    # where every reader agrees it ends, but they are kept as written, as every
+    # earlier release and the authority do.
+    function string_value(    quote, start, c, e, n) {
+      quote = substr(text, pos, 1)
+      if (substr(text, pos, 3) == quote quote quote) fail("multi-line strings are not supported")
+      pos++
+      start = pos
+      while (pos <= len) {
+        c = substr(text, pos, 1)
+        if (c == quote) {
+          value = substr(text, start, pos - start)
+          pos++
+          return
+        }
+        if (c == "\\" && quote == "\"") {
+          e = substr(text, pos + 1, 1)
+          n = (e == "u" ? 4 : (e == "U" ? 8 : 0))
+          if (n > 0) {
+            if (substr(text, pos + 2, n) !~ /^[0-9A-Fa-f]+$/ || length(substr(text, pos + 2, n)) != n)
+              fail("invalid unicode escape in a double-quoted string")
+            pos += 2 + n
+            continue
+          }
+          if (e !~ /^[btnfr"\\]$/) fail("invalid escape sequence in a double-quoted string")
+          pos += 2
+          continue
+        }
+        if (c ~ /[\001-\010\012-\037\177]/) fail("control character in a string")
+        pos++
+      }
+      fail("unterminated string")
+    }
+    # Parses one value at pos (possibly continuing an array on later lines is
+    # handled by the caller); sets vtype and value.
+    function scalar_value(    c, token, start) {
+      c = substr(text, pos, 1)
+      if (c == "\"" || c == "\047") { string_value(); vtype = "string"; return }
+      if (c == "{") fail("inline tables are not supported")
+      start = pos
+      while (pos <= len && substr(text, pos, 1) !~ /[ \t,\]#]/) pos++
+      token = substr(text, start, pos - start)
+      if (token == "true" || token == "false") { vtype = "boolean"; value = token; return }
+      if (token ~ /^[+-]?(0|[1-9](_?[0-9])*)$/) { vtype = "integer"; value = token; return }
+      if (token == "") fail("expected a value")
+      if (token ~ /^[0-9][0-9][0-9][0-9]-[0-9][0-9]-/ || token ~ /^[0-9][0-9]:[0-9][0-9]/) fail("dates and times are not supported")
+      if (token ~ /^[+-]?(0[xob]|inf$|nan$|[0-9_]+[.eE])/) fail("only decimal integers are supported as numbers")
+      fail("invalid value; strings must be quoted")
+    }
+    function emit(record) { out = out record "\n" }
+    # Array parsing keeps its own state so it can span lines.
+    function array_step(    c) {
+      while (1) {
+        skip_ws()
+        if (pos > len || substr(text, pos, 1) == "#") {
+          if (pos <= len) check_comment()
+          return 0
+        }
+        c = substr(text, pos, 1)
+        if (expect_value) {
+          if (c == "]") { pos++; array_open = 0; return 1 }
+          if (c == ",") fail("unexpected comma in an array")
+          if (c == "[") fail("nested arrays are not supported")
+          scalar_value()
+          emit("E\037" array_section "\037" array_key "\037" vtype "\037" value)
+          expect_value = 0
+          continue
+        }
+        if (c == ",") { pos++; expect_value = 1; continue }
+        if (c == "]") { pos++; array_open = 0; return 1 }
+        fail("expected a comma or the end of the array")
+      }
+    }
+    function finish_line() {
+      if (!at_end_or_comment()) fail("unexpected text after the value")
+      if (pos <= len) check_comment()
+    }
+    function table_header(    name, part, i, n, parts, prefix) {
+      if (substr(text, pos, 2) == "[[") fail("arrays of tables are not supported")
+      pos++
+      skip_ws()
+      name = bare_key()
+      skip_ws()
+      while (substr(text, pos, 1) == ".") {
+        pos++
+        skip_ws()
+        name = name "." bare_key()
+        skip_ws()
+      }
+      if (substr(text, pos, 1) != "]") fail("malformed table header")
+      pos++
+      finish_line()
+      if (name in tables) fail("table [" name "] is defined more than once")
+      if (name in keys) fail("table [" name "] conflicts with a key of the same name")
+      n = split(name, parts, ".")
+      prefix = ""
+      for (i = 1; i < n; i++) {
+        prefix = (prefix == "" ? parts[i] : prefix "." parts[i])
+        if (prefix in keys) fail("table [" name "] conflicts with key " prefix)
+      }
+      tables[name] = 1
+      section = name
+    }
+    function key_value(    key, path) {
+      key = bare_key()
+      skip_ws()
+      if (substr(text, pos, 1) == ".") fail("dotted keys are not supported; use a [table] header")
+      if (substr(text, pos, 1) != "=") fail("expected \047=\047 after the key; free text is not valid TOML")
+      pos++
+      skip_ws()
+      path = (section == "" ? key : section "." key)
+      if (path in keys) fail("duplicate key " path)
+      where = path
+      if (path in tables) fail("key " path " conflicts with a table of the same name")
+      for (t in tables) if (index(t, path ".") == 1) fail("key " path " conflicts with table [" t "]")
+      keys[path] = 1
+      if (pos > len) fail("expected a value")
+      if (substr(text, pos, 1) == "[") {
+        emit("K\037" section "\037" key "\037array\037")
+        pos++
+        array_open = 1; array_line = NR; expect_value = 1
+        array_section = section; array_key = key
+        if (array_step()) finish_line()
+        return
+      }
+      scalar_value()
+      emit("K\037" section "\037" key "\037" vtype "\037" value)
+      finish_line()
+    }
+    BEGIN { section = ""; array_open = 0 }
+    {
+      text = $0
+      sub(/\r$/, "", text)
+      len = length(text)
+      pos = 1
+      if (!array_open) where = ""
+      if (array_open) {
+        if (array_step()) finish_line()
+        next
+      }
+      skip_ws()
+      if (pos > len) next
+      c = substr(text, pos, 1)
+      if (c == "#") { check_comment(); next }
+      if (c == "[") { table_header(); next }
+      if (c ~ /[A-Za-z0-9_"\047-]/) { key_value(); next }
+      fail("expected \047key = value\047 or a [table] header")
+    }
+    END {
+      if (failed) exit 2
+      if (array_open) fail_at(array_line, "unterminated array")
+      printf "%s", out
+    }
   ' "$file"
+}
+
+# authority_pa_toml_validate <file>
+# Prints "line N: reason" and returns 2 when the file is not a valid policy
+# document. A missing file is valid: it declares nothing.
+authority_pa_toml_validate() {
+  local file="$1" doc
+  [ -f "$file" ] || return 0
+  if doc=$(authority_pa_toml_document "$file"); then
+    return 0
+  fi
+  printf '%s\n' "$doc" | awk 'BEGIN { FS = "\037" } $1 == "ERROR" { printf "line %s: %s", $2, $3; exit }'
+  return 2
+}
+
+# authority_pa_read_toml <file> <section> <key>
+# Prints a scalar value or nothing; returns 2 when the document is invalid.
+authority_pa_read_toml() {
+  local file="$1" section="$2" key="$3" doc
+  [ -f "$file" ] || return 0
+  doc=$(authority_pa_toml_document "$file") || return 2
+  printf '%s\n' "$doc" | awk -v section="$section" -v key="$key" '
+    BEGIN { FS = "\037" }
+    $1 == "K" && $2 == section && $3 == key { if ($4 != "array") print $5; exit }
+  '
 }
 
 # authority_pa_read_toml_array <file> <section> <key>
@@ -53,97 +255,22 @@ authority_pa_read_toml() {
 # input (2). This intentionally implements only the string-array subset
 # agent-md exposes; it is not a general TOML parser.
 authority_pa_read_toml_array() {
-  local file="$1" section="$2" key="$3"
+  local file="$1" section="$2" key="$3" doc
   [ -f "$file" ] || return 1
-  awk -v wanted_section="$section" -v wanted_key="$key" '
-    function invalid() { bad = 1 }
-
-    function parse_value(text,    i, c) {
-      for (i = 1; i <= length(text); i++) {
-        c = substr(text, i, 1)
-
-        if (done) {
-          if (c == "#") return
-          if (c !~ /[[:space:]]/) invalid()
-          continue
-        }
-
-        if (quoted) {
-          if (escaped) {
-            value = value c
-            escaped = 0
-          } else if (quote == "\"" && c == "\\") {
-            escaped = 1
-          } else if (c == quote) {
-            print value
-            value = ""
-            quoted = 0
-            need_separator = 1
-          } else {
-            value = value c
-          }
-          continue
-        }
-
-        if (c == "#") return
-        if (c ~ /[[:space:]]/) continue
-
-        if (!opened) {
-          if (c == "[") opened = 1
-          else invalid()
-          continue
-        }
-
-        if (need_separator) {
-          if (c == ",") need_separator = 0
-          else if (c == "]") done = 1
-          else invalid()
-          continue
-        }
-
-        if (c == "\"" || c == "\047") {
-          quoted = 1
-          quote = c
-        } else if (c == "]") {
-          done = 1
-        } else {
-          invalid()
-        }
-      }
+  doc=$(authority_pa_toml_document "$file") || return 2
+  printf '%s\n' "$doc" | awk -v section="$section" -v key="$key" '
+    BEGIN { FS = "\037" }
+    $1 == "K" && $2 == section && $3 == key { found = 1; if ($4 != "array") bad = 1; next }
+    $1 == "E" && $2 == section && $3 == key {
+      if ($4 != "string") bad = 1
+      else items[++count] = $5
     }
-
-    BEGIN { in_section = 0 }
-
-    found && !done {
-      parse_value($0)
-      next
-    }
-
-    /^[[:space:]]*#/ { next }
-
-    /^[[:space:]]*\[/ {
-      current = $0
-      sub(/^[[:space:]]*\[/, "", current)
-      sub(/\][[:space:]]*(#.*)?$/, "", current)
-      gsub(/[[:space:]]/, "", current)
-      in_section = (current == wanted_section)
-      next
-    }
-
-    in_section && index($0, "=") > 0 {
-      candidate = substr($0, 1, index($0, "=") - 1)
-      gsub(/^[[:space:]]+|[[:space:]]+$/, "", candidate)
-      if (candidate == wanted_key) {
-        found = 1
-        parse_value(substr($0, index($0, "=") + 1))
-      }
-    }
-
     END {
-      if (bad || (found && (!opened || !done || quoted))) exit 2
       if (!found) exit 1
+      if (bad) exit 2
+      for (i = 1; i <= count; i++) print items[i]
     }
-  ' "$file"
+  '
 }
 
 # authority_pa_toml_key_present <file> <section> <key>
@@ -151,25 +278,14 @@ authority_pa_read_toml_array() {
 # matters for executable verification commands: `lint = ""` is invalid,
 # not equivalent to an omitted optional check.
 authority_pa_toml_key_present() {
-  local file="$1" section="$2" key="$3"
+  local file="$1" section="$2" key="$3" doc
   [ -f "$file" ] || return 1
-  awk -v section="$section" -v key="$key" '
-    BEGIN { in_sec = 0 }
-    /^[[:space:]]*#/ { next }
-    /^[[:space:]]*\[/ {
-      sec = $0
-      sub(/^[[:space:]]*\[/, "", sec); sub(/\][[:space:]]*(#.*)?$/, "", sec)
-      gsub(/[[:space:]]/, "", sec)
-      in_sec = (sec == section)
-      next
-    }
-    in_sec && index($0, "=") > 0 {
-      candidate = substr($0, 1, index($0, "=") - 1)
-      gsub(/^[[:space:]]+|[[:space:]]+$/, "", candidate)
-      if (candidate == key) { found = 1; exit }
-    }
+  doc=$(authority_pa_toml_document "$file") || return 1
+  printf '%s\n' "$doc" | awk -v section="$section" -v key="$key" '
+    BEGIN { FS = "\037" }
+    $1 == "K" && $2 == section && $3 == key { found = 1; exit }
     END { exit (found ? 0 : 1) }
-  ' "$file"
+  '
 }
 
 # authority_pa_toml_path — location of the config file (override with AGENT_MD_TOML env)
@@ -870,12 +986,20 @@ authority_pa_verification_invalid_contract_json() {
 #   [verify.policy] total_timeout_seconds = 420
 # Without `required`, resolved checks retain the legacy required behavior.
 authority_pa_verification_contract_json() {
-  local config="${1:-$(authority_pa_toml_path)}" required_values required_status
+  local config="${1:-$(authority_pa_toml_path)}" label="${2:-${1:-$(authority_pa_toml_path)}}" toml_error
+  local required_values required_status
   local required_declared=0 timeout_value="" total_timeout_value="" check_names check command origin requirement
   local seen_required="" value trusted_values trusted_status trusted_files
   local capability_values capability_status capabilities
   local check_args=()
   local preparation='null' preparation_command="" preparation_timeout="" preparation_provider=""
+
+  if ! toml_error=$(authority_pa_toml_validate "$config"); then
+    authority_pa_verification_invalid_contract_json \
+      "Invalid ${label}: ${toml_error}." \
+      "Fix ${label} so every line is valid TOML in the supported subset; no part of an invalid policy is applied."
+    return 0
+  fi
 
   required_values=$(authority_pa_read_toml_array "$config" verify.policy required)
   required_status=$?
@@ -884,7 +1008,7 @@ authority_pa_verification_contract_json() {
     1) required_values="" ;;
     *)
       authority_pa_verification_invalid_contract_json \
-        "Invalid ${config}: verify.policy.required must be an array of quoted check names."
+        "Invalid ${label}: verify.policy.required must be an array of quoted check names."
       return 0
       ;;
   esac
@@ -895,13 +1019,13 @@ authority_pa_verification_contract_json() {
       typecheck|lint|test|integration|smoke|runtime) ;;
       *)
         authority_pa_verification_invalid_contract_json \
-          "Invalid ${config}: unknown required verification check '${value}'."
+          "Invalid ${label}: unknown required verification check '${value}'."
         return 0
         ;;
     esac
     if printf '%s\n' "$seen_required" | grep -qxF "$value"; then
       authority_pa_verification_invalid_contract_json \
-        "Invalid ${config}: required verification check '${value}' is duplicated."
+        "Invalid ${label}: required verification check '${value}' is duplicated."
       return 0
     fi
     if [ -n "$seen_required" ]; then
@@ -919,7 +1043,7 @@ EOF
     case "$timeout_value" in
       ''|*[!0-9]*|0)
         authority_pa_verification_invalid_contract_json \
-          "Invalid ${config}: verify.policy.timeout_seconds must be a positive integer."
+          "Invalid ${label}: verify.policy.timeout_seconds must be a positive integer."
         return 0
         ;;
     esac
@@ -930,7 +1054,7 @@ EOF
     case "$total_timeout_value" in
       ''|*[!0-9]*|0)
         authority_pa_verification_invalid_contract_json \
-          "Invalid ${config}: verify.policy.total_timeout_seconds must be a positive integer."
+          "Invalid ${label}: verify.policy.total_timeout_seconds must be a positive integer."
         return 0
         ;;
     esac
@@ -945,13 +1069,13 @@ EOF
     case "$preparation_timeout" in
       ''|*[!0-9]*|0)
         authority_pa_verification_invalid_contract_json \
-          "Invalid ${config}: verify.preparation.timeout_seconds must be a positive integer."
+          "Invalid ${label}: verify.preparation.timeout_seconds must be a positive integer."
         return 0 ;;
     esac
     if [ -z "$preparation_command" ] || [ -z "$preparation_provider" ] \
       || ! bash -n -c "$preparation_command" >/dev/null 2>&1; then
       authority_pa_verification_invalid_contract_json \
-        "Invalid ${config}: verify.preparation requires a provider and a valid nonempty command."
+        "Invalid ${label}: verify.preparation requires a provider and a valid nonempty command."
       return 0
     fi
     preparation=$(jq -cn --arg provider "$preparation_provider" \
@@ -960,7 +1084,7 @@ EOF
     if [ -n "$total_timeout_value" ] \
       && [ "$preparation_timeout" -gt "$total_timeout_value" ]; then
       authority_pa_verification_invalid_contract_json \
-        "Invalid ${config}: preparation timeout exceeds the total evaluation budget."
+        "Invalid ${label}: preparation timeout exceeds the total evaluation budget."
       return 0
     fi
   fi
@@ -975,12 +1099,12 @@ EOF
       command=$(authority_pa_read_toml "$config" verify "$check")
       if [ -z "$command" ]; then
         authority_pa_verification_invalid_contract_json \
-          "Invalid ${config}: verify.${check} is configured with an empty command."
+          "Invalid ${label}: verify.${check} is configured with an empty command."
         return 0
       fi
       if ! bash -n -c "$command" >/dev/null 2>&1; then
         authority_pa_verification_invalid_contract_json \
-          "Invalid ${config}: verify.${check} is not valid shell syntax."
+          "Invalid ${label}: verify.${check} is not valid shell syntax."
         return 0
       fi
       origin="configured"
@@ -1000,13 +1124,13 @@ EOF
             case "$value" in
               /*|..|../*|*/../*|*/..)
                 authority_pa_verification_invalid_contract_json \
-                  "Invalid ${config}: verify.attestation.${check}_files must contain repository-relative paths without traversal."
+                  "Invalid ${label}: verify.attestation.${check}_files must contain repository-relative paths without traversal."
                 return 0
                 ;;
             esac
             if printf '%s' "$trusted_files" | jq -e --arg value "$value" 'index($value) != null' >/dev/null; then
               authority_pa_verification_invalid_contract_json \
-                "Invalid ${config}: trusted attestation file '${value}' is duplicated for ${check}."
+                "Invalid ${label}: trusted attestation file '${value}' is duplicated for ${check}."
               return 0
             fi
             trusted_files=$(printf '%s' "$trusted_files" | jq -c --arg value "$value" '. + [$value]')
@@ -1017,7 +1141,7 @@ EOF
         1) ;;
         *)
           authority_pa_verification_invalid_contract_json \
-            "Invalid ${config}: verify.attestation.${check}_files must be an array of quoted repository-relative paths."
+            "Invalid ${label}: verify.attestation.${check}_files must be an array of quoted repository-relative paths."
           return 0
           ;;
       esac
@@ -1028,19 +1152,19 @@ EOF
         0)
           if [ "$origin" != configured ]; then
             authority_pa_verification_invalid_contract_json \
-              "Invalid ${config}: verify.attestation.${check}_capabilities requires verify.${check}."
+              "Invalid ${label}: verify.attestation.${check}_capabilities requires verify.${check}."
             return 0
           fi
           while IFS= read -r value; do
             [ -n "$value" ] || continue
             if ! printf '%s\n' "$value" | grep -Eq '^[A-Za-z0-9][A-Za-z0-9._+-]*$'; then
               authority_pa_verification_invalid_contract_json \
-                "Invalid ${config}: verify.attestation.${check}_capabilities must contain literal command names, not paths or shell expressions."
+                "Invalid ${label}: verify.attestation.${check}_capabilities must contain literal command names, not paths or shell expressions."
               return 0
             fi
             if printf '%s' "$capabilities" | jq -e --arg value "$value" 'index($value) != null' >/dev/null; then
               authority_pa_verification_invalid_contract_json \
-                "Invalid ${config}: attestation capability '${value}' is duplicated for ${check}."
+                "Invalid ${label}: attestation capability '${value}' is duplicated for ${check}."
               return 0
             fi
             capabilities=$(printf '%s' "$capabilities" | jq -c --arg value "$value" '. + [$value]')
@@ -1051,7 +1175,7 @@ EOF
         1) ;;
         *)
           authority_pa_verification_invalid_contract_json \
-            "Invalid ${config}: verify.attestation.${check}_capabilities must be an array of quoted command names."
+            "Invalid ${label}: verify.attestation.${check}_capabilities must be an array of quoted command names."
           return 0
           ;;
       esac
@@ -1191,8 +1315,8 @@ authority_pa_effective_verification_contract_json() {
   }
   authority_pa_snapshot_to_temp "$config" head "$baseline_file"
   authority_pa_snapshot_to_temp "$config" "$scope" "$proposal_file"
-  baseline=$(authority_pa_verification_contract_json "$baseline_file")
-  proposal=$(authority_pa_verification_contract_json "$proposal_file")
+  baseline=$(authority_pa_verification_contract_json "$baseline_file" "$config (HEAD baseline)")
+  proposal=$(authority_pa_verification_contract_json "$proposal_file" "$config ($scope)")
   rm -f "$baseline_file" "$proposal_file"
   merged=$(authority_pa_merge_verification_contracts "$baseline" "$proposal")
   printf '%s\n' "$merged"

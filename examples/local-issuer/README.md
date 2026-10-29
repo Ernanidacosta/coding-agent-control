@@ -465,19 +465,27 @@ creates a risk the two readers disagree, so the invariant is one-directional
 and pinned by golden tests:
 
 ```text
-authority accepts  =>  the core accepts, and both describe the same contract
+authority accepts  =>  the core accepts and both describe the same contract,
+                       or the core refuses the document as invalid TOML
 authority refuses  =>  ineligible, and no receipt is ever possible
 ```
 
-The authority may be stricter; it may never accept a contract the core reads
-differently. It deliberately refuses four constructs the core tolerates:
+The authority may be stricter about the contract keys; it may never accept a
+contract the core reads differently. It deliberately refuses three constructs
+the core accepts:
 
 | Construct | Core | Authority | Why |
 |---|---|---|---|
-| duplicate `verify.<check>` key | keeps the first | refuses | meaning would depend on reader order |
-| `#` inside a command value | truncates at the `#` | refuses | the core silently shortens the command |
+| `#` inside a command value | part of the command | refuses | one unambiguous reading without TOML string rules |
 | single-quoted command | accepted | refuses | one unambiguous string form |
 | absent `verify.policy.required` | legacy inference | refuses | inference cannot be reproduced without guessing |
+
+Duplicate keys are refused by both. The core validates the whole document as
+strict TOML, while the authority reads only the contract keys, so the core can
+refuse a file the authority would accept: free text outside the contract keys,
+or an escape sequence the authority would keep raw. That direction is safe:
+completion fails `CONFIG_INVALID` and never consults a receipt for an invalid
+contract.
 
 One further divergence runs in the safe direction: a `required` name with no
 configured command leaves the core's contract valid and becomes a

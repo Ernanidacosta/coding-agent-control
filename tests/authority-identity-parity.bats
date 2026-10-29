@@ -35,11 +35,9 @@ core_json() { bash -c '. "$CORE"; '"$1"' worktree'; }
 # Both sides must agree on whether a state is usable, and for a usable state
 # they must produce the same fingerprint.
 #
-# For an unusable state the agreement is the refusal itself, not the digest: the
-# core's invalid-contract diagnostic embeds the mktemp path of the snapshot it
-# read, so two runs of the core alone already disagree. That is harmless here
-# because an invalid contract can never yield a candidate pass, but it means no
-# stable fingerprint exists for one, on either side.
+# For an unusable state the agreement is the refusal itself, not the digest: an
+# invalid contract can never yield a candidate pass, so its fingerprint is
+# never carried by a receipt.
 assert_parity() {
   local fn="$1" cv av c a
   cv=$(bash -c '. "$CORE"; '"$fn"' worktree | jq -r ".valid"')
@@ -334,12 +332,11 @@ write_progress() {
   [ "$(core_fp verification_receipt_mechanism_manifest_json)" = "$before" ]
 }
 
-@test "contract 15 an invalid contract has no stable fingerprint, on either side" {
-  # Recorded rather than worked around. The core embeds the temp path of the
-  # config snapshot it read into the diagnostic, so the same invalid state
-  # fingerprints differently on consecutive runs of the core alone. A receipt
-  # can never carry one, because an invalid contract cannot reach a candidate
-  # pass; this pins the fact so a later slice does not assume otherwise.
+@test "contract 15 an invalid contract names its snapshot, not a temp path, on both sides" {
+  # Diagnostics name the snapshot (HEAD baseline, worktree or staged) rather
+  # than the mktemp copy the reader parsed, so the same invalid state now reads
+  # the same on consecutive runs and on both sides. A receipt still never
+  # carries it: an invalid contract cannot reach a candidate pass.
   write_contract "$BASIC"; commit_all base
   write_contract '[verify]
 lint = ""
@@ -349,9 +346,10 @@ required = ["lint"]'
   local first second
   first=$(core_fp effective_verification_contract_json)
   second=$(core_fp effective_verification_contract_json)
-  [ "$first" != "$second" ]
+  [ "$first" = "$second" ]
+  [ "$first" = "$(auth_fp effective_verification_contract_json)" ]
   core_json effective_verification_contract_json | jq -e '
-    .valid == false and (.error.message | test("^Invalid /"))
+    .valid == false and (.error.message | startswith("Invalid agent-md.toml (worktree): "))
   ' >/dev/null
   contract_parity
 }

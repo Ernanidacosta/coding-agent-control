@@ -95,3 +95,11 @@
 **Scope:** examples/local-issuer/authority-lib.sh, tests/authority-system-trust.bats
 **Evidence:** Competing-bind regression failed before the fix and passed afterward; startup/readiness cases verify fail-closed diagnostics and cleanup.
 **Added:** 2026-10
+
+## Strict policy document
+
+**Rule:** Read `agent-md.toml` only through the `toml_document` readers, which validate the whole document first; never add a reader that interprets part of an invalid file, and re-vendor any reader change into `examples/local-issuer/phase-a-source.sh` with the `authority_pa_` prefix.
+**Why:** A lenient line reader resolved duplicate keys first-wins, truncated quoted commands at `#`, lost a whole section after a commented table header, and accepted free text, so the core, a reviewer and the authority could disagree about the enforced policy.
+**Scope:** .claude/hooks/_lib.sh, examples/local-issuer/phase-a-source.sh, examples/local-issuer/authority-lib.sh
+**Evidence:** tests/toml-strict.bats; tests/authority-parser-parity.bats cases 16, 24-26; tests/authority-identity-parity.bats contract 14-15
+**Added:** 2026-10
