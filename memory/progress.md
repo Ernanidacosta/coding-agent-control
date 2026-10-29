@@ -2,7 +2,7 @@
 
 ## Current
 
-Status: active
+Status: verifying
 Task: CAC-V1.0.0-RC3: prepare v1.0.0-rc3 with exactly four fixes from the post-GB-1 triage (RC3-1 strict agent-md.toml parser, RC3-2 ignored critical files diagnostics, RC3-3 directive budget, RC3-4 protect an existing core.hooksPath). No tag, release, policy, Risk or consumer change; no P1 backlog.
 Risk: high
 
@@ -27,7 +27,9 @@ Risk: high
 - RC3-4 done in 6b10267: --githooks writes core.hooksPath only when unset; .githooks is idempotent; any other local or global value is left unchanged with guidance (tests/install-hookspath.bats).
 - RC3-2 done in d10fb12: installer (dry-run included) reports ignored critical files with rule and scope (global/host, repository .gitignore, local exclude); doctor warns CONTROL_NOT_GIT_BOUND and CRITICAL_FILE_IGNORED (tests/ignored-critical-files.bats).
 - RC3-3 done in d1ff260: AGENT.md reduced from 38426 to 30679 bytes (budget test <= 30720, 2 KiB under the Codex 32 KiB default) by compressing reference and rationale; every rule, delegated marker and tested phrase kept; installed aliases pinned byte-identical; README documents host budgets.
-- RC3-1 is commit A (mechanism-changing: .claude/hooks/_lib.sh): strict whole-document TOML reader, CONFIG_INVALID naming snapshot, line and cause without content, receipt-first only for a valid contract; escapes validated but kept verbatim as rc2 and the authority read them; strict reader re-vendored mechanically into phase-a-source.sh (47/47 functions identical to the core); parity invariant restated (authority-lib.sh comment only). First commit attempt was blocked by pre-commit on identity parity (contract 14/15) before the re-vendoring. Real-config corpus: 55/55 valid configs resolve to the rc2 contract, 3 invalid-TOML configs (tempo-inmet, traduz-manual, projects/ia-search-jobs) now CONFIG_INVALID. Push for diagnostic CI, then stop for the owner's external review of A's SHA and mechanism hashes before descendant B (verifying) and closing C (done).
+- RC3-1 done in trust-changing commit A 64ceb013b76511c7cfac68f32310864e1c8a1bdc (diagnostic CI 40940723019, 4/4 jobs): strict whole-document agent-md.toml reader, CONFIG_INVALID naming snapshot, line and cause without content, receipt-first only for a valid contract, escapes validated but kept verbatim, strict reader re-vendored into phase-a-source.sh (47/47 functions identical). Real-config corpus: 55/55 valid configs keep the rc2 contract; tempo-inmet, traduz-manual and projects/ia-search-jobs (invalid TOML) now CONFIG_INVALID.
+- The owner externally approved A on 2026-10-29 after reviewing the full diff and the blobs _lib.sh 4b32d0ce8860f950c7e670ce2d6efbd2c00287b5, stop-verify.sh 38aac9560ae0f4d9f1e413b5182e1d368aa45ac7, verify.sh c9eaa8c55916681bee9880da5e6571dbf6e2fdae, phase-a-source.sh 74607d88503cca40a769fb65734a55a7c2cfffe4, authority-lib.sh cd24fcf5d845113be92625fc45234e28633d8370.
+- This verifying descendant B needs normal hooks, CI and exact-SHA independent verification; then closing C (done) with its own CI and attestation, and a final verify.sh. Do not tag or publish v1.0.0-rc3 until the owner authorizes it.
 - Post-GB-1 P1 backlog stays out of RC3: VERIFY_UNAVAILABLE wording, .bak cleanup, .project-control.toml guidance, cherry-pick UX, linked worktrees, staged issuance, ubuntu-26.04, verify timeout, githooks NOT active message, dry-run precision, authority reapproval UX, provenance SHA line, truncation-check false positive, WAHA deploy margin (consumer).
 
 ## Blockers
