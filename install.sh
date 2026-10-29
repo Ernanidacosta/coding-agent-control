@@ -965,7 +965,17 @@ if [ "$IN_GIT" -eq 1 ]; then
     done
   fi
 
-  if [ "$GITHOOKS" = "ask" ]; then
+  # Another tool may already own the hooks path (Husky, a team hook manager,
+  # a global hook directory). Replacing it would silently disable that chain,
+  # so only an unset path is ever written.
+  EXISTING_HOOKS_PATH=$(git -C "$TARGET" config --get core.hooksPath 2>/dev/null || true)
+  case "$EXISTING_HOOKS_PATH" in
+    '') HOOKS_PATH_STATE='unset' ;;
+    .githooks|.githooks/|./.githooks|./.githooks/|"$TARGET/.githooks"|"$TARGET/.githooks/") HOOKS_PATH_STATE=githooks ;;
+    *) HOOKS_PATH_STATE=conflict ;;
+  esac
+
+  if [ "$GITHOOKS" = "ask" ] && [ "$HOOKS_PATH_STATE" = unset ]; then
     if [ "$NON_INTERACTIVE" -eq 1 ]; then
       # Safe default for curl|bash: do NOT auto-activate repository git hooks.
       GITHOOKS="no"
@@ -977,9 +987,20 @@ if [ "$IN_GIT" -eq 1 ]; then
     fi
   fi
 
-  if [ "$GITHOOKS" = "yes" ]; then
-    [ "$DRY_RUN" -eq 0 ] && (cd "$TARGET" && git config core.hooksPath .githooks)
-    echo "  ✓ .githooks/       (active — core.hooksPath=.githooks)"
+  if [ "$HOOKS_PATH_STATE" = githooks ]; then
+    echo "  ✓ .githooks/       (already active — core.hooksPath=.githooks)"
+  elif [ "$HOOKS_PATH_STATE" = conflict ]; then
+    echo "  ! .githooks/       installed, NOT activated: core.hooksPath is already set to '$EXISTING_HOOKS_PATH'"
+    echo "    → git config was not changed; coding-agent-control never replaces or merges another hook chain."
+    echo "    → to keep that chain, call .githooks/pre-commit and .githooks/commit-msg from it;"
+    echo "      to switch instead, review it first and run: git config core.hooksPath .githooks"
+  elif [ "$GITHOOKS" = "yes" ]; then
+    if [ "$DRY_RUN" -eq 1 ]; then
+      echo "  → would activate  .githooks/ (core.hooksPath=.githooks)"
+    else
+      (cd "$TARGET" && git config core.hooksPath .githooks)
+      echo "  ✓ .githooks/       (active — core.hooksPath=.githooks)"
+    fi
   else
     echo "  ✓ .githooks/       (installed, NOT active)"
     echo "    → enable with:   git config core.hooksPath .githooks"
@@ -999,7 +1020,7 @@ echo "  2. Start your agent and work normally — no CI, gh, or memory provider 
 echo "  3. (Optional) Copy agent-md.toml.example to agent-md.toml when you want explicit project checks"
 echo "  4. (Optional) Review $TARGET/AGENT.md before adding project-specific directives"
 NEXT_STEP=5
-if [ "$IN_GIT" -eq 1 ] && [ "$GITHOOKS" = "no" ]; then
+if [ "$IN_GIT" -eq 1 ] && [ "$GITHOOKS" = "no" ] && [ "$HOOKS_PATH_STATE" = unset ]; then
   echo "  ${NEXT_STEP}. (Optional) Enable universal hooks: git config core.hooksPath .githooks"
   NEXT_STEP=$((NEXT_STEP + 1))
 fi

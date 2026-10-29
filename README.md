@@ -567,6 +567,12 @@ the behavior it had before the contract existed.
 ./install.sh --ref=v1.0.0-rc2 .
 ```
 
+`--githooks` sets `core.hooksPath=.githooks` only when no hooks path is
+configured. When another value is already effective, from the repository or
+from global configuration (Husky, a team hook manager), the installer leaves
+Git config unchanged, says so, and installs the hooks for you to call from that
+chain or to switch to deliberately.
+
 ### Pinned Installs And Provenance
 
 The installer takes its package from exactly one source:

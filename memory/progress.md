@@ -2,21 +2,31 @@
 
 ## Current
 
-Status: done
-Task: CAC-GOLDEN-BASELINE-1: freeze GB-1, one auditable and reproducible baseline of v1.0.0-rc2 and its real consumers, recorded in docs/golden-baseline.md. No code, tag, release, policy, Risk or consumer change.
+Status: active
+Task: CAC-V1.0.0-RC3: prepare v1.0.0-rc3 with exactly four fixes from the post-GB-1 triage (RC3-1 strict agent-md.toml parser, RC3-2 ignored critical files diagnostics, RC3-3 directive budget, RC3-4 protect an existing core.hooksPath). No tag, release, policy, Risk or consumer change; no P1 backlog.
 Risk: high
 
 ## Scope
 
-- docs/golden-baseline.md
-- memory/progress.md
+- .claude/hooks/_lib.sh
+- .agent-md/bin/doctor.sh
+- install.sh
+- AGENT.md
+- CLAUDE.md
+- README.md
+- README.pt-BR.md
+- docs/**
+- examples/local-issuer/README.md
+- tests/**
+- memory/**
 
 ## Next
 
-- GB-1 is frozen: CAC v1.0.0-rc2 at bf43a0f5d1b92712851b939f942fa80268ba757d; ia-search-jobs PASS at a83fd08ea0e22e178c71b7fffea97905e404386e; waha-operacional-tm2 PASS at c616991c283b340a2b73d3ce65a99f1647eecad9; affiliate-status-bot DEFERRED (active product task, pre-rc1 CAC). Validity criteria, baseline exceptions and backlog are in docs/golden-baseline.md.
-- The WAHA advisory RISK_RUNTIME_EVIDENCE_REQUIRED is an accepted baseline exception; its policy stays unchanged.
-- Post-GB-1 backlog, only after the owner opens it: VERIFY_UNAVAILABLE does not name the missing path/binary; upgrade leaves many `.bak` files; `.project-control.toml` guidance is unclear; a host global gitignore can hide newly installed hooks; cherry-pick does not carry progress.md; directive budget/truncation; linked worktrees and local authority; staged issuance; verify.sh timeout margin (522-744s against 750s); adapt CI to ubuntu-26.04 default ACLs; WAHA host deploy margin (~14m40s against TimeoutStartSec=15min, consumer-side); Productize/Ponytail/Failure Ratchet/evals.
-- affiliate-status-bot joins only through a later baseline or an explicit amendment, after AMAZON-SCHEDULE-1 closes.
+- RC3-4: installer refuses to replace a different core.hooksPath (TDD).
+- RC3-2: installer and doctor report ignored critical files and worktree-only control/policy (TDD).
+- RC3-3: AGENT.md under the 32 KiB Codex project-doc budget with a size test (TDD).
+- RC3-1 (trust/mechanism-changing, commit A): strict agent-md.toml parser, CONFIG_INVALID for invalid TOML, receipt reuse only for a valid contract. Push for diagnostic CI, then stop for the owner's external review of A's SHA and mechanism hashes before descendant B (verifying) and closing C (done).
+- Post-GB-1 P1 backlog stays out of RC3: VERIFY_UNAVAILABLE wording, .bak cleanup, .project-control.toml guidance, cherry-pick UX, linked worktrees, staged issuance, ubuntu-26.04, verify timeout, githooks NOT active message, dry-run precision, authority reapproval UX, provenance SHA line, truncation-check false positive, WAHA deploy margin (consumer).
 
 ## Blockers
 
