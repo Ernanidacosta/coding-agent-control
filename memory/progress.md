@@ -18,8 +18,9 @@ Risk: high
 
 ## Next
 
-- Dogfood v1.0.0-rc2 gradually: ia-search-jobs passed; operacional WAHA is next, once its own CLOUDFLARED-RELIABILITY-1 closes. The tag stays immutable and no new CAC feature starts during this cycle.
-- After WAHA: review findings that repeat, apply minimal hardening, then evaluate v1.0.0. Nonblocking findings from ia-search-jobs: VERIFY_UNAVAILABLE does not name the missing path/binary; upgrade leaves many `.bak` files; `.project-control.toml` guidance is unclear; a host global gitignore can hide newly installed hooks; cherry-pick does not carry progress.md.
+- CAC-GOLDEN-BASELINE-1 (owner-opened 2026-10-28): baseline candidate v1.0.0-rc2 at bf43a0f5d1b92712851b939f942fa80268ba757d; the tag stays immutable and campaign rules are in plan.md.
+- Consumer state at the GB-1 audit: ia-search-jobs a83fd08 on rc2 with Risk high and exact-SHA CI attestation; waha-operacional-tm2 has CLOUDFLARED-RELIABILITY-1 deployed (39bc1d9) and rc2 installed, but its rollout is blocked because agent-md.toml is not Git-bound; affiliate-status-bot runs a pre-rc1 CAC snapshot with an active product task.
+- Post-baseline backlog (not hardening during the campaign): VERIFY_UNAVAILABLE does not name the missing path/binary; upgrade leaves many `.bak` files; `.project-control.toml` guidance is unclear; a host global gitignore can hide newly installed hooks; cherry-pick does not carry progress.md.
 - Separate observation: full verify.sh took 522-744s against the 750s per-check limit; harden only if it keeps reproducing.
 
 ## Blockers
