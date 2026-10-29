@@ -385,6 +385,53 @@ EOF
   fi
 fi
 
+# Git binding. A policy or Risk record that never reaches a commit stays a local
+# proposal, and a global, repository or local ignore rule can keep it (or the
+# installed tooling) out of Git without any trace. Report it; never edit rules.
+doctor_ignore_rule() {
+  local rule source pattern scope local_exclude
+  rule=$(git check-ignore -v -- "$1" 2>/dev/null) || return 1
+  rule=${rule%%$'\t'*}
+  [[ "$rule" =~ ^(.*):([0-9]+):(.*)$ ]] || return 1
+  source=${BASH_REMATCH[1]}
+  pattern=${BASH_REMATCH[3]}
+  case "$pattern" in '!'*) return 1 ;; esac
+  local_exclude=$(git rev-parse --git-path info/exclude 2>/dev/null || true)
+  case "$source" in
+    .git/info/exclude|"$local_exclude") scope="repository-local exclude, this clone only" ;;
+    /*) scope="global/host ignore" ;;
+    *) scope="repository .gitignore" ;;
+  esac
+  printf '%s: %s:%s: %s' "$scope" "$source" "${BASH_REMATCH[2]}" "$pattern"
+}
+
+if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+  printf 'Git binding:\n'
+  for GIT_BOUND_FILE in "${AGENT_MD_TOML:-agent-md.toml}" .project-control.toml; do
+    case "$GIT_BOUND_FILE" in /*|*..*) continue ;; esac
+    if [ "$GIT_BOUND_FILE" = .project-control.toml ]; then GIT_BOUND_SUBJECT="its Risk"; else GIT_BOUND_SUBJECT="its policy"; fi
+    if git cat-file -e "HEAD:$GIT_BOUND_FILE" 2>/dev/null; then
+      printf '  %s: Git-bound (HEAD)\n' "$GIT_BOUND_FILE"
+    elif git ls-files --error-unmatch -- "$GIT_BOUND_FILE" >/dev/null 2>&1; then
+      warn "[WARNING CONTROL_NOT_GIT_BOUND] $GIT_BOUND_FILE is staged but not committed; it is not a Git-bound baseline yet. Recovery: review and commit it."
+    elif [ -e "$GIT_BOUND_FILE" ]; then
+      if GIT_BOUND_RULE=$(doctor_ignore_rule "$GIT_BOUND_FILE"); then
+        warn "[WARNING CONTROL_NOT_GIT_BOUND] $GIT_BOUND_FILE exists only in the worktree; $GIT_BOUND_SUBJECT is a local proposal, not a Git-bound baseline. It is ignored by Git ($GIT_BOUND_RULE). Recovery: ignore rules are unchanged; review the rule, then git add -f $GIT_BOUND_FILE and commit it."
+      else
+        warn "[WARNING CONTROL_NOT_GIT_BOUND] $GIT_BOUND_FILE exists only in the worktree; $GIT_BOUND_SUBJECT is a local proposal, not a Git-bound baseline. Recovery: review it, then git add $GIT_BOUND_FILE and commit it."
+      fi
+    else
+      printf '  %s: absent\n' "$GIT_BOUND_FILE"
+    fi
+  done
+  for CRITICAL_FILE in AGENT.md AGENTS.md CLAUDE.md .agent-md/bin/doctor.sh \
+    .claude/hooks/_lib.sh .codex/hooks/stop.sh .githooks/pre-commit; do
+    [ -e "$CRITICAL_FILE" ] || continue
+    CRITICAL_RULE=$(doctor_ignore_rule "$CRITICAL_FILE") || continue
+    warn "[WARNING CRITICAL_FILE_IGNORED] $CRITICAL_FILE is ignored by Git ($CRITICAL_RULE); it never reaches a commit or another clone. Recovery: ignore rules are unchanged; review the rule, then git add -f $CRITICAL_FILE to version it."
+  done
+fi
+
 # Install provenance is operational metadata the installer records. Doctor only
 # reports it: a legacy install without it, or an unreadable record, never fails
 # the installation, and nothing here contacts the source it names.

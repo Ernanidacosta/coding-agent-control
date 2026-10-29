@@ -1007,6 +1007,41 @@ if [ "$IN_GIT" -eq 1 ]; then
   fi
 fi
 
+# --- Git visibility of critical files ---
+# A global, repository or local ignore rule keeps a file out of every commit:
+# the policy and Risk record then stay local proposals and the tooling never
+# reaches another clone. Report each rule; never edit ignore rules here.
+if [ "$IN_GIT" -eq 1 ]; then
+  CRITICAL_PATHS="AGENT.md agent-md.toml .project-control.toml .agent-md/bin/verify.sh .claude/hooks/_lib.sh .githooks/pre-commit"
+  echo " $AGENT_LIST " | grep -q " claude " && CRITICAL_PATHS="$CRITICAL_PATHS CLAUDE.md"
+  echo " $AGENT_LIST " | grep -qE " (codex|cursor|windsurf) " && CRITICAL_PATHS="$CRITICAL_PATHS AGENTS.md"
+  echo " $AGENT_LIST " | grep -q " codex " && CRITICAL_PATHS="$CRITICAL_PATHS .codex/hooks/stop.sh"
+  LOCAL_EXCLUDE_PATH=$(git -C "$TARGET" rev-parse --git-path info/exclude 2>/dev/null || true)
+  IGNORED_PATHS=""
+  # shellcheck disable=SC2086 # CRITICAL_PATHS is a fixed list of plain paths.
+  while IFS=$'\t' read -r IGNORE_RULE IGNORED_PATH; do
+    [ -n "$IGNORED_PATH" ] || continue
+    [[ "$IGNORE_RULE" =~ ^(.*):([0-9]+):(.*)$ ]] || continue
+    IGNORE_SOURCE=${BASH_REMATCH[1]}
+    IGNORE_PATTERN=${BASH_REMATCH[3]}
+    # A negated pattern that matches re-includes the path.
+    case "$IGNORE_PATTERN" in '!'*) continue ;; esac
+    case "$IGNORE_SOURCE" in
+      .git/info/exclude|"$LOCAL_EXCLUDE_PATH") IGNORE_SCOPE="repository-local exclude, this clone only" ;;
+      /*) IGNORE_SCOPE="global/host ignore" ;;
+      *) IGNORE_SCOPE="repository .gitignore" ;;
+    esac
+    echo "  ! ignored by Git    $IGNORED_PATH ($IGNORE_SCOPE: $IGNORE_SOURCE:${BASH_REMATCH[2]}: $IGNORE_PATTERN)"
+    IGNORED_PATHS="$IGNORED_PATHS $IGNORED_PATH"
+  done < <(git -C "$TARGET" check-ignore -v -- $CRITICAL_PATHS 2>/dev/null || true)
+  if [ -n "$IGNORED_PATHS" ]; then
+    echo "    → Ignore rules were not changed. An ignored file never reaches a commit: a policy or"
+    echo "      Risk record stays a local proposal, and the tooling is missing from other clones."
+    echo "    → Review each rule, then add the files you mean to version deliberately:"
+    echo "      git add -f$IGNORED_PATHS"
+  fi
+fi
+
 echo ""
 if [ "$DRY_RUN" -eq 1 ]; then
   echo "▸ Dry run complete. No files changed."

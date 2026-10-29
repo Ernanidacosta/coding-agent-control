@@ -245,6 +245,13 @@ risk = "medium"
 declarações ao histórico e dá visibilidade para revisão, mas não prova autoria
 humana. Consulte [`docs/architecture.md`](docs/architecture.md).
 
+Uma regra de ignore (global, do `.gitignore` do repositório ou do
+`.git/info/exclude` local) pode esconder esses arquivos do Git. O installer,
+inclusive no dry-run, e o `doctor.sh` apontam a regra e o escopo, sem alterá-la;
+a recuperação é um `git add -f` deliberado. Enquanto `agent-md.toml` ou
+`.project-control.toml` não estiverem commitados, o doctor avisa
+`CONTROL_NOT_GIT_BOUND`: eles são apenas uma proposta local.
+
 ## Risk e conclusão
 
 Risk responde “quanta evidência, revisão e aprovação são necessárias?”, não “a

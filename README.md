@@ -366,6 +366,8 @@ Stable codes currently emitted by controls are deliberately limited:
 | `QUALITY_VISUAL_EVIDENCE_RECOMMENDED` | Quality | `warning` |
 | `DIAGNOSTIC_OUTPUT_TRUNCATED` | Diagnostic | `warning` |
 | `INTEGRATION_ICM_UNAVAILABLE` | Diagnostic | `warning` |
+| `CONTROL_NOT_GIT_BOUND` | Diagnostic (doctor) | `warning` |
+| `CRITICAL_FILE_IGNORED` | Diagnostic (doctor) | `warning` |
 
 Architectural non-goals constrain feature creep: coding-agent-control is not
 semantic memory, a multi-agent orchestrator, a model router, a background
@@ -643,6 +645,15 @@ project resolves to — is computed in full and compared with what is installed
 before anything is touched, so a reinstall that changes nothing writes nothing
 and leaves no backup, and a real change costs exactly one. `skip` and `replace`
 remain explicit options.
+
+An ignore rule can also hide files that must reach Git. The installer, its
+dry-run included, and `doctor.sh` report when `agent-md.toml`,
+`.project-control.toml`, the directives, the helpers or the hooks are ignored,
+and name the rule and its scope: a global/host ignore (`core.excludesFile`),
+the repository `.gitignore`, or this clone's `.git/info/exclude`. Neither one
+edits ignore rules; recovery is a deliberate `git add -f`. Until the policy and
+the control record are committed, doctor warns `CONTROL_NOT_GIT_BOUND`: an
+uncommitted `agent-md.toml` or `.project-control.toml` is only a local proposal.
 
 Host wiring in `.claude/settings.json`, `.codex/hooks.json`, the Cursor and
 Windsurf `agent-md` rules, and their backups is listed in the
