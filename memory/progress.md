@@ -2,18 +2,13 @@
 
 ## Current
 
-Status: done
-Task: Stabilize release-aware installation and provenance: `install.sh --ref=<tag|sha>` installs an immutable GitHub archive with no fallback, records `.agent-md/install-provenance.json`, and doctor reports it.
+Status: active
+Task: GB1-CI-RUNNER-PIN-1: pin every CI job to ubuntu-24.04, the image v1.0.0-rc2 was verified on. `ubuntu-latest` moved to ubuntu-26.04, whose default ACLs on /usr/share and /usr/share/ca-certificates make the bats host trust prerequisite refuse system trust (run 40800488558). Baseline stabilization for CAC-GOLDEN-BASELINE-1, not hardening; .github/workflows/ci.yml is trust material, so this follows the independent verification trust bootstrap.
 Risk: high
 
 ## Scope
 
-- install.sh
-- .agent-md/bin/doctor.sh
-- README.md
-- README.pt-BR.md
-- tests/install-provenance.bats
-- tests/install.bats
+- .github/workflows/ci.yml
 - memory/progress.md
 
 ## Next
@@ -21,6 +16,8 @@ Risk: high
 - CAC-GOLDEN-BASELINE-1 (owner-opened 2026-10-28): baseline candidate v1.0.0-rc2 at bf43a0f5d1b92712851b939f942fa80268ba757d; the tag stays immutable and campaign rules are in plan.md.
 - Consumer state at the GB-1 audit: ia-search-jobs a83fd08 on rc2 with Risk high and exact-SHA CI attestation; waha-operacional-tm2 has CLOUDFLARED-RELIABILITY-1 deployed (39bc1d9) and rc2 installed, but its rollout is blocked because agent-md.toml is not Git-bound; affiliate-status-bot runs a pre-rc1 CAC snapshot with an active product task.
 - Post-baseline backlog (not hardening during the campaign): VERIFY_UNAVAILABLE does not name the missing path/binary; upgrade leaves many `.bak` files; `.project-control.toml` guidance is unclear; a host global gitignore can hide newly installed hooks; cherry-pick does not carry progress.md.
+- Trust bootstrap: commit A (this pin) needs the owner's review of its SHA and trust hashes; then a legitimate verifying descendant B with its own CI and exact-SHA attestation, then done and final verify.sh. A cannot attest itself. Afterwards resume CAC-GOLDEN-BASELINE-1 at the CAC candidate validation.
+- Post-GB-1 backlog: adapt the CI host trust prerequisite to ubuntu-26.04 default ACLs; do not do it during the campaign.
 - Separate observation: full verify.sh took 522-744s against the 750s per-check limit; harden only if it keeps reproducing.
 
 ## Blockers
