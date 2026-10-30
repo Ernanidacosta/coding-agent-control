@@ -87,7 +87,7 @@ Install a release. The installer and the package both come from the same tag:
 
 ```bash
 # From inside your project directory
-curl -fsSL https://raw.githubusercontent.com/Ernanidacosta/coding-agent-control/refs/tags/v1.0.0-rc2/install.sh | bash -s -- --ref=v1.0.0-rc2
+curl -fsSL https://raw.githubusercontent.com/Ernanidacosta/coding-agent-control/refs/tags/v1.0.0-rc3/install.sh | bash -s -- --ref=v1.0.0-rc3
 ```
 
 `--ref` takes a release tag or a full 40-character commit SHA. It always

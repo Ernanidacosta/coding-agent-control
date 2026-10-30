@@ -236,8 +236,8 @@ EOF
 
 @test "README Quickstart names the current installer and its local path succeeds" {
   # The recommended path is pinned: installer and package come from one tag.
-  stable_url='https://raw.githubusercontent.com/Ernanidacosta/coding-agent-control/refs/tags/v1.0.0-rc2/install.sh'
-  stable="curl -fsSL $stable_url | bash -s -- --ref=v1.0.0-rc2"
+  stable_url='https://raw.githubusercontent.com/Ernanidacosta/coding-agent-control/refs/tags/v1.0.0-rc3/install.sh'
+  stable="curl -fsSL $stable_url | bash -s -- --ref=v1.0.0-rc3"
   grep -Fq "$stable" "$BATS_TEST_DIRNAME/../README.md"
   grep -Fq "$stable" "$BATS_TEST_DIRNAME/../README.pt-BR.md"
   grep -Fq "$stable" "$BATS_TEST_DIRNAME/../install.sh"

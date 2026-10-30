@@ -12,10 +12,10 @@
 #   ./install.sh --claude-settings=merge .          # default: idempotent hook merge
 #   ./install.sh --claude-settings=replace .        # back up + overwrite
 #   ./install.sh --codex-hooks=skip .               # leave an existing .codex/hooks.json unchanged
-#   ./install.sh --ref=v1.0.0-rc2 .                 # install that release tag (or full commit SHA)
+#   ./install.sh --ref=v1.0.0-rc3 .                 # install that release tag (or full commit SHA)
 #
 # Or via curl (from inside your project dir), pinned to a release:
-#   curl -fsSL https://raw.githubusercontent.com/Ernanidacosta/coding-agent-control/refs/tags/v1.0.0-rc2/install.sh | bash -s -- --ref=v1.0.0-rc2
+#   curl -fsSL https://raw.githubusercontent.com/Ernanidacosta/coding-agent-control/refs/tags/v1.0.0-rc3/install.sh | bash -s -- --ref=v1.0.0-rc3
 #
 # --ref always fetches that GitHub archive, even when run from a local package,
 # and fails instead of falling back to another ref. Without --ref, piped

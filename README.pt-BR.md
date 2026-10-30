@@ -133,7 +133,7 @@ Instale uma release. O installer e o pacote vêm da mesma tag:
 
 ```bash
 # Dentro do diretório do seu projeto
-curl -fsSL https://raw.githubusercontent.com/Ernanidacosta/coding-agent-control/refs/tags/v1.0.0-rc2/install.sh | bash -s -- --ref=v1.0.0-rc2
+curl -fsSL https://raw.githubusercontent.com/Ernanidacosta/coding-agent-control/refs/tags/v1.0.0-rc3/install.sh | bash -s -- --ref=v1.0.0-rc3
 ```
 
 `--ref` aceita uma tag de release ou um SHA de commit completo (40 caracteres).

@@ -3,34 +3,22 @@
 ## Current
 
 Status: done
-Task: CAC-V1.0.0-RC3: prepare v1.0.0-rc3 with exactly four fixes from the post-GB-1 triage (RC3-1 strict agent-md.toml parser, RC3-2 ignored critical files diagnostics, RC3-3 directive budget, RC3-4 protect an existing core.hooksPath). No tag, release, policy, Risk or consumer change; no P1 backlog.
+Task: CAC-V1.0.0-RC3-PUBLISH: owner-authorized publication of v1.0.0-rc3. Point the pinned Quickstart install command at v1.0.0-rc3 (both READMEs, the install.sh usage header, and the test that keeps them in sync), checkpoint it, then tag and publish a pre-release on that exact HEAD. No code, mechanism, policy, Risk or consumer change.
 Risk: high
 
 ## Scope
 
-- .claude/hooks/_lib.sh
-- .agent-md/bin/doctor.sh
-- install.sh
-- AGENT.md
-- CLAUDE.md
 - README.md
 - README.pt-BR.md
-- docs/**
-- examples/local-issuer/README.md
-- examples/local-issuer/authority-lib.sh
-- examples/local-issuer/phase-a-source.sh
-- tests/**
+- install.sh
+- tests/install.bats
 - memory/**
 
 ## Next
 
-- RC3-4 done in 6b10267: --githooks writes core.hooksPath only when unset; .githooks is idempotent; any other local or global value is left unchanged with guidance (tests/install-hookspath.bats).
-- RC3-2 done in d10fb12: installer (dry-run included) reports ignored critical files with rule and scope (global/host, repository .gitignore, local exclude); doctor warns CONTROL_NOT_GIT_BOUND and CRITICAL_FILE_IGNORED (tests/ignored-critical-files.bats).
-- RC3-3 done in d1ff260: AGENT.md reduced from 38426 to 30679 bytes (budget test <= 30720, 2 KiB under the Codex 32 KiB default) by compressing reference and rationale; every rule, delegated marker and tested phrase kept; installed aliases pinned byte-identical; README documents host budgets.
-- RC3-1 done in trust-changing commit A 64ceb013b76511c7cfac68f32310864e1c8a1bdc (diagnostic CI 40940723019, 4/4 jobs): strict whole-document agent-md.toml reader, CONFIG_INVALID naming snapshot, line and cause without content, receipt-first only for a valid contract, escapes validated but kept verbatim, strict reader re-vendored into phase-a-source.sh (47/47 functions identical). Real-config corpus: 55/55 valid configs keep the rc2 contract; tempo-inmet, traduz-manual and projects/ia-search-jobs (invalid TOML) now CONFIG_INVALID.
-- The owner externally approved A on 2026-10-29 after reviewing the full diff and the blobs _lib.sh 4b32d0ce8860f950c7e670ce2d6efbd2c00287b5, stop-verify.sh 38aac9560ae0f4d9f1e413b5182e1d368aa45ac7, verify.sh c9eaa8c55916681bee9880da5e6571dbf6e2fdae, phase-a-source.sh 74607d88503cca40a769fb65734a55a7c2cfffe4, authority-lib.sh cd24fcf5d845113be92625fc45234e28633d8370.
-- Verifying descendant B df048da8a35b3b20870a167ac419e602f07577f0 passed normal hooks, CI 40948897652 (4/4) and exact-SHA independent verification. This closing commit C carries its own CI and attestation, then a final verify.sh.
-- Waiting for the owner's authorization to tag and publish v1.0.0-rc3. After publication (separate task): bump the README Quickstart ref, dogfood ia-search-jobs, waha-operacional-tm2 and affiliate-status-bot (authority reinstall + reapprove there), freeze GB-2, then CAC-V1.0.0-READINESS.
+- The rc3 implementation closed in C 5ede8dc6c101fb5ffc34a9141acdb5a44fad9c53 (CI 40952445170, exact-SHA attestation, final verify 4 passed). The owner authorized publication on 2026-10-30.
+- This commit only changes the pinned release ref from v1.0.0-rc2 to v1.0.0-rc3 (install.sh change is in its usage comment). It needs its own CI and exact-SHA attestation plus a final verify.sh; it then becomes the release commit for the annotated tag v1.0.0-rc3 and a GitHub pre-release.
+- Never move or recreate the tag. Consumer rollout is a separate task: dogfood ia-search-jobs, waha-operacional-tm2 and affiliate-status-bot (authority reinstall + reapprove there), freeze GB-2, then CAC-V1.0.0-READINESS.
 - Post-GB-1 P1 backlog stays out of RC3: VERIFY_UNAVAILABLE wording, .bak cleanup, .project-control.toml guidance, cherry-pick UX, linked worktrees, staged issuance, ubuntu-26.04, verify timeout, githooks NOT active message, dry-run precision, authority reapproval UX, provenance SHA line, truncation-check false positive, WAHA deploy margin (consumer).
 
 ## Blockers
@@ -39,7 +27,7 @@ None
 
 ## Recently Completed
 
-- CAC-V1.0.0-RC3 implementation: RC3-4 6b10267 (never replace an existing core.hooksPath), RC3-2 d10fb12 (ignored critical files and CONTROL_NOT_GIT_BOUND diagnostics), RC3-3 d1ff260 (AGENT.md 30679 bytes under the Codex 32 KiB budget), RC3-1 trust-changing A 64ceb01 (strict agent-md.toml reader, receipt reuse only for a valid contract, vendored parity), owner-approved; B df048da verifying with CI 40948897652 and exact-SHA attestation.
+- CAC-V1.0.0-RC3 implementation: RC3-4 6b10267 (never replace an existing core.hooksPath), RC3-2 d10fb12 (ignored critical files and CONTROL_NOT_GIT_BOUND diagnostics), RC3-3 d1ff260 (AGENT.md 30679 bytes under the Codex 32 KiB budget), RC3-1 trust-changing A 64ceb01 (strict agent-md.toml reader, receipt reuse only for a valid contract, vendored parity), owner-approved; B df048da verifying (CI 40948897652) and C 5ede8dc done (CI 40952445170), each with exact-SHA attestation; final verify 4 passed.
 - CAC-GOLDEN-BASELINE-1 frozen by the owner on 2026-10-29. Audit: CAC HEAD 169d3d55b6c834beebe0b104f6f254ffc5854eaa with CI 40817783740 and exact-SHA attestation; ia-search-jobs verify 4 passed, 0 warnings, CI 40783009480 attestation; WAHA agent-md.toml versioned without its prose lines with an identical parsed contract, Risk medium in Git, deploy OK for c616991 after the first host run timed out, verify 3 passed, 1 accepted advisory.
 - GB1-CI-RUNNER-PIN-1: every CI job pinned to ubuntu-24.04 because ubuntu-latest moved to 26.04, whose default ACLs failed the bats host trust prerequisite (run 40800488558). Trust-changing A e4edc6bb276ca348f156b28f89b20444f21a7549 (diagnostic CI 40802737260) approved by the owner after external review of its trust blobs; verifying descendant 9706173acb8209049508a6c0cf46a735db6b4b9b passed normal hooks, CI 40815661296 and exact-SHA independent verification.
 - Published v1.0.0-rc2: annotated tag 239846b3f3ec675e3d4163b152457b51c70fcd45 on bf43a0f5d1b92712851b939f942fa80268ba757d and a GitHub pre-release from the tag notes. The documented pinned curl install was proven against the published tag (provenance github-ref, archive commit bf43a0f).
