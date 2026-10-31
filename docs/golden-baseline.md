@@ -1,9 +1,97 @@
-# Golden Baseline GB-1
+# Golden Baselines
 
 A Golden Baseline records a known, reproducible state of coding-agent-control
 and the real consumers that run it. It is not a claim that this state is
 perfect. Everything listed under exceptions is part of the baseline as it
-stands.
+stands. The newest baseline comes first; earlier ones stay as history.
+
+## Golden Baseline 2 — v1.0.0-rc3
+
+| Field | Value |
+|---|---|
+| ID | GB-2 |
+| Date | 2026-10-31 |
+| CAC release | `v1.0.0-rc3` (GitHub pre-release) |
+| Tag object | `45b91f9fb42cebf0eadb32fd0e27011afa2239bb` |
+| CAC release SHA (installed by consumers) | `0f21e47d231120e82a47109c589c8c9f7b97e5e8` |
+| Release CI | GitHub Actions run 41127895279: static, shellcheck, bats and install-smoke passed |
+| Independent verification | pass (`kind: independent`, `origin: ci`) for exactly `0f21e47d231120e82a47109c589c8c9f7b97e5e8` |
+| Verify | `verify.sh`: 4 passed, 0 warnings, 0 blocking failures (status `done`) |
+| CAC Risk | high (`.project-control.toml` declares medium; the stricter local proposal makes high effective) |
+
+The audit found the tag unmoved and peeling to the release SHA, locally and on
+the remote, with `origin/main` at the release SHA and a clean tree. The commit
+that adds this section changes only this file and `memory/`; the installed
+contract is the tagged commit.
+
+### Consumers
+
+| Consumer | Status | SHA | CAC | Risk | Verify | Independent/Authority | Production |
+|---|---|---|---|---|---|---|---|
+| ia-search-jobs | PASS | `2a47dbb3376223306d6b86c0ac5572616c2a50b6` on `feat/phase-17-6-admin-operations` | rc3, provenance `0f21e47` | high | 4 passed, 0 warnings | GitHub Actions run 41217801565, attestation for the exact SHA | container image revision `1ffcf51` (code of `37f538d`), started 2026-10-28, healthy; not touched by the rollout |
+| waha-operacional-tm2 | PASS | `c616991c283b340a2b73d3ce65a99f1647eecad9` on `main` | rc3, provenance `0f21e47` | medium | 3 passed, 1 accepted advisory warning, 0 blocking | not configured (not required at medium) | Pi checkout and deploy marker at `c616991`; no container recreated; health, gateway monitor and deploy timers active |
+| affiliate-status-bot | PASS | `f3ee52e02ab2b36db469596c35ed3c82ca50f60f` on `master` | rc3, provenance `0f21e47` | medium | 3 passed, 0 warnings | local authority reinstalled from rc3 and reapproved by the owner (approval id `57104fe5-e610-4e5c-831e-dc6b86805bce`); receipt 197 authenticated, current, reusable | deployed `f3ee52e` (deploy gate 3093 passed, 4 skipped); deploy marker = HEAD; containers healthy, not recreated, env hashes unchanged |
+
+In all three consumers `agent-md.toml` and `.project-control.toml` are in Git,
+doctor exits 0, the origin branch matches the audited SHA, and the installed
+`_lib.sh`, `stop-verify.sh`, `verify.sh`, `doctor.sh`, `pre-commit` and
+`commit-msg` are byte-identical to the tag.
+
+- **ia-search-jobs:** since `1ffcf51` only CAC tooling, `.github/`, `memory/`
+  and one integration test change. Stage A stays on the unpushed local branch
+  `wip/phase-17-4-stage-a-v2`.
+- **waha-operacional-tm2:** the rc3 rollout changed no versioned file. The
+  rollout snapshot also recorded the Access configuration, gateway checks and
+  `WORKING` session unchanged.
+- **affiliate-status-bot:** the six installed authority files match the tag.
+  The Amazon scheduler still runs at `02:30,18:30 UTC`. WAHA and Telegram
+  publishing were preserved in the rollout snapshot.
+
+### Accepted Exceptions
+
+These limitations are already known and do not block GB-2. They are part of
+the baseline, not work for this task.
+
+- `--dry-run` messages are still imprecise.
+- The installer leaves `.bak` files (20 in waha-operacional-tm2, 35 in
+  affiliate-status-bot; six of these are untracked in its worktree).
+- CI runs on `ubuntu-24.04`; `ubuntu-26.04` is not supported by the current
+  bats host trust prerequisite.
+- Local authority does not support linked worktrees; affiliate-status-bot still
+  has `affiliate-status-bot-lab` on `lab/ml-catalog-lane`.
+- Staged issuance is not supported.
+- waha-operacional-tm2 warns `RISK_RUNTIME_EVIDENCE_REQUIRED` (no runtime or
+  smoke check is declared) and has no per-check timeout.
+- The global gitignore makes doctor warn `CRITICAL_FILE_IGNORED` for files kept
+  local on purpose (1 in CAC, 7 in waha-operacional-tm2, 7 in
+  affiliate-status-bot).
+- The post-edit lint hook can depend on the session's working directory.
+- The Stop hook resolves checks from the session's working directory and can
+  fail outside the repository root. This is a post-GB-2 finding, not fixed here.
+- Escape sequences in double-quoted `agent-md.toml` strings are validated but
+  kept verbatim.
+- Cursor and Windsurf directive budgets are implementation-dependent.
+- Claude orphan lifecycle records can remain until termination is confirmed,
+  and SubagentStart cannot block child creation when registration fails.
+
+### Validity
+
+GB-2 stays valid while all of the following hold:
+
+- tag `v1.0.0-rc3` still peels to `0f21e47d231120e82a47109c589c8c9f7b97e5e8`
+  and is neither moved nor recreated;
+- each consumer keeps the listed SHA on its official branch, or a descendant
+  that changes neither CAC files nor `.project-control.toml` nor
+  `agent-md.toml`, and its provenance still names `v1.0.0-rc3` and `0f21e47`;
+- each consumer's effective Risk and policy remain as listed;
+- no CAC release after rc3 is adopted by a listed consumer.
+
+Any change to the CAC code, a consumer's installed CAC, its Risk or its policy
+ends GB-2. The next baseline gets a new ID.
+
+## Golden Baseline 1 — v1.0.0-rc2
+
+Historical record, superseded by GB-2.
 
 | Field | Value |
 |---|---|
@@ -19,7 +107,7 @@ every CI job to `ubuntu-24.04`. The commit that adds this file records the
 freeze and changes nothing else outside `memory/`. The installed contract is
 the tagged commit.
 
-## Consumers
+### Consumers
 
 | Consumer | Branch | Consumer SHA | CAC | Risk | Control | Doctor | Verify | Independent | Status |
 |---|---|---|---|---|---|---|---|---|---|
@@ -39,7 +127,7 @@ the tagged commit.
   `--ref=v1.0.0-rc2` install, a review of its customizations and `.bak` files,
   and a `verify.sh` on rc2, after the product task closes.
 
-## Baseline Exceptions
+### Baseline Exceptions
 
 These facts are needed to reproduce the current state. They are not defects to
 fix inside GB-1.
@@ -83,7 +171,7 @@ fix inside GB-1.
   `lab/ml-catalog-lane`.
 - 10 installer `.bak` files.
 
-## Post-Baseline Backlog
+### Post-Baseline Backlog
 
 Nothing here is a GB-1 blocker.
 
@@ -100,7 +188,7 @@ Nothing here is a GB-1 blocker.
 - Productize, Ponytail, Failure Ratchet and evals.
 - WAHA host deploy timeout margin (consumer-side, owner decision).
 
-## Validity
+### Validity
 
 GB-1 stays valid while all of the following hold:
 
