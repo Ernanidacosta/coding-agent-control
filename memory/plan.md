@@ -1,6 +1,6 @@
 # Plan
 
-- Direction: GB-2 is frozen on v1.0.0-rc3 (tag 45b91f9fb42cebf0eadb32fd0e27011afa2239bb, release commit 0f21e47d231120e82a47109c589c8c9f7b97e5e8) with ia-search-jobs, waha-operacional-tm2 and affiliate-status-bot PASS; manifesto in `docs/golden-baseline.md`. Next task: CAC-V1.0.0-READINESS. The bullets below record the GB-1 campaign (v1.0.0-rc2) and stay as reference.
+- Direction: GB-3 is frozen on v1.0.0-rc4 (tag 9c82227c57f0ff4c756d3637c2c2278e7886ce6e, release commit 0fdf9a7a9f43767c85e2156ab30c9c59809213de) with ia-search-jobs, waha-operacional-tm2 and affiliate-status-bot PASS; manifesto in `docs/golden-baseline.md`. Next task: CAC-V1.0.0-READINESS. The bullets below record the GB-1 campaign (v1.0.0-rc2) and stay as reference.
 - Campaign rules: no new CAC feature, no rc3, no tag move or recreation, no policy/timeout/Risk change unless the baseline itself needs it, no opportunistic hardening, no product task mixed with a CAC rollout. Nonblocking findings go to the post-baseline backlog.
 - Required consumers: ia-search-jobs, waha-operacional-tm2, affiliate-status-bot. Others are only listed as candidates.
 - Each consumer gets exactly one status: PASS, BLOCKED, DEFERRED or OUT_OF_SCOPE. Freeze requires the CAC candidate valid, ia-search-jobs and WAHA PASS, affiliate-status-bot PASS or explicitly justified DEFERRED, and no unknown divergence.
