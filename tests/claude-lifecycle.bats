@@ -156,10 +156,10 @@ EOF
 
 @test "Claude parent Stop and tool hooks retain their original commands" {
   jq -e '[.hooks.Stop[].hooks[].command] == [
-    "$CLAUDE_PROJECT_DIR/.claude/hooks/stop-verify.sh",
-    "$CLAUDE_PROJECT_DIR/.claude/hooks/state-enforcement.sh",
-    "$CLAUDE_PROJECT_DIR/.claude/hooks/sensory-reminder.sh"] and
-    .hooks.PreToolUse[0].hooks[0].command == "$CLAUDE_PROJECT_DIR/.claude/hooks/block-destructive.sh"' .claude/settings.json
+    "\"$CLAUDE_PROJECT_DIR\"/.claude/hooks/stop-verify.sh",
+    "\"$CLAUDE_PROJECT_DIR\"/.claude/hooks/state-enforcement.sh",
+    "\"$CLAUDE_PROJECT_DIR\"/.claude/hooks/sensory-reminder.sh"] and
+    .hooks.PreToolUse[0].hooks[0].command == "\"$CLAUDE_PROJECT_DIR\"/.claude/hooks/block-destructive.sh"' .claude/settings.json
 }
 
 @test "Claude child preflight reads its own event envelope not parent Stop" {

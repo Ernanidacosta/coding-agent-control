@@ -115,8 +115,8 @@ assert_context() {
 
 @test "Claude context hook is separate from unchanged lifecycle and parent settings" {
   jq -e '[.hooks.SubagentStart[].hooks[].command] == [
-    "$CLAUDE_PROJECT_DIR/.claude/hooks/subagent-lifecycle.sh",
-    "$CLAUDE_PROJECT_DIR/.claude/hooks/subagent-context.sh"] and
-    .hooks.SubagentStop[0].hooks[0].command == "$CLAUDE_PROJECT_DIR/.claude/hooks/subagent-lifecycle.sh" and
-    ([.hooks.Stop[].hooks[].command] | index("$CLAUDE_PROJECT_DIR/.claude/hooks/subagent-context.sh") | not)' .claude/settings.json
+    "\"$CLAUDE_PROJECT_DIR\"/.claude/hooks/subagent-lifecycle.sh",
+    "\"$CLAUDE_PROJECT_DIR\"/.claude/hooks/subagent-context.sh"] and
+    .hooks.SubagentStop[0].hooks[0].command == "\"$CLAUDE_PROJECT_DIR\"/.claude/hooks/subagent-lifecycle.sh" and
+    ([.hooks.Stop[].hooks[].command] | index("\"$CLAUDE_PROJECT_DIR\"/.claude/hooks/subagent-context.sh") | not)' .claude/settings.json
 }

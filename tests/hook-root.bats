@@ -175,21 +175,15 @@ high_risk_done_without_independent() {
   REPO_DIR="$spaced"
   CLAUDE_PROJECT_DIR="$spaced"
 
-  # The configured Claude command leaves $CLAUDE_PROJECT_DIR unquoted, so this
-  # starts the same hook by its quoted path; the Codex command is quoted.
-  claude_stop_quoted() {
-    (cd "$1" && printf '{"stop_hook_active":false}' | bash "$REPO_DIR/.claude/hooks/stop-verify.sh")
-  }
-
   broken_shell_at_root
-  out=$(same_from_every_dir claude_stop_quoted)
+  out=$(same_from_every_dir claude_stop)
   blocks_with VERIFY_REQUIRED_FAILED <<<"$out"
   out=$(same_from_every_dir codex_stop)
   blocks_with VERIFY_REQUIRED_FAILED <<<"$out"
 
   rm "$spaced/broken.sh"
   high_risk_done_without_independent
-  out=$(same_from_every_dir claude_stop_quoted)
+  out=$(same_from_every_dir claude_stop)
   blocks_with RISK_INDEPENDENT_VERIFICATION_REQUIRED <<<"$out"
   out=$(same_from_every_dir codex_stop)
   blocks_with RISK_INDEPENDENT_VERIFICATION_REQUIRED <<<"$out"

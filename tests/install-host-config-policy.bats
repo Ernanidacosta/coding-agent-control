@@ -81,7 +81,7 @@ stale_the_envelope() {
     .hooks.SubagentStop[0].hooks[0].timeout == 61 and
     .hooks.SessionEnd[0].hooks[0].timeout == 10 and
     ([.hooks.SubagentStart[0], .hooks.SubagentStop[0], .hooks.SessionEnd[0]] |
-      all(.[]; .hooks[0].command == "$CLAUDE_PROJECT_DIR/.claude/hooks/subagent-lifecycle.sh"))' \
+      all(.[]; .hooks[0].command == "\"$CLAUDE_PROJECT_DIR\"/.claude/hooks/subagent-lifecycle.sh"))' \
     "$TARGET_DIR/.claude/settings.json" >/dev/null
   [ -x "$TARGET_DIR/.claude/hooks/subagent-lifecycle.sh" ]
   [ -x "$TARGET_DIR/.claude/hooks/subagent-context.sh" ]

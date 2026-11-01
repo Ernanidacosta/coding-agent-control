@@ -409,13 +409,17 @@ hook_config_merge() {
   # existing, package, out. Command strings identify the handlers owned by
   # coding-agent-control. Existing copies of those handlers are refreshed; every
   # other top-level key, event, group, and handler is preserved byte-for-byte
-  # at the JSON-value level.
+  # at the JSON-value level. Releases before v1.0.0-rc4 wrote the Claude
+  # handlers with $CLAUDE_PROJECT_DIR unquoted; that spelling is still owned,
+  # so an upgrade replaces it instead of keeping it beside the quoted one.
   local existing="$1" package="$2" out="$3"
   jq -s '
     .[0] as $existing | .[1] as $agent_md |
 
     def commands($groups):
-      [$groups[]?.hooks[]?.command // empty];
+      [$groups[]?.hooks[]?.command // empty] |
+      . + [.[] | select(startswith("\"$CLAUDE_PROJECT_DIR\"/")) |
+        "$CLAUDE_PROJECT_DIR/" + ltrimstr("\"$CLAUDE_PROJECT_DIR\"/")];
 
     def remove_owned($groups; $owned):
       [$groups[]? |
