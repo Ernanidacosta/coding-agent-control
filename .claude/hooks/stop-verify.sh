@@ -34,6 +34,11 @@
 
 HOOK_INPUT=$(cat)
 
+if ! enter_project_root; then
+  emit_stop_block "$(policy_human_message "$(project_root_unavailable_result)")"
+  exit 0
+fi
+
 completion_evaluation_begin
 CONTEXT=$(completion_evaluation_context_json worktree host)
 HOST=${CODING_AGENT_CONTROL_HOST:-claude}

@@ -278,6 +278,31 @@ toml_key_present() {
   '
 }
 
+# project_root — the root of the Git worktree that owns these hooks. Hosts
+# start hooks from the session directory, which can be a subdirectory or a
+# different repository, so it is never used to find the project.
+project_root() {
+  local hooks root
+  hooks=$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd -P) || return 1
+  root=$(git -C "$hooks" rev-parse --show-toplevel 2>/dev/null) || return 1
+  [ -n "$root" ] && [ "$root/.claude/hooks/_lib.sh" -ef "$hooks/_lib.sh" ] || return 1
+  printf '%s\n' "$root"
+}
+
+# enter_project_root — make project_root the working directory, so policy,
+# state and configured checks resolve as verify.sh and pre-commit resolve them.
+enter_project_root() {
+  local root
+  root=$(project_root) || return 1
+  [ . -ef "$root" ] || cd "$root" || return 1
+}
+
+project_root_unavailable_result() {
+  policy_result_json fail error VERIFY_UNAVAILABLE \
+    "The completion contract cannot be evaluated because these hooks are not inside the root of a Git worktree." \
+    "Run coding-agent-control from the root of a Git repository, or initialize one with git init."
+}
+
 # toml_path — location of the config file (override with AGENT_MD_TOML env)
 toml_path() {
   echo "${AGENT_MD_TOML:-agent-md.toml}"

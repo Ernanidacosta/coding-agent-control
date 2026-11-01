@@ -229,7 +229,11 @@ Execute o contrato completo com:
 
 Check obrigatório com falha, indisponível ou em timeout bloqueia. Check
 opcional nessas condições produz warning. Um check não configurado nunca é
-apresentado como executado.
+apresentado como executado. Stop, pre-commit e `verify.sh` avaliam o contrato
+a partir da raiz do repositório Git dono dos hooks, qualquer que seja o
+diretório da sessão, e os checks rodam nessa raiz. Hooks fora de um
+repositório Git bloqueiam com `VERIFY_UNAVAILABLE` em vez de adivinhar uma
+raiz.
 
 O `agent-md.toml` é lido de forma estrita: TOML inválido (chave ou tabela
 duplicada, texto solto, aspas quebradas) torna o arquivo inteiro

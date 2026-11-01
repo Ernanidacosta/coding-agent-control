@@ -24,6 +24,9 @@ HOOK_INPUT=$(cat)
 # shellcheck source=.claude/hooks/_lib.sh
 . "$(dirname "$0")/_lib.sh"
 
+# Without a project root there is no Git-bound state; stop-verify.sh blocks.
+enter_project_root || exit 0
+
 RESULT=$(state_enforcement_result worktree)
 [ -n "$RESULT" ] || exit 0
 

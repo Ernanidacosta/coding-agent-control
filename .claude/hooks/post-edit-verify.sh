@@ -33,6 +33,24 @@ if ! echo "$FILE_PATH" | grep -qE '\.(ts|tsx|js|jsx|py)$'; then
   exit 0
 fi
 
+# The lint runs from the project root, so a path relative to the session
+# directory is rewritten relative to that root. A file outside the project is
+# not one of its files and is not linted.
+ROOT=$(project_root) && ROOT=$(cd "$ROOT" && pwd -P) || exit 0
+FILE_DIR=$(cd "$(dirname "$FILE_PATH")" 2>/dev/null && pwd -P) || exit 0
+case "$FILE_DIR/" in
+  "$ROOT"/*) ;;
+  *) exit 0 ;;
+esac
+case "$FILE_PATH" in
+  /*) ;;
+  *)
+    FILE_PATH="${FILE_DIR#"$ROOT"}/$(basename "$FILE_PATH")"
+    FILE_PATH=${FILE_PATH#/}
+    ;;
+esac
+enter_project_root || exit 0
+
 TOML=$(toml_path)
 CFG_LINT_FILE=$(read_toml "$TOML" verify lint_file)
 

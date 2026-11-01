@@ -30,7 +30,7 @@
 
 HOOK_INPUT=$(cat)
 
-git rev-parse --is-inside-work-tree &>/dev/null || exit 0
+enter_project_root || exit 0
 
 UI_PATTERN='\.(tsx|jsx|vue|svelte|astro|css|scss|sass|html)$'
 UI_CHANGED=$(

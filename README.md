@@ -728,7 +728,10 @@ made the host compatible when it did not.
 The completion question is: **what evidence proves this task is complete?**
 coding-agent-control resolves one verification contract for Claude Stop, Codex Stop,
 pre-commit, doctor, and `agent-md-verify`. Explicit commands take precedence;
-heuristics remain a labeled fallback.
+heuristics remain a labeled fallback. Stop, pre-commit, and `verify.sh`
+evaluate it from the root of the Git repository that owns the hooks, whatever
+directory the session is in, and checks run from that root; hooks outside a
+Git repository block with `VERIFY_UNAVAILABLE` instead of guessing one.
 
 Configuration is optional. Copy the example only when the project wants to
 make its own checks explicit:
