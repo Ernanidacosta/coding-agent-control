@@ -2,7 +2,7 @@
 
 ## Current
 
-Status: verifying
+Status: done
 Task: CAC-POST-1.0-SIMPLICITY-GUARDRAILS: add advisory simplicity and design guardrails (simplicity ladder, root cause first, simplicity review, ceiling and revisit trigger, benchmark before optimizing) to AGENT.md section 6, subordinate to Risk, verification, completion, safety, trust and approval; consolidate duplicate directive text to stay within the 30720-byte budget; mirror aliases; one-line README summaries; directives test. No Ponytail dependency, mechanism, trust, policy, Risk, tag, release or consumer change. Branch feat/post-1.0-simplicity-guardrails from bda5c0b (GB-4 untouched).
 Risk: high
 
@@ -17,9 +17,11 @@ Risk: high
 
 ## Next
 
-- Implementation ready: verify.sh on the changed tree 2026-11-02 PASS (lint, test, smoke; 11m48s alone). Commit on the feature branch, then CI on the branch (pull_request trigger) and exact-SHA independent attestation before done. Push or PR is an owner decision.
-- Baseline verify.sh at bda5c0b on 2026-11-02: lint and smoke pass, required test hit VERIFY_TIMEOUT at 750 s (known deferred verify-timeout item); untimed baseline suite 1112 ok, 0 failures in 821 s while a Stop-hook suite ran concurrently, so the timeout was load, not a failure.
-- After PASS: CAC-POST-1.0-PERFORMANCE-BASELINE (not started here).
+- Implementation checkpoint f7c3bb8bf501fcdc02884425137a5ca58c159e08 on feat/post-1.0-simplicity-guardrails: CI 41535915713 (pull_request, PR #2) success, exact-SHA independent attestation pass, local verify.sh and pre-commit PASS (lint, test, smoke). This done checkpoint needs its own CI, exact-SHA attestation and final verify.sh.
+- Impact: mechanism NO, trust material NO, policy NO, authority reapprove NO, consumer reinstall NO. AGENT.md 30714/30720 bytes.
+- PR #2 is not merged; merge is an owner decision.
+- Dogfood (evidence only, nothing implemented): verify performance reuses tests/run.sh BATS_JOBS before any budget change and needs an A/B benchmark against bda5c0b (ceiling: fits 750/900 s alone on 12 cores, not under a concurrent suite); dry-run precision reuses the existing cmp/same_file pattern by moving the DRY_RUN branch after the comparison in copy_with_agent_body and the agent-md.toml.example branch; linked worktrees stay out (ceiling: one canonical workspace; revisit when a supported consumer must issue receipts from a linked worktree in production).
+- Next owner task after merge: CAC-POST-1.0-PERFORMANCE-BASELINE (not started).
 - Post-1.0 backlog unchanged from GB-4 (see docs/golden-baseline.md Accepted Limitations and the deferred list there).
 
 ## Blockers
