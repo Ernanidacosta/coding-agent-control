@@ -103,3 +103,11 @@
 **Scope:** .claude/hooks/_lib.sh, examples/local-issuer/phase-a-source.sh, examples/local-issuer/authority-lib.sh
 **Evidence:** tests/toml-strict.bats; tests/authority-parser-parity.bats cases 16, 24-26; tests/authority-identity-parity.bats contract 14-15
 **Added:** 2026-10
+
+## Directive byte budget
+
+**Rule:** `AGENT.md` stays at or under 30720 bytes (`tests/directives.bats`); a new directive pays for itself by consolidating a true duplicate, never by removing a sentence that `directives.bats` pins verbatim in its section, and never by editing a `CAC:delegated` block.
+**Why:** Codex silently drops `AGENTS.md` past its project-doc budget; the simplicity guardrails landed with 6 bytes of margin after a cut of the pinned section-3 push rule failed test 20.
+**Scope:** AGENT.md, CLAUDE.md, AGENTS.md, tests/directives.bats
+**Evidence:** tests/directives.bats budget and essential-rules tests
+**Added:** 2026-11

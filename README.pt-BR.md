@@ -34,6 +34,9 @@ oferece uma integração capaz de bloquear.
   de secrets;
 - mantém estado operacional atual e pequeno para handoff determinístico;
 - orienta a manutenção do README como documentação viva, sem gate semântico;
+- orienta o design para a menor mudança suficiente (escada de simplicidade,
+  causa raiz primeiro, limites registrados, otimização medida), como regra
+  advisory;
 - executa a verificação declarada e usa o exit code como fonte de verdade;
 - aumenta requisitos de conclusão conforme o Risk declarado da tarefa;
 - valida evidência com autoridade separada e ligada ao SHA exato em trabalhos
