@@ -5,7 +5,149 @@ and the real consumers that run it. It is not a claim that this state is
 perfect. Everything listed under exceptions is part of the baseline as it
 stands. The newest baseline comes first; earlier ones stay as history.
 
+## Golden Baseline 4 — v1.0.0 Final
+
+| Field | Value |
+|---|---|
+| ID | GB-4 |
+| Date | 2026-11-02 |
+| CAC release | `v1.0.0` (stable GitHub release, marked Latest) |
+| Tag object | `bbc48bc6c3e648512c442fe33831fc6ace8bd053` |
+| CAC release SHA (installed by consumers) | `6714cc9a90327fb5fccd2f36db8bacc48d6a0222` |
+| Release CI | GitHub Actions run 41369614661: static, shellcheck, bats and install-smoke passed |
+| Independent verification | pass (`kind: independent`, `origin: ci`) for exactly `6714cc9a90327fb5fccd2f36db8bacc48d6a0222` |
+| Verify | `verify.sh`: 4 passed, 0 warnings, 0 blocking failures (status `done`) |
+| CAC Risk | high (`.project-control.toml` declares medium; the stricter local proposal makes high effective) |
+
+GB-4 closes the v1.0.0 release line. The audit found the tag unmoved and
+peeling to the release SHA, locally and on the remote, with `origin/main` at
+the release SHA, a clean tree, an empty index and no stash. The release is
+neither a draft nor a pre-release, and its notes carry the known limitations
+and the rollback note for releases before rc4. Doctor exits 0. The commit that
+adds this section changes only this file and `memory/`; the installed contract
+is the tagged commit.
+
+### Consumers
+
+| Consumer | SHA | CAC | Risk | Verify | Independent/Authority | Production |
+|---|---|---|---|---|---|---|
+| ia-search-jobs | `d9161369a9230daf88c05421e66b03b3068284ab` on `feat/phase-17-6-admin-operations` | `v1.0.0`, provenance `github-ref`, `6714cc9a90327fb5fccd2f36db8bacc48d6a0222` | high | 4 passed, 0 warnings | independent verification passed for the exact consumer SHA (GitHub Actions run 41325650214) | not touched by the rollout; no deploy needed |
+| waha-operacional-tm2 | `c616991c283b340a2b73d3ce65a99f1647eecad9` on `main` | `v1.0.0`, provenance `github-ref`, `6714cc9a90327fb5fccd2f36db8bacc48d6a0222` | medium | 3 passed, 1 accepted advisory warning, 0 blocking | not configured (not required at medium) | Pi checkout at `c616991`; nothing pushed, no deploy; the Pi snapshots before and after the rollout match |
+| affiliate-status-bot | `63835300264eb45e0028cf69022c663b3c3f398c` on `master` | `v1.0.0`, provenance `github-ref`, `6714cc9a90327fb5fccd2f36db8bacc48d6a0222` | medium | 3 passed, 0 warnings | local authority, approval id `57104fe5-e610-4e5c-831e-dc6b86805bce`, no reapprove needed; receipt 203 authentic, current and applicable (`reusable_ordinary`) | deploy marker `63835300264eb45e0028cf69022c663b3c3f398c`; containers not recreated, env hashes unchanged; WAHA, Telegram and the `02:30,18:30 UTC` scheduler preserved |
+
+In all three consumers the origin branch matches the audited SHA, the tracked
+tree, index and stash are clean (affiliate-status-bot keeps its six untracked
+`.bak` files from earlier installs), `agent-md.toml` and
+`.project-control.toml` are in Git and unchanged against HEAD, and doctor exits
+0. The 19 package files under `.claude/hooks/`, `.codex/hooks/`,
+`.agent-md/bin/` and `.githooks/` are byte-identical to the tag.
+`.claude/settings.json` and `.codex/hooks.json` differ from the tag only in the
+Stop envelope timeouts. Each `.claude/settings.json` has the 11 package
+handlers, all quoted. The promotion changed no versioned file in any consumer.
+
+### Equivalence With RC4
+
+`v1.0.0` introduces no behavior change over `v1.0.0-rc4`:
+
+- between `0fdf9a7` and `6714cc9` nothing changes under `.claude/`, `.codex/`,
+  `.agent-md/`, `.githooks/`, `.github/`, `examples/`, `AGENT.md`,
+  `agent-md.toml` or `.project-control.toml`;
+- the mechanism is byte-identical and the trust material is identical;
+- the difference is release metadata: the pinned Quickstart ref in both
+  READMEs, the `install.sh` usage comment, the test that keeps them in sync,
+  this manifesto and `memory/`.
+
+No broad behavioral dogfood was needed for the final. The three consumers were
+promoted from rc4 to `v1.0.0` without regression. Only provenance changed. In
+affiliate-status-bot that made receipt 201 stale, because the receipt snapshot
+includes `install-provenance.json`; receipt 203 covers the promoted state.
+
+### Release Lineage
+
+`v1.0.0-rc1` → `v1.0.0-rc2` → `v1.0.0-rc3` → `v1.0.0-rc4` → `v1.0.0`
+
+- **rc1** (`25943d7`): first candidate for real dogfooding: Claude Code and
+  Codex hooks, safety, state and Risk, the verification contract, subagent
+  completion, independent verification and the optional local authority.
+- **rc2** (`bf43a0f`): release-pinned installation (`--ref`) with recorded
+  provenance; frozen in GB-1.
+- **rc3** (`0f21e47`): strict `agent-md.toml`, ignored critical files
+  reported, directive budget and an existing `core.hooksPath` preserved;
+  frozen in GB-2.
+- **rc4** (`0fdf9a7`): completion evaluated from the canonical repository root
+  and quoted `$CLAUDE_PROJECT_DIR`; frozen in GB-3.
+- **v1.0.0** (`6714cc9`): promoted from rc4 after GB-3 and a passing
+  CAC-V1.0.0-READINESS, with no RC5 needed.
+
+### Final Invariants
+
+- **Completion fails closed:** a failing, unavailable or timed-out required
+  check, invalid configuration or missing final evidence blocks a `done`
+  claim; outside a Git worktree Stop blocks with `VERIFY_UNAVAILABLE`.
+- **Root canonicalization:** Claude Code and Codex reach the same completion
+  decision at the repository root and in any subdirectory.
+- **Strict policy:** the whole `agent-md.toml` is validated before use; an
+  invalid document is `CONFIG_INVALID` and never weakens the contract.
+- **Independent verification:** high and critical Risk need an attestation
+  bound to the exact HEAD from a reviewed verifier, with no self-approval.
+- **Local authority:** an owner-approved issuer runs the reviewed checks
+  outside the agent; a mechanism change needs reapproval.
+- **Authenticated receipts:** Stop reuses a receipt only when it is authentic,
+  current and applicable to the exact state.
+- **Provenance:** every consumer records source, ref and archive commit.
+- **Git binding:** policy and control state are read from Git, and doctor
+  reports control files hidden by ignore rules.
+- **Safe upgrade:** reinstalling is idempotent, preserves third-party handlers
+  and customizations, never replaces an existing `core.hooksPath`, and leaves
+  one quoted copy of each Claude handler.
+- **Tested consumers:** a high-Risk project with CI attestation
+  (ia-search-jobs), an operational deployment (waha-operacional-tm2) and a
+  local-authority project with authenticated receipts (affiliate-status-bot).
+
+### Accepted Limitations
+
+These are post-1.0 backlog items. None blocks GB-4 or the release.
+
+| # | Limitation | Class |
+|---|---|---|
+| 1 | `--dry-run` can describe more writes than the install makes | installer UX |
+| 2 | The installer can leave `.bak` files | installer UX |
+| 3 | The global gitignore makes doctor warn `CRITICAL_FILE_IGNORED` for files kept local on purpose | advisory diagnostic |
+| 4 | CI runs on `ubuntu-24.04`; `ubuntu-26.04` is outside the baseline | platform support |
+| 5 | Local authority does not support linked worktrees | authority scope |
+| 6 | Staged issuance is not supported | authority scope |
+| 7 | `doctor.sh` can raise a false alarm when run from a subdirectory | diagnostic, cwd-dependent |
+| 8 | `tdd-check.sh` resolves from the working directory; it is only a nudge | quality nudge, cwd-dependent |
+| 9 | Cursor and Windsurf directive budgets depend on the host implementation | host-dependent |
+| 10 | There is no consolidated rollback procedure | documentation |
+| 11 | Rolling back to a release before rc4 can keep both the quoted and unquoted Claude handlers, so hooks run twice; no false PASS, and reinstalling rc4 or later restores one copy | rollback, documented in the release notes |
+| 12 | Local authority needs reapproval when the mechanism changes | authority UX, by design |
+| 13 | The receipt snapshot includes `install-provenance.json`, so promoting a tag makes the previous receipt stale even with an identical mechanism | authority UX, by design |
+| 14 | When no applicable receipt exists, Stop can issue one at the end of a turn | documented authority and host behavior, not a trust failure |
+| 15 | A `progress.md` ignored by Git is validated by the state gate only when an operationally relevant change exists or the file itself is in the relevant set | state-gate scope |
+
+At medium Risk, runtime evidence stays advisory: waha-operacional-tm2 warns
+`RISK_RUNTIME_EVIDENCE_REQUIRED` because it declares no runtime or smoke check.
+
+### Validity
+
+GB-4 stays valid while all of the following hold:
+
+- tag `v1.0.0` still peels to `6714cc9a90327fb5fccd2f36db8bacc48d6a0222` and
+  is neither moved nor recreated;
+- each consumer keeps the listed SHA on its official branch, or a descendant
+  that changes neither CAC files nor `.project-control.toml` nor
+  `agent-md.toml`, and its provenance still names `v1.0.0` and `6714cc9`;
+- each consumer's effective Risk and policy remain as listed;
+- no CAC release after `v1.0.0` is adopted by a listed consumer.
+
+Any change to the CAC code, a consumer's installed CAC, its Risk or its policy
+ends GB-4. Work after `v1.0.0` is post-1.0 backlog, not a condition of this
+release.
+
 ## Golden Baseline 3 — v1.0.0-rc4
+
+Historical record, superseded by GB-4.
 
 | Field | Value |
 |---|---|
