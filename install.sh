@@ -17,6 +17,9 @@
 # Or via curl (from inside your project dir), pinned to a release:
 #   curl -fsSL https://raw.githubusercontent.com/Ernanidacosta/coding-agent-control/refs/tags/v1.0.0/install.sh | bash -s -- --ref=v1.0.0
 #
+# Release candidate (pre-release, for canary dogfooding):
+#   curl -fsSL https://raw.githubusercontent.com/Ernanidacosta/coding-agent-control/refs/tags/v1.0.1-rc1/install.sh | bash -s -- --ref=v1.0.1-rc1
+#
 # --ref always fetches that GitHub archive, even when run from a local package,
 # and fails instead of falling back to another ref. Without --ref, piped
 # execution installs the moving main branch.

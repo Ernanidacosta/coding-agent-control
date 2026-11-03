@@ -143,6 +143,15 @@ curl -fsSL https://raw.githubusercontent.com/Ernanidacosta/coding-agent-control/
 Ele sempre instala esse archive do GitHub e falha em vez de cair para outro ref.
 Use uma tag de release como baseline de produção e dogfooding.
 
+### Release candidate
+
+Pre-release para dogfooding em canary, não é baseline de produção. Release
+candidates são imutáveis; uma release estável só vem depois do dogfood:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Ernanidacosta/coding-agent-control/refs/tags/v1.0.1-rc1/install.sh | bash -s -- --ref=v1.0.1-rc1
+```
+
 ### Desenvolvimento
 
 ```bash
