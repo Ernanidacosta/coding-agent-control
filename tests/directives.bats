@@ -188,6 +188,17 @@
   done
 }
 
+@test "directives keep simplicity guardrails advisory and subordinate" {
+  grep -Fxq '### Simplicity And Design Guardrails' "$BATS_TEST_DIRNAME/../AGENT.md"
+  for rule in '**Simplicity ladder.**' '**Root cause first.**' '**Simplicity review.**' \
+    '**Ceiling and revisit trigger.**' '**Benchmark before optimizing.**' \
+    'Decision rules, not gates:' 'add no state or policy' \
+    'option loses if it weakens one.'; do
+    grep -Fq -- "$rule" "$BATS_TEST_DIRNAME/../AGENT.md" \
+      || { echo "missing rule: $rule" >&2; false; }
+  done
+}
+
 @test "directives keep balanced delegated markers" {
   starts=$(grep -cFx '<!-- CAC:delegated:start -->' "$BATS_TEST_DIRNAME/../AGENT.md")
   ends=$(grep -cFx '<!-- CAC:delegated:end -->' "$BATS_TEST_DIRNAME/../AGENT.md")
