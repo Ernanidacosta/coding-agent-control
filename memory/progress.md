@@ -2,24 +2,20 @@
 
 ## Current
 
-Status: done
-Task: CAC-V1.0.1-PUBLISH: promote v1.0.1-rc1 (3caf863, dogfooded in ia-search-jobs, waha-operacional-tm2 and affiliate-status-bot; readiness YES, no RC2) to stable v1.0.1. Release commit points the Stable Quickstart at v1.0.1 in both READMEs, the install.sh usage comment and tests/install.bats, and removes the promoted Release candidate block; no installer behavior, directive, mechanism, host config, policy, trust, authority or consumer change.
+Status: verifying
+Task: CAC-POST-1.0-PERFORMANCE-BASELINE: measure v1.0.1 (54e3d95) performance reproducibly (idle and controlled contention, per-check and per-file breakdown, subprocess, TOML, identity, filesystem, parallelism and timeout headroom) and record it in docs/performance-baseline-v1.0.1.md; no optimization, policy, mechanism, test or budget change.
 Risk: high
 
 ## Scope
 
-- README.md
-- README.pt-BR.md
-- install.sh
-- tests/install.bats
+- docs/performance-baseline-v1.0.1.md
 - memory/**
 
 ## Next
 
-- Release delta 3caf863..release commit: README.md, README.pt-BR.md, install.sh (comments only), tests/install.bats, memory/; directives and every operational path unchanged.
-- This release commit needs its own CI, exact-SHA attestation and final verify.sh before tagging v1.0.1 (annotated, stable, Latest). v1.0.0, v1.0.1-rc1 and every existing tag stay untouched.
-- Consumers stay on v1.0.1-rc1 until a separate owner task converges them on v1.0.1.
-- Not started: CAC-POST-1.0-PERFORMANCE-BASELINE.
+- Commit the baseline document with Status verifying, then CI, exact-SHA attestation and verify.sh; close with Status done and the same evidence for the closing SHA.
+- Optimization is a separate owner task chosen from the document's hypotheses; the baseline workload in the document is the A/B reference.
+- Consumers stay on v1.0.1; no release.
 - Post-1.0 backlog unchanged from GB-4 (see docs/golden-baseline.md Accepted Limitations and the deferred list there).
 
 ## Blockers
