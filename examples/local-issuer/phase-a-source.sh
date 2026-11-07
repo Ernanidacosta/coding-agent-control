@@ -36,6 +36,12 @@
 #   ERROR <line> <reason>               reasons never quote file content
 authority_pa_toml_document() {
   local file="$1"
+  # A resolution that loaded this file with authority_pa_toml_document_cache answers
+  # from that parse: the same records and status, without parsing again.
+  if [ -n "${toml_cache_file:-}" ] && [ "$file" = "$toml_cache_file" ]; then
+    [ -z "$toml_cache_records" ] || printf '%s\n' "$toml_cache_records"
+    return "$toml_cache_status"
+  fi
   awk '
     function fail_at(line, reason) {
       printf "ERROR\037%d\037%s\n", line, reason
@@ -222,6 +228,20 @@ authority_pa_toml_document() {
       printf "%s", out
     }
   ' "$file"
+}
+
+# authority_pa_toml_document_cache <file>
+# Parses <file> once for the resolution that calls it. The caller declares
+# `local toml_cache_file toml_cache_records toml_cache_status`, so the parse is
+# visible to every reader it calls, including subshells, and ends when the
+# caller returns: nothing outlives one resolution, and another file is always
+# parsed on its own.
+authority_pa_toml_document_cache() {
+  toml_cache_file=""
+  [ -f "$1" ] || return 0
+  toml_cache_records=$(authority_pa_toml_document "$1")
+  toml_cache_status=$?
+  toml_cache_file="$1"
 }
 
 # authority_pa_toml_validate <file>
@@ -993,6 +1013,8 @@ authority_pa_verification_contract_json() {
   local capability_values capability_status capabilities
   local check_args=()
   local preparation='null' preparation_command="" preparation_timeout="" preparation_provider=""
+  local toml_cache_file toml_cache_records toml_cache_status
+  authority_pa_toml_document_cache "$config"
 
   if ! toml_error=$(authority_pa_toml_validate "$config"); then
     authority_pa_verification_invalid_contract_json \

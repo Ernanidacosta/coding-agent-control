@@ -2,19 +2,21 @@
 
 ## Current
 
-Status: done
-Task: CAC-POST-1.0-PERFORMANCE-BASELINE: measure v1.0.1 (54e3d95) performance reproducibly (idle and controlled contention, per-check and per-file breakdown, subprocess, TOML, identity, filesystem, parallelism and timeout headroom) and record it in docs/performance-baseline-v1.0.1.md; no optimization, policy, mechanism, test or budget change.
+Status: verifying
+Task: CAC-POST-1.0-PERF-TOML: parse each policy document once per resolution instead of once per key, reusing the existing strict toml_document output through function-local variables (no persistent cache, no new parser, helper or dependency); core _lib.sh and the vendored authority phase-a-source.sh change identically. A/B against docs/performance-baseline-v1.0.1.md; no policy, Risk, timeout, Stop, receipt-format, trust-boundary or installer change.
 Risk: high
 
 ## Scope
 
-- docs/performance-baseline-v1.0.1.md
+- .claude/hooks/_lib.sh
+- examples/local-issuer/phase-a-source.sh
+- tests/toml-parse-reuse.bats
 - memory/**
 
 ## Next
 
-- Optimization is a separate owner task chosen from docs/performance-baseline-v1.0.1.md; recommended next: CAC-POST-1.0-PERF-TOML (parse each TOML snapshot once). Its A/B reference is the baseline workload in that document.
-- PR #3 (perf/v1.0.1-baseline) merges only with owner authorization.
+- Mechanism changes (.claude/hooks/_lib.sh) and so do the authority programs (examples/local-issuer/phase-a-source.sh): consumers need a reinstall and local-authority projects (affiliate-status-bot) a reapproval. Distribution goes through a new RC, as a separate owner task.
+- Checkpoint verifying, then CI, exact-SHA attestation and verify.sh; close with Status done and the same evidence. PR merges only with owner authorization.
 - Consumers stay on v1.0.1; no release.
 - Post-1.0 backlog unchanged from GB-4 (see docs/golden-baseline.md Accepted Limitations and the deferred list there).
 
