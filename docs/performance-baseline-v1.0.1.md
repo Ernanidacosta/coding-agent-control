@@ -267,6 +267,10 @@ largest repeated part.
 | Test check, contention | 1128 s | 750 s | −378 s (−50 %) |
 | Host Stop envelopes | Claude 930 s, Codex 950 s | 900 s core | 30 s / 50 s transport reserve |
 
+The checkpoint verify of the commit that added this document (`e090d48`, an
+ordinary idle session, not part of the series) took 738 s, inside the
+observed spread but within 27 s of the 765-second revisit threshold below.
+
 **Ceiling.** The current suite and policy fit the budget only when this
 repository's verify runs alone on an otherwise idle host of this class (6 cores
 / 12 threads). They do not fit under roughly two-fold CPU contention: another
