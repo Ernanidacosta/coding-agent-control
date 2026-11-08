@@ -241,11 +241,18 @@ EOF
   grep -Fq "$stable" "$BATS_TEST_DIRNAME/../README.md"
   grep -Fq "$stable" "$BATS_TEST_DIRNAME/../README.pt-BR.md"
   grep -Fq "$stable" "$BATS_TEST_DIRNAME/../install.sh"
+  # A release candidate is documented beside stable, never in its place.
+  rc_url='https://raw.githubusercontent.com/Ernanidacosta/coding-agent-control/refs/tags/v1.0.2-rc1/install.sh'
+  rc="curl -fsSL $rc_url | bash -s -- --ref=v1.0.2-rc1"
+  grep -Fq "$rc" "$BATS_TEST_DIRNAME/../README.md"
+  grep -Fq "$rc" "$BATS_TEST_DIRNAME/../README.pt-BR.md"
+  grep -Fq "$rc" "$BATS_TEST_DIRNAME/../install.sh"
   # main stays documented, but only as the moving development path.
   development_url='https://raw.githubusercontent.com/Ernanidacosta/coding-agent-control/main/install.sh'
   grep -Fq "curl -fsSL $development_url | bash" "$BATS_TEST_DIRNAME/../README.md"
   awk '/^## Quickstart/,/^## Basic Workflow/' "$BATS_TEST_DIRNAME/../README.md" \
-    | awk '/^### Stable/{s=NR} /^### Development/{d=NR} END{exit !(s && d && s < d)}'
+    | awk '/^### Stable/{s=NR} /^### Release candidate/{r=NR} /^### Development/{d=NR}
+        END{exit !(s && r && d && s < r && r < d)}'
 
   run bash "$BATS_TEST_DIRNAME/../install.sh" --dry-run --no-githooks --agent=all "$TARGET_DIR"
   [ "$status" -eq 0 ]
