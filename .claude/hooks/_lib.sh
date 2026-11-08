@@ -26,6 +26,12 @@
 #   ERROR <line> <reason>               reasons never quote file content
 toml_document() {
   local file="$1"
+  # A resolution that loaded this file with toml_document_cache answers
+  # from that parse: the same records and status, without parsing again.
+  if [ -n "${toml_cache_file:-}" ] && [ "$file" = "$toml_cache_file" ]; then
+    [ -z "$toml_cache_records" ] || printf '%s\n' "$toml_cache_records"
+    return "$toml_cache_status"
+  fi
   awk '
     function fail_at(line, reason) {
       printf "ERROR\037%d\037%s\n", line, reason
@@ -212,6 +218,20 @@ toml_document() {
       printf "%s", out
     }
   ' "$file"
+}
+
+# toml_document_cache <file>
+# Parses <file> once for the resolution that calls it. The caller declares
+# `local toml_cache_file toml_cache_records toml_cache_status`, so the parse is
+# visible to every reader it calls, including subshells, and ends when the
+# caller returns: nothing outlives one resolution, and another file is always
+# parsed on its own.
+toml_document_cache() {
+  toml_cache_file=""
+  [ -f "$1" ] || return 0
+  toml_cache_records=$(toml_document "$1")
+  toml_cache_status=$?
+  toml_cache_file="$1"
 }
 
 # toml_validate <file>
@@ -1435,6 +1455,8 @@ verification_contract_json() {
   local capability_values capability_status capabilities
   local check_args=()
   local preparation='null' preparation_command="" preparation_timeout="" preparation_provider=""
+  local toml_cache_file toml_cache_records toml_cache_status
+  toml_document_cache "$config"
 
   if ! toml_error=$(toml_validate "$config"); then
     verification_invalid_contract_json \
@@ -2577,6 +2599,8 @@ default_ignore_globs() {
 
 state_globs_json() {
   local config="$1" sources ignores parsed status source_json ignore_json toml_error
+  local toml_cache_file toml_cache_records toml_cache_status
+  toml_document_cache "$config"
   if ! toml_error=$(toml_validate "$config"); then
     jq -cn --arg error "Invalid ${config}: ${toml_error}." \
       '{valid:false,error:$error,source_globs:[],ignore_globs:[]}'
@@ -4453,6 +4477,8 @@ progress_stale_reason() {
 
 visual_contract_from_config() {
   local config="$1" required artifacts freshness toml_error
+  local toml_cache_file toml_cache_records toml_cache_status
+  toml_document_cache "$config"
   if ! toml_error=$(toml_validate "$config"); then
     jq -cn --arg error "Invalid ${config}: ${toml_error}." '{valid:false,error:$error}'
     return 0
