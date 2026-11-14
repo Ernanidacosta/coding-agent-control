@@ -136,21 +136,12 @@ Instale uma release. O installer e o pacote vêm da mesma tag:
 
 ```bash
 # Dentro do diretório do seu projeto
-curl -fsSL https://raw.githubusercontent.com/Ernanidacosta/coding-agent-control/refs/tags/v1.0.1/install.sh | bash -s -- --ref=v1.0.1
+curl -fsSL https://raw.githubusercontent.com/Ernanidacosta/coding-agent-control/refs/tags/v1.0.2/install.sh | bash -s -- --ref=v1.0.2
 ```
 
 `--ref` aceita uma tag de release ou um SHA de commit completo (40 caracteres).
 Ele sempre instala esse archive do GitHub e falha em vez de cair para outro ref.
 Use uma tag de release como baseline de produção e dogfooding.
-
-### Release candidate
-
-Pre-release para dogfooding em canary, não é baseline de produção. Release
-candidates são imutáveis; uma release estável só vem depois do dogfood:
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/Ernanidacosta/coding-agent-control/refs/tags/v1.0.2-rc1/install.sh | bash -s -- --ref=v1.0.2-rc1
-```
 
 ### Desenvolvimento
 

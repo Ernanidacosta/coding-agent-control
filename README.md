@@ -89,21 +89,12 @@ Install a release. The installer and the package both come from the same tag:
 
 ```bash
 # From inside your project directory
-curl -fsSL https://raw.githubusercontent.com/Ernanidacosta/coding-agent-control/refs/tags/v1.0.1/install.sh | bash -s -- --ref=v1.0.1
+curl -fsSL https://raw.githubusercontent.com/Ernanidacosta/coding-agent-control/refs/tags/v1.0.2/install.sh | bash -s -- --ref=v1.0.2
 ```
 
 `--ref` takes a release tag or a full 40-character commit SHA. It always
 installs that GitHub archive and fails instead of falling back to another ref.
 Use a release tag for production and dogfooding baselines.
-
-### Release candidate
-
-Pre-release for canary dogfooding, not a production baseline. Release
-candidates are immutable; a stable release follows only after dogfood:
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/Ernanidacosta/coding-agent-control/refs/tags/v1.0.2-rc1/install.sh | bash -s -- --ref=v1.0.2-rc1
-```
 
 ### Development
 
