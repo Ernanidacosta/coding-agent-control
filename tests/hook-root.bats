@@ -77,8 +77,10 @@ required_lint() {
   printf '[verify]\nlint = "%s"\n\n[verify.policy]\nrequired = ["lint"]\n' "$1" > "$REPO_DIR/agent-md.toml"
 }
 
+# One sh -n per file: `sh -n a b` parses only a, and find's order is not
+# stable across filesystems, so a batched -exec made the outcome depend on it.
 broken_shell_at_root() {
-  required_lint "find . -name '*.sh' -not -path './.*' -exec sh -n {} +"
+  required_lint "find . -name '*.sh' -not -path './.*' -print0 | xargs -0 -n1 sh -n"
   printf 'if then\n' > "$REPO_DIR/broken.sh"
   printf 'echo ok\n' > "$REPO_DIR/src/pkg/fine.sh"
 }
