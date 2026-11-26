@@ -564,6 +564,32 @@ whichever stop event was invoked. Codex reuses the shared handlers through
 sends no `stop_hook_active` reads as a first attempt on every stop, which is
 the behavior it had before the contract existed.
 
+### Handing a blocked task to the human
+
+Ending a turn is not always a completion claim. When the agent cannot finish
+for a reason outside its authority, it hands the task back through a blocked
+checkpoint in `memory/progress.md`: `Status: blocked`, a `Task:`, at least one
+concrete item under `## Blockers`, and at least one item under `## Next`
+naming the pending work and what resumes it.
+
+| Finish attempt | Stop outcome |
+|---|---|
+| Required checks pass | finishes; only `done` additionally needs its Risk evidence |
+| Required checks fail (`active`, `verifying`, `done`, …) | blocks on every attempt until they pass |
+| Complete blocked checkpoint | handoff: one `STOP_HANDOFF_BLOCKED` advisory, silent on a retry, no verification |
+| `blocked` without a concrete blocker or next step | not a handoff: evaluated as above, and the block says what the checkpoint lacks (`STOP_HANDOFF_INCOMPLETE`) |
+
+A handoff claims nothing and proves nothing. It runs no verification and
+produces no completion, commit, Risk or receipt evidence, so repeated finish
+attempts on an unchanged checkpoint cost nothing. `verify.sh` and the
+pre-commit gate evaluate exactly as before, `done` still requires every gate,
+and setting `Status: active` resumes ordinary evaluation. The checkpoint is
+checked structurally; it cannot prove the blocker is real, which is why it
+only ends the turn. Both hosts share the decision in `stop-verify.sh`: Claude
+Code receives the advisory as `additionalContext` (one more turn, then silent),
+Codex as `systemMessage` through its Stop wrapper. The Codex path is covered
+by protocol fixtures; a real Codex session has not yet validated it.
+
 ## Install Options
 
 ```bash
