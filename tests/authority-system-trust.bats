@@ -1,6 +1,7 @@
 #!/usr/bin/env bats
 
 load authority-helpers
+load tls-fixture
 bats_require_minimum_version 1.5.0
 
 setup() {
@@ -19,17 +20,7 @@ teardown() {
 }
 
 make_certificate() {
-  openssl req -x509 -newkey rsa:2048 -nodes -days 1 \
-    -subj /CN=agent-md-local-test-ca -addext 'basicConstraints=critical,CA:TRUE' \
-    -addext 'keyUsage=critical,keyCertSign,cRLSign' \
-    -keyout "$FIXTURE/ca.key" -out "$FIXTURE/source/etc/trust/ca.pem" >/dev/null 2>&1
-  openssl req -newkey rsa:2048 -nodes -subj /CN=localhost \
-    -keyout "$FIXTURE/server.key" -out "$FIXTURE/server.csr" >/dev/null 2>&1
-  printf 'subjectAltName=DNS:localhost\n' > "$FIXTURE/server.ext"
-  openssl x509 -req -days 1 -in "$FIXTURE/server.csr" \
-    -CA "$FIXTURE/source/etc/trust/ca.pem" -CAkey "$FIXTURE/ca.key" \
-    -CAcreateserial -extfile "$FIXTURE/server.ext" \
-    -out "$FIXTURE/server.pem" >/dev/null 2>&1
+  tls_fixture_chain "$FIXTURE" agent-md-local-test-ca
   chmod 0444 "$FIXTURE/source/etc/trust/ca.pem"
   chmod 0555 "$FIXTURE/source/etc/trust"
 }
@@ -107,6 +98,32 @@ with socket.create_connection(('127.0.0.1', int(sys.argv[1])), timeout=3) as raw
         stream.sendall(b'x')
         assert stream.recv(2) == b'OK'
 PY
+}
+
+key_identifier() {
+  openssl x509 -in "$1" -noout -ext "$2" 2>/dev/null |
+    sed -n '2{s/^[[:space:]]*//;s/^keyid://;p;}'
+}
+
+@test "the integration harness generates its TLS chain with the shared fixture" {
+  harness="$BATS_TEST_DIRNAME/integration/local-issuer-boundary.bash"
+  # The generator runs inside the harness container, where the package is /package.
+  grep -qx '\. /package/tests/tls-fixture.bash' "$harness"
+  grep -q -- '-v "\$ROOT_DIR:/package:ro"' "$harness"
+  grep -qx 'tls_fixture_chain "\$TRUST_ROOT" integration-test-ca' "$harness"
+  ! grep -q 'openssl x509 -req' "$harness"
+}
+
+@test "the synthetic TLS chain declares its key identifiers and verifies under strict X.509" {
+  ca_ski=$(key_identifier "$FIXTURE/source/etc/trust/ca.pem" subjectKeyIdentifier)
+  leaf_ski=$(key_identifier "$FIXTURE/server.pem" subjectKeyIdentifier)
+  leaf_aki=$(key_identifier "$FIXTURE/server.pem" authorityKeyIdentifier)
+  [ -n "$ca_ski" ] || { echo 'CA lacks a Subject Key Identifier' >&2; return 1; }
+  [ -n "$leaf_ski" ] || { echo 'leaf lacks a Subject Key Identifier' >&2; return 1; }
+  [ "$leaf_aki" = "$ca_ski" ] || { printf 'leaf AKI <%s> does not name CA SKI <%s>\n' "$leaf_aki" "$ca_ski" >&2; return 1; }
+  run openssl verify -x509_strict -verify_hostname localhost \
+    -CAfile "$FIXTURE/source/etc/trust/ca.pem" "$FIXTURE/server.pem"
+  [ "$status" -eq 0 ] || { printf '%s\n' "$output" >&2; return 1; }
 }
 
 regular_ca() {

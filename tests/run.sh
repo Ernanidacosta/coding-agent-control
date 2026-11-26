@@ -12,6 +12,10 @@ set -u
 ROOT=$(cd "$(dirname "$0")/.." && pwd) || exit 1
 cd "$ROOT" || exit 1
 
+# A host Stop wrapper exports its identity for the shared handler, and the
+# verification that runs this suite inherits it. Tests set their own host.
+unset CODING_AGENT_CONTROL_HOST
+
 # Six, not four. The suite outgrew the required-check budget at four jobs once
 # the authority's crash and receipt coverage landed: a full run measured 360s at
 # four against a 360-second limit, and 322-333s at six across three repeated
