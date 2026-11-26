@@ -13,7 +13,7 @@ Risk: high
 
 ## Next
 
-- Baseline fixture recovery: TLS fixtures declare SKI/AKI through one shared generator (tests/tls-fixture.bash, also used by the integration harness) and the suite runner drops the invoking hook's host identity. Push the campaign branch for CI and exact-SHA independent attestation; local verify is not the recovery evidence.
+- Baseline fixture recovery: TLS fixtures declare SKI/AKI through one shared generator (tests/tls-fixture.bash, also used by the integration harness) and the suite runner drops the invoking hook's host identity. Push the campaign branch for CI and exact-SHA independent attestation; local verify is not the recovery evidence. CI on 75ea70a found the host-isolation probe defined with a leading test keyword inside a heredoc, which bats preprocesses (1125 collected, 1124 executed); the probe is now written with printf and checked under Bats 1.10 and 1.14.
 - Then, in order: blocked-task Stop lifecycle, destructive-command target integrity, pre-commit equivalence-or-refusal. Each with RED/GREEN on short synthetic fixtures; integrated verify before any release candidate. No tags, releases, merge to main or consumer change in this campaign until reviewed.
 
 ## Blockers
