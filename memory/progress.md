@@ -26,11 +26,14 @@ Risk: high
 - Destructive-command target integrity: a recursive deletion is allowed automatically only when its target is bound before it runs and recoverable from Git; otherwise SAFETY_TARGET_INDETERMINATE, _PROTECTED or _UNVERIFIED on both hosts. Codex PreToolUse wrapper now locates the policy from its own path (a session outside the worktree failed open). Classifier and wrapper are outside the authority mechanism manifest; consumers need reinstall.
 - Destructive-command target integrity committed as ed61be4.
 - Pre-commit equivalence-or-refusal: checks run only when the worktree is a checkout of the effective staged snapshot; otherwise PRECOMMIT_SNAPSHOT_DIVERGENT with no check run; reread before the decision (PRECOMMIT_SNAPSHOT_CHANGED). Five memory working-state files exempt. pre-commit only (outside the authority manifest); consumers need reinstall; partial staging now refused (behavior change for versioning review).
-- Next: CI for the last checkpoints, integrated full verify in series, exact-SHA attestation, trust/compatibility review, real Codex session validation. No tags, releases, merge to main or consumer change until reviewed.
+- Pre-commit equivalence committed as 3c9ce0a (CI 45918922387, 1156/1156, exact-SHA attestation pass). Integrated verify PASS (634.9 s), real install idempotent, independent reproductions GREEN, authority harness PASS=265. Real Claude session validated PreToolUse deny and Stop handoff. Real Codex session ran no project hook: Codex skips hook definitions without per-hook approval (hooks.state trusted_hash); CAC-004 candidate: doctor does not report that. No tags, releases, merge to main or consumer change until reviewed.
+
+- CAC-004 host hook activation: doctor reports, per host, discovered/pending approval/disabled/indeterminate/unverified/ready from what the host lets it read (Codex experimental app-server hooks/list, Claude documented disableAllHooks/allowManagedHooksOnly); never execution. Handoff checkpoint must be newer than later relevant work. Real Codex validation still needs owner approval of the fixture hooks.
 
 ## Blockers
 
-None
+- Owner: approve the Codex hook definitions in a disposable fixture (or a real project) so a real Codex session can validate CAC-001/003 parity.
+- Owner: decide CAC-004 scope, versioning (v1.0.3-rc1 versus a minor) and authority reapproval for enrolled consumers.
 
 ## Recently Completed
 

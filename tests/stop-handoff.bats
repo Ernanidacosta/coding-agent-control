@@ -111,6 +111,26 @@ hands_off() {
   done
 }
 
+@test "work changed after the checkpoint was written is not handed off until the checkpoint is refreshed" {
+  checkpoint
+  touch -d '2 minutes ago' memory/progress.md
+  mkdir -p src
+  echo 'export const later = 1' > src/later.ts
+  for host in claude codex; do
+    out=$("${host}_stop" true)
+    blocks_with "$out" VERIFY_REQUIRED_FAILED || { printf '%s: %s\n' "$host" "$out" >&2; return 1; }
+    blocks_with "$out" STOP_HANDOFF_INCOMPLETE
+    blocks_with "$out" 'src/later.ts'
+  done
+  [ "$(runs)" -eq 2 ]
+  checkpoint
+  for host in claude codex; do
+    out=$("${host}_stop" false)
+    hands_off "$out" || { printf '%s: %s\n' "$host" "$out" >&2; return 1; }
+  done
+  [ "$(runs)" -eq 2 ]
+}
+
 @test "done without evidence still blocks on every attempt on both hosts" {
   checkpoint "None" "None" done
   for host in claude codex; do

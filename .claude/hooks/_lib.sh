@@ -1389,15 +1389,36 @@ stop_handoff_checkpoint_json() {
     section == "Next" && /^- [^[:space:]]/ { pending++ }
     END { printf "%d\t%d\t%s\n", blockers, pending, task }
   ')
-  jq -cn --arg invalid "$invalid" --arg counts "$counts" '
+  jq -cn --arg invalid "$invalid" --arg counts "$counts" --arg later "$(stop_handoff_later_paths)" '
     ($counts | split("\t")) as $c |
     ($c[0] | tonumber) as $blockers | ($c[1] | tonumber) as $pending |
     ([ (if $invalid != "" then "progress.md is not valid: \($invalid)" else empty end),
        (if $blockers == 0 then "## Blockers names no concrete blocker" else empty end),
-       (if $pending == 0 then "## Next names no pending work or resume condition" else empty end)
+       (if $pending == 0 then "## Next names no pending work or resume condition" else empty end),
+       (if $later != "" then "relevant work changed after the checkpoint was written (\($later)); update progress.md to describe it" else empty end)
      ]) as $problems |
     {status:"blocked", handoff:($problems | length == 0), task:($c[2] // ""),
      blockers:$blockers, next:$pending, problems:$problems}'
+}
+
+# stop_handoff_later_paths — operationally relevant worktree changes newer than
+# memory/progress.md (at most three, comma separated). A checkpoint written
+# before later work does not describe the state it hands over. A policy that
+# cannot be read reports itself, so it never counts as current.
+stop_handoff_later_paths() {
+  local progress_mtime file file_mtime later=""
+  progress_mtime=$(stat_mtime memory/progress.md) || return 0
+  if ! load_effective_state_globs worktree >/dev/null 2>&1; then
+    printf 'state policy unreadable'
+    return 0
+  fi
+  while IFS= read -r file; do
+    [ -n "$file" ] && [ -e "$file" ] || continue
+    file_mtime=$(stat_mtime "$file") || continue
+    [ "$file_mtime" -gt "$progress_mtime" ] || continue
+    later="${later}${later:+, }${file}"
+  done < <(changed_files worktree | filter_effectively_relevant_files | head -n 50)
+  printf '%s' "$later" | cut -d, -f1-3
 }
 
 # stop_handoff_message <checkpoint-json>

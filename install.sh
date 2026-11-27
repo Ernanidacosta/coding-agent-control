@@ -1065,4 +1065,6 @@ if [ "$IN_GIT" -eq 1 ] && [ "$GITHOOKS" = "no" ] && [ "$HOOKS_PATH_STATE" = unse
 fi
 if echo " $AGENT_LIST " | grep -q " codex "; then
   echo "  ${NEXT_STEP}. (Codex) Confirm hook support with: codex features list"
+  echo "     Then open codex in this project, trust it, and review the hooks with /hooks:"
+  echo "     Codex skips untrusted or unreviewed hooks without a sign. Rerun doctor to check."
 fi

@@ -46,12 +46,12 @@ elif [ -d .codex ] || [ -d .cursor ] || [ -d .windsurf ]; then
   warn "AGENTS.md missing for an installed Codex/Cursor/Windsurf integration"
 fi
 if [ -f .claude/settings.json ]; then
-  ok "Claude settings present"
+  ok "Claude settings installed (files present)"
 elif [ -f CLAUDE.md ]; then
   warn "Claude settings missing for the installed Claude integration"
 fi
 if [ -f .codex/hooks.json ]; then
-  ok "Codex hooks present"
+  ok "Codex hooks installed (files present)"
 elif [ -d .codex ]; then
   warn "Codex hooks missing for the installed Codex integration"
 fi
@@ -63,6 +63,116 @@ if [ -f .codex/hooks.json ]; then
     fi
   done
 fi
+# --- Host hook activation --------------------------------------------------
+# Installed hooks are not operational hooks. Each host is asked only what it
+# answers read-only. Readiness here means the host's own prerequisites hold;
+# the doctor never reports execution, which only a real session observes.
+info() { printf 'info %s\n' "$*"; }
+
+# codex_hooks_listing <root> — the host's hooks/list answer for <root>, read
+# through the experimental app-server protocol, bounded and with no state
+# change. Prints nothing and fails when the listing cannot be read.
+codex_hooks_listing() {
+  local root="$1" dir pid writer result="" deadline
+  dir=$(mktemp -d "${TMPDIR:-/tmp}/agent-md-doctor.XXXXXX") || return 1
+  mkfifo "$dir/in" || { rmdir "$dir"; return 1; }
+  timeout 20 codex app-server < "$dir/in" > "$dir/out" 2>/dev/null &
+  pid=$!
+  # The request stream stays open until the answer arrives: the app-server
+  # stops at end of input before answering.
+  exec {writer}>"$dir/in"
+  printf '%s\n' \
+    '{"id":1,"method":"initialize","params":{"clientInfo":{"name":"coding-agent-control-doctor","version":"1"}}}' \
+    '{"method":"initialized"}' \
+    "$(jq -cn --arg c "$root" '{id:2,method:"hooks/list",params:{cwds:[$c]}}')" >&"$writer"
+  deadline=$((SECONDS + 20))
+  while :; do
+    result=$(jq -c 'select(.id == 2)' "$dir/out" 2>/dev/null | head -n 1)
+    [ -z "$result" ] && kill -0 "$pid" 2>/dev/null && [ "$SECONDS" -lt "$deadline" ] || break
+    sleep 0.05
+  done
+  exec {writer}>&-
+  kill "$pid" 2>/dev/null
+  wait "$pid" 2>/dev/null
+  rm -f "$dir/in" "$dir/out"
+  rmdir "$dir" 2>/dev/null
+  [ -n "$result" ] || return 1
+  printf '%s\n' "$result"
+}
+
+if [ -f .claude/settings.json ] || [ -f .codex/hooks.json ]; then
+  printf 'Host hook activation:\n'
+  HOST_ROOT=$(git rev-parse --show-toplevel 2>/dev/null || pwd)
+  HOST_ROOT=$(cd "$HOST_ROOT" && pwd -P)
+fi
+
+if [ -f .claude/settings.json ]; then
+  if [ "$(uname -s 2>/dev/null)" = Darwin ]; then
+    CLAUDE_MANAGED=${AGENT_MD_CLAUDE_MANAGED_SETTINGS:-/Library/Application Support/ClaudeCode/managed-settings.json}
+  else
+    CLAUDE_MANAGED=${AGENT_MD_CLAUDE_MANAGED_SETTINGS:-/etc/claude-code/managed-settings.json}
+  fi
+  CLAUDE_OFF=""
+  for CLAUDE_SETTINGS in .claude/settings.json .claude/settings.local.json \
+    "$HOME/.claude/settings.json" "$CLAUDE_MANAGED"; do
+    [ -f "$CLAUDE_SETTINGS" ] || continue
+    if jq -e '.disableAllHooks == true' "$CLAUDE_SETTINGS" >/dev/null 2>&1; then
+      CLAUDE_OFF="${CLAUDE_OFF}${CLAUDE_OFF:+; }disableAllHooks in ${CLAUDE_SETTINGS}"
+    fi
+  done
+  if [ -f "$CLAUDE_MANAGED" ] && jq -e '.allowManagedHooksOnly == true' "$CLAUDE_MANAGED" >/dev/null 2>&1; then
+    CLAUDE_OFF="${CLAUDE_OFF}${CLAUDE_OFF:+; }allowManagedHooksOnly in ${CLAUDE_MANAGED}"
+  fi
+  if [ -n "$CLAUDE_OFF" ]; then
+    warn "[WARNING HOST_HOOKS_DISABLED] Claude Code will not run the coding-agent-control hooks: ${CLAUDE_OFF}. Recovery: remove that setting, or ask the administrator who manages it."
+  else
+    info "[INFO HOST_HOOKS_UNVERIFIED] Claude Code: settings register the hooks and no settings file turns them off, but Claude Code offers no non-interactive hook listing, so their state and execution are not verified. Recovery: review them with /hooks and confirm in a session."
+  fi
+fi
+
+if [ -f .codex/hooks.json ]; then
+  CODEX_EXPECTED=$(jq -r '.hooks | keys[] | (.[0:1] | ascii_downcase) + .[1:]' .codex/hooks.json 2>/dev/null | sort -u)
+  CODEX_STATE=""
+  if ! have codex; then
+    info "[INFO HOST_HOOKS_UNVERIFIED] Codex: the CLI is not on PATH, so whether Codex discovered, approved and enabled these hooks is unknown. Recovery: in Codex, open /hooks for this project and review them."
+  elif ! CODEX_ANSWER=$(codex_hooks_listing "$HOST_ROOT") \
+    || ! CODEX_STATE=$(printf '%s' "$CODEX_ANSWER" | jq -ce \
+      --arg src "$HOST_ROOT/.codex/hooks.json" --arg expected "$CODEX_EXPECTED" '
+      (.result.data | if type == "array" then . else error("no data") end) as $data |
+      [$data[] | .hooks[]? | select(.sourcePath == $src)] as $mine |
+      ($expected | split("\n") | map(select(length > 0))) as $exp |
+      {missing: [$exp[] as $e | select(([$mine[] | select(.eventName == $e)] | length) == 0) | $e],
+       pending: [$mine[] | select(.trustStatus == "untrusted" or .trustStatus == "modified") | "\(.eventName) (\(.trustStatus))"],
+       disabled: [$mine[] | select(.enabled != true) | .eventName],
+       unknown: [$mine[] | select((.trustStatus | IN("trusted", "managed", "untrusted", "modified")) | not) | .eventName],
+       notes: [$data[] | (.warnings[]?, .errors[]?) | tostring]}' 2>/dev/null); then
+    warn "[WARNING HOST_HOOKS_INDETERMINATE] Codex: the host's hook listing (experimental app-server hooks/list) could not be read, so activation is unknown. Recovery: in Codex, open /hooks for this project and review them."
+  else
+    CODEX_LIST() { printf '%s' "$CODEX_STATE" | jq -r --arg k "$1" '.[$k] | join(", ")'; }
+    CODEX_READY=1
+    if [ -n "$(CODEX_LIST missing)" ]; then
+      CODEX_READY=0
+      warn "[WARNING HOST_HOOKS_NOT_DISCOVERED] Codex does not list these coding-agent-control hooks for this project, so they never run: $(CODEX_LIST missing). Codex loads project hooks only from a trusted project. Recovery: open codex in this project, trust it, then review the hooks with /hooks."
+    fi
+    if [ -n "$(CODEX_LIST pending)" ]; then
+      CODEX_READY=0
+      warn "[WARNING HOST_HOOKS_PENDING_APPROVAL] Codex has not approved these hooks, so it skips them (silently under codex exec): $(CODEX_LIST pending). Recovery: review and trust them with /hooks; any later change to a hook needs review again."
+    fi
+    if [ -n "$(CODEX_LIST disabled)" ]; then
+      CODEX_READY=0
+      warn "[WARNING HOST_HOOKS_DISABLED] Codex has these coding-agent-control hooks disabled: $(CODEX_LIST disabled). Recovery: enable them in /hooks."
+    fi
+    if [ -n "$(CODEX_LIST unknown)" ]; then
+      CODEX_READY=0
+      warn "[WARNING HOST_HOOKS_INDETERMINATE] Codex reports an unrecognized trust status for: $(CODEX_LIST unknown). Recovery: review them with /hooks."
+    fi
+    [ -z "$(CODEX_LIST notes)" ] || info "Codex hook listing notes: $(CODEX_LIST notes)"
+    if [ "$CODEX_READY" -eq 1 ]; then
+      ok "[INFO HOST_HOOKS_READY] Codex lists every coding-agent-control hook for this project as trusted and enabled (experimental app-server hooks/list). Activation prerequisites are confirmed; doctor does not observe execution."
+    fi
+  fi
+fi
+
 if [ -d .agent-md/bin ]; then ok "agent-md helpers present"; else warn ".agent-md/bin missing"; fi
 if [ -d memory ]; then ok "memory directory present"; else warn "memory directory missing"; fi
 

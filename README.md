@@ -476,6 +476,29 @@ the host's own sandbox and permission controls.
 Codex hooks are repo-local. Use `codex features list` to confirm hook
 support in the installed Codex version.
 
+Installed hooks are not operational hooks. A host can ignore them without a
+sign: Codex loads project hooks only from a trusted project, runs a hook only
+after its definition is reviewed and trusted in `/hooks` (again after any
+change), and skips the rest silently under `codex exec`; Claude Code skips
+them when `disableAllHooks` is set in any settings file or
+`allowManagedHooksOnly` in managed settings. `doctor.sh` reports what each host
+lets it read, under "Host hook activation":
+
+| Host answer | Doctor line |
+|---|---|
+| Codex lists every coding-agent-control hook as trusted and enabled | `HOST_HOOKS_READY` (prerequisites confirmed, execution not observed) |
+| Codex does not list a hook (project not trusted, hooks not loaded) | `HOST_HOOKS_NOT_DISCOVERED` |
+| Codex lists a hook as `untrusted` or `modified` | `HOST_HOOKS_PENDING_APPROVAL` |
+| Codex lists a hook as disabled, or a Claude setting turns hooks off | `HOST_HOOKS_DISABLED` |
+| The Codex listing cannot be read | `HOST_HOOKS_INDETERMINATE` |
+| No Codex CLI, or Claude Code (no non-interactive hook listing) | `HOST_HOOKS_UNVERIFIED` |
+
+These are diagnostics: they warn and leave the doctor's exit status alone.
+The Codex answer comes from the experimental app-server `hooks/list` method,
+queried read-only with a 20-second bound; an answer the doctor cannot parse is
+indeterminate, never ready. coding-agent-control never approves, enables or
+bypasses host hooks. Only a real session shows that a hook ran.
+
 Codex installs both `Stop` and `SubagentStop` through the same completion/state
 wrapper. Child termination retains its `SubagentStop` payload and retry flag;
 required failures block and advisory remains nonblocking. Reinstall with the
@@ -603,7 +626,10 @@ Ending a turn is not always a completion claim. When the agent cannot finish
 for a reason outside its authority, it hands the task back through a blocked
 checkpoint in `memory/progress.md`: `Status: blocked`, a `Task:`, at least one
 concrete item under `## Blockers`, and at least one item under `## Next`
-naming the pending work and what resumes it.
+naming the pending work and what resumes it. The checkpoint must also be
+current: relevant work changed after `progress.md` was last written means it
+no longer describes the state it hands over, so it is not a handoff until it
+is updated.
 
 | Finish attempt | Stop outcome |
 |---|---|
