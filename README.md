@@ -356,6 +356,9 @@ Stable codes currently emitted by controls are deliberately limited:
 |---|---|---|
 | `SAFETY_DESTRUCTIVE_COMMAND` | Safety | `fatal` |
 | `SAFETY_PATH_VIOLATION` | Safety | `fatal` |
+| `SAFETY_TARGET_INDETERMINATE` | Safety | `fatal` |
+| `SAFETY_TARGET_PROTECTED` | Safety | `fatal` |
+| `SAFETY_TARGET_UNVERIFIED` | Safety | `fatal` |
 | `CONFIG_INVALID` | Integrity | `error` |
 | `CONTROL_INVALID` | Integrity | `error` |
 | `CONTROL_BASELINE_REQUIRED` | Integrity or migration | `error` at completion; otherwise `warning` |
@@ -366,6 +369,8 @@ Stable codes currently emitted by controls are deliberately limited:
 | `STATE_TRANSITION_INVALID` | Quality | `warning` |
 | `STATE_GOTCHA_RULE_MISSING` | Integrity | `error` |
 | `STATE_GOTCHA_INVALID` | Integrity | `error` |
+| `STOP_HANDOFF_BLOCKED` | Diagnostic | `info` |
+| `STOP_HANDOFF_INCOMPLETE` | Quality | `warning` |
 | `VERIFY_REQUIRED_FAILED` | Integrity | `error` |
 | `VERIFY_OPTIONAL_FAILED` | Quality | `warning` |
 | `VERIFY_UNAVAILABLE` | Integrity or Quality | `error` when required; otherwise `warning` |
@@ -423,6 +428,34 @@ the coding agent to document and verify those choices when the project
 uses them; it does not pretend to enforce provider behavior from a rules
 file.
 
+### Recursive deletion targets
+
+A recursive `rm` is authorized automatically only when its target is bound
+before it runs and everything under it is recoverable from Git: tracked and
+unmodified, or absent. Both hosts share the decision in
+`.claude/hooks/block-destructive.sh`.
+
+| Target | Decision |
+|---|---|
+| Tracked and unmodified, or absent | allowed |
+| Untracked, ignored or modified data inside the worktree, the worktree itself, or `.git` | `SAFETY_TARGET_PROTECTED` |
+| Outside any Git worktree, temporary or not | `SAFETY_TARGET_UNVERIFIED` |
+| Relative to a directory an earlier step may not have entered, or depending on expansion, a subshell, a group, a heredoc, a nested shell or `xargs` | `SAFETY_TARGET_INDETERMINATE` |
+
+Relative targets resolve against the session directory the host reports
+(`cwd`), and a `cd` binds later commands only through an unbroken `&&` chain:
+`cd build && rm -rf out` is checked as `build/out`, while `cd build; rm -rf
+out` and `cd build || true; rm -rf out` are indeterminate. A trailing slash
+follows a symbolic link to the data it points to. The grammar is deliberately
+small: simple commands joined by `;`, `&&`, `||`, `|`, `&` or newlines, with
+quotes, escapes, comments and redirections. It errs toward refusal, so
+`cd x || exit; rm -rf y`, `set -e` scripts and heredocs that only mention a
+recursive `rm` are refused too, and generated directories such as
+`node_modules` are protected because they are ignored. The decision reads the
+filesystem as it is when the hook runs; it is not a sandbox and cannot follow
+what a program does once it starts. Non-recursive `rm` is out of scope. Keep
+the host's own sandbox and permission controls.
+
 ## Enforcement Matrix
 
 | Check | Class / severity | Claude Code | Codex | Cursor / Windsurf / Other |
@@ -442,6 +475,32 @@ file.
 
 Codex hooks are repo-local. Use `codex features list` to confirm hook
 support in the installed Codex version.
+
+Installed hooks are not operational hooks. A host can ignore them without a
+sign: Codex loads project hooks only from a trusted project, runs a hook only
+after its definition is reviewed and trusted in `/hooks` (again after any
+change), and skips the rest silently under `codex exec`; Claude Code skips
+them when `disableAllHooks` is set in any settings file or
+`allowManagedHooksOnly` in managed settings. `doctor.sh` reports what each host
+lets it read, under "Host hook activation":
+
+| Host answer | Doctor line |
+|---|---|
+| Codex lists every coding-agent-control handler as trusted and enabled | `HOST_HOOKS_READY` (prerequisites confirmed, execution not observed) |
+| Codex does not list a handler (project not trusted, hooks not loaded, handler changed or removed) | `HOST_HOOKS_NOT_DISCOVERED` |
+| Codex lists a hook as `untrusted` or `modified` | `HOST_HOOKS_PENDING_APPROVAL` |
+| Codex lists a hook as disabled, or a Claude setting turns hooks off | `HOST_HOOKS_DISABLED` |
+| The Codex listing cannot be read | `HOST_HOOKS_INDETERMINATE` |
+| No Codex CLI, or Claude Code (no non-interactive hook listing) | `HOST_HOOKS_UNVERIFIED` |
+
+These are diagnostics: they warn and leave the doctor's exit status alone.
+The Codex answer comes from the experimental app-server `hooks/list` method,
+queried read-only with a 20-second bound; an answer the doctor cannot parse is
+indeterminate, never ready. A handler counts only when its event, matcher and
+command are the ones `install.sh` writes, so a different handler on the same
+event, or an edited `.codex/hooks.json`, never reads as ready; the project's own
+handlers beside them are not judged. coding-agent-control never approves, enables or
+bypasses host hooks. Only a real session shows that a hook ran.
 
 Codex installs both `Stop` and `SubagentStop` through the same completion/state
 wrapper. Child termination retains its `SubagentStop` payload and retry flag;
@@ -563,6 +622,40 @@ whichever stop event was invoked. Codex reuses the shared handlers through
 `.codex/hooks/stop.sh`, which forwards the payload verbatim: a host that
 sends no `stop_hook_active` reads as a first attempt on every stop, which is
 the behavior it had before the contract existed.
+
+### Handing a blocked task to the human
+
+Ending a turn is not always a completion claim. When the agent cannot finish
+for a reason outside its authority, it hands the task back through a blocked
+checkpoint in `memory/progress.md`: `Status: blocked`, a `Task:`, at least one
+concrete item under `## Blockers`, and at least one item under `## Next`
+naming the pending work and what resumes it. The checkpoint must also be
+current as far as file times can show: an uncommitted, operationally relevant
+file modified after `progress.md` was last written (one-second resolution)
+means it no longer describes the state it hands over, so it is not a handoff
+until it is updated. This catches forgotten updates, not every stale
+checkpoint: committed work, deleted files, moves that keep a file's time and
+changes within the same second go unnoticed, and ignored or working-state
+paths never count. A missed case only lets a task that claims nothing stop
+without verification.
+
+| Finish attempt | Stop outcome |
+|---|---|
+| Required checks pass | finishes; only `done` additionally needs its Risk evidence |
+| Required checks fail (`active`, `verifying`, `done`, …) | blocks on every attempt until they pass |
+| Complete blocked checkpoint | handoff: one `STOP_HANDOFF_BLOCKED` advisory, silent on a retry, no verification |
+| `blocked` without a concrete blocker or next step | not a handoff: evaluated as above, and the block says what the checkpoint lacks (`STOP_HANDOFF_INCOMPLETE`) |
+
+A handoff claims nothing and proves nothing. It runs no verification and
+produces no completion, commit, Risk or receipt evidence, so repeated finish
+attempts on an unchanged checkpoint cost nothing. `verify.sh` and the
+pre-commit gate evaluate exactly as before, `done` still requires every gate,
+and setting `Status: active` resumes ordinary evaluation. The checkpoint is
+checked structurally; it cannot prove the blocker is real, which is why it
+only ends the turn. Both hosts share the decision in `stop-verify.sh`: Claude
+Code receives the advisory as `additionalContext` (one more turn, then silent),
+Codex as `systemMessage` through its Stop wrapper. The Codex path is covered
+by protocol fixtures; a real Codex session has not yet validated it.
 
 ## Install Options
 
@@ -1190,6 +1283,26 @@ A done claim is accepted only after all applicable state integrity, required ver
 Stop/pre-commit/`verify.sh` execute the current required contract freshly.
 coding-agent-control does not persist agent-authored `pass` lines in `progress.md`, which
 would duplicate CI and could not prove that a command actually ran.
+
+The pre-commit checks run in the worktree, so their results describe the
+commit only when the worktree is a checkout of the staged snapshot. Before any
+check, the gate compares the effective index (including an alternate
+`GIT_INDEX_FILE`, as in `git commit -o`) with the worktree using Git's own
+diff, so content, mode, additions, deletions and renames must match, and
+declared checkout conversions (eol, filters) count as equivalent. Untracked
+files that the state policy treats as relevant, and untracked `agent-md.toml`
+or `.project-control.toml`, also diverge; other untracked files are reported
+as `PRECOMMIT_SNAPSHOT_UNTRACKED`. The five working-state files in `memory/`
+are local by contract and never diverge. On divergence the gate refuses with
+`PRECOMMIT_SNAPSHOT_DIVERGENT` and runs no check; after the checks it rereads
+HEAD, the staged tree and the tracked worktree and refuses with
+`PRECOMMIT_SNAPSHOT_CHANGED` if any changed. It never stashes, stages or
+rewrites files. Partial staging that differs from the worktree is therefore
+refused rather than verified. Limits: two equal readings bound the observed
+instants only (a change reverted during the checks, or after the hook returns,
+is not seen); ignored files, dependencies and external inputs are the declared
+environment; checks still inherit Git's index selection. CI on the exact SHA
+remains the guarantee for the published object.
 
 The installer still never overwrites an existing `memory/progress.md`. On a
 fresh Git install it adds the five working files to `.git/info/exclude`, never

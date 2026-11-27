@@ -1360,6 +1360,95 @@ emit_stop_advisory() {
     '{hookSpecificOutput: {hookEventName: $e, additionalContext: $m}}'
 }
 
+# --- Blocked-task handoff ------------------------------------------------
+#
+# A finish attempt is not always a completion claim. A task the agent cannot
+# finish is handed to the human through a checkpoint in memory/progress.md:
+# Status: blocked, the Task, at least one concrete ## Blockers item and at
+# least one ## Next item naming the pending work and what resumes it. Such a
+# stop claims nothing, so it runs no verification and produces no completion,
+# commit, Risk or receipt evidence; done, verify.sh and pre-commit keep their
+# contracts. Anything short of that checkpoint is not a handoff and receives
+# the ordinary completion evaluation. The checks are structural only.
+
+# stop_handoff_checkpoint_json <progress-content>
+stop_handoff_checkpoint_json() {
+  local content="$1" progress_status invalid counts
+  progress_status=$(progress_status_from_content "$content")
+  if [ "$progress_status" != blocked ]; then
+    jq -cn --arg status "$progress_status" '{status:$status,handoff:false,problems:[]}'
+    return 0
+  fi
+  invalid=$(validate_progress_content "$content") && invalid=""
+  counts=$(printf '%s\n' "$content" | awk '
+    /^## / { section = substr($0, 4); next }
+    section == "Current" && /^Task:/ {
+      task = substr($0, 6); gsub(/^[[:space:]]+|[[:space:]]+$/, "", task)
+    }
+    section == "Blockers" && /^- [^[:space:]]/ { blockers++ }
+    section == "Next" && /^- [^[:space:]]/ { pending++ }
+    END { printf "%d\t%d\t%s\n", blockers, pending, task }
+  ')
+  jq -cn --arg invalid "$invalid" --arg counts "$counts" --arg later "$(stop_handoff_later_paths)" '
+    ($counts | split("\t")) as $c |
+    ($c[0] | tonumber) as $blockers | ($c[1] | tonumber) as $pending |
+    ([ (if $invalid != "" then "progress.md is not valid: \($invalid)" else empty end),
+       (if $blockers == 0 then "## Blockers names no concrete blocker" else empty end),
+       (if $pending == 0 then "## Next names no pending work or resume condition" else empty end),
+       (if $later != "" then "relevant work changed after the checkpoint was written (\($later)); update progress.md to describe it" else empty end)
+     ]) as $problems |
+    {status:"blocked", handoff:($problems | length == 0), task:($c[2] // ""),
+     blockers:$blockers, next:$pending, problems:$problems}'
+}
+
+# stop_handoff_later_paths — operationally relevant worktree changes newer than
+# memory/progress.md (the first three, comma separated). A checkpoint written
+# before later work does not describe the state it hands over. A policy that
+# cannot be read reports itself, so it never counts as current.
+# Ceiling: uncommitted, existing files whose mtime is later by at least one
+# second; committed work, deletions and time-preserving moves are not seen.
+# Revisit when: a stale handoff hides work a human then misses.
+stop_handoff_later_paths() {
+  local progress_mtime file file_mtime later="" found=0
+  progress_mtime=$(stat_mtime memory/progress.md) || return 0
+  if ! load_effective_state_globs worktree >/dev/null 2>&1; then
+    printf 'state policy unreadable'
+    return 0
+  fi
+  while IFS= read -r file; do
+    if [ -z "$file" ] || [ ! -e "$file" ]; then continue; fi
+    file_mtime=$(stat_mtime "$file") || continue
+    [ "$file_mtime" -gt "$progress_mtime" ] || continue
+    later="${later}${later:+, }${file}"
+    found=$((found + 1))
+    [ "$found" -lt 3 ] || break
+  done < <(changed_files worktree | filter_effectively_relevant_files)
+  printf '%s' "$later"
+}
+
+# stop_handoff_message <checkpoint-json>
+stop_handoff_message() {
+  local checkpoint="$1" message
+  message=$(printf '%s' "$checkpoint" | jq -r '
+    "Task \"\(.task)\" is handed to the human as blocked with \(.blockers) blocker(s) and \(.next) next step(s). This stop is not a completion claim: no verification ran, and no completion, commit, Risk or receipt evidence was produced."')
+  policy_human_message "$(policy_result_json pass info STOP_HANDOFF_BLOCKED "$message" \
+    "Resume by setting Status: active; completion still requires Status: done and passing verification." \
+    memory/progress.md)"
+}
+
+# stop_handoff_hint <checkpoint-json>
+# Explains, inside a completion block, why a blocked Status did not hand off.
+stop_handoff_hint() {
+  local checkpoint="$1" problems
+  [ "$(printf '%s' "$checkpoint" | jq -r '.status')" = blocked ] || return 0
+  problems=$(printf '%s' "$checkpoint" | jq -r '.problems | join("; ")')
+  [ -n "$problems" ] || return 0
+  printf '\n\n%s' "$(policy_human_message "$(policy_result_json warn warning STOP_HANDOFF_INCOMPLETE \
+    "Status is blocked, but this is not a handoff checkpoint: ${problems}." \
+    "To hand the task to the human, record the concrete blocker under ## Blockers and the pending work and resume condition under ## Next; otherwise keep working." \
+    memory/progress.md)")"
+}
+
 # detect_pm — prints the detected Node package manager based on lockfile,
 # or nothing. Order: pnpm > yarn > bun > npm > (nothing).
 detect_pm() {

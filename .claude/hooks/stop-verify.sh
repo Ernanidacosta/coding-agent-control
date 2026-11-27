@@ -16,8 +16,9 @@
 #   pass. `stop_hook_active=true` does NOT short-circuit a block; if the
 #   agent retries without fixing anything, we block again.
 #
-#   The only way out is to satisfy the required verification contract or
-#   fix invalid enforcement configuration.
+#   The only way to finish with a failing contract is to satisfy it, fix
+#   invalid enforcement configuration, or hand the task to the human through
+#   a complete blocked checkpoint, which claims nothing (see _lib.sh).
 #
 #   `stop_hook_active` does bound advisory context: a warning carries no
 #   decision to satisfy, so it is said once per stop cycle instead of on
@@ -39,6 +40,14 @@ if ! enter_project_root; then
   exit 0
 fi
 
+# A complete blocked checkpoint is a handoff, not a completion claim: it ends
+# the stop cycle without running the completion contract. See _lib.sh.
+HANDOFF=$(stop_handoff_checkpoint_json "$(state_file_snapshot memory/progress.md worktree)")
+if [ "$(printf '%s' "$HANDOFF" | jq -r '.handoff')" = true ]; then
+  emit_stop_advisory "$HOOK_INPUT" "$(stop_handoff_message "$HANDOFF")"
+  exit 0
+fi
+
 completion_evaluation_begin
 CONTEXT=$(completion_evaluation_context_json worktree host)
 HOST=${CODING_AGENT_CONTROL_HOST:-claude}
@@ -47,7 +56,7 @@ HOST_TIMEOUT=$(completion_host_timeout_seconds "$HOST" "" "$HOST_EVENT" 2>/dev/n
 HOST_PREFLIGHT=$(completion_host_preflight_json \
   "$(printf '%s' "$CONTEXT" | jq -c '.budget')" "$HOST" "$HOST_TIMEOUT" "$HOST_EVENT")
 if [ "$(printf '%s' "$HOST_PREFLIGHT" | jq -r '.valid')" != true ]; then
-  emit_stop_block "$(policy_human_message "$(printf '%s' "$HOST_PREFLIGHT" | jq -c '.result')")"
+  emit_stop_block "$(policy_human_message "$(printf '%s' "$HOST_PREFLIGHT" | jq -c '.result')")$(stop_handoff_hint "$HANDOFF")"
   exit 0
 fi
 
@@ -60,7 +69,7 @@ STATUS=$(printf '%s' "$SUMMARY" | jq -r '.status')
 
 if [ "$STATUS" = fail ]; then
   REASON=$(verification_summary_human "$SUMMARY" nonpass)
-  emit_stop_block "$REASON"
+  emit_stop_block "${REASON}$(stop_handoff_hint "$HANDOFF")"
   exit 0
 fi
 

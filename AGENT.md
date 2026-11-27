@@ -255,8 +255,6 @@ When the user approves a plan, execute without repeating it.
 
 ## 5. Execution Limits
 
-Agents degrade when they batch too much work without feedback.
-
 - Execute one small vertical slice at a time; do not mix broad refactors
   with feature work.
 - One behavioral objective per implementation slice. Twenty mechanical
@@ -499,9 +497,10 @@ retry-count escape or automatic release for a real blocking result.
 ### Blocking Enforcement And Advisory Context At Stop
 
 A Stop handler answers a finish attempt either with blocking enforcement, a
-`decision: "block"` naming the unsatisfied guarantee and the action that
-satisfies it, or with advisory context, a warning with no decision that never
-prevents finishing.
+`decision: "block"` naming the unsatisfied guarantee and how to satisfy it,
+or with advisory context, a warning with no decision that never
+prevents finishing. A blocked checkpoint (Task, Blockers, Next) hands off
+without verification.
 
 Claude Code sets `stop_hook_active` on a finish attempt that follows one a hook
 already answered in the same cycle. That field is

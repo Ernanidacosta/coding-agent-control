@@ -1210,17 +1210,8 @@ chmod 0755 "$TRUST_ROOT"
 mkdir -p "$TRUST_ROOT/source/etc/ssl/certs" "$TRUST_ROOT/source/etc/trust" \
   "$TRUST_ROOT/snapshot" "$TRUST_ROOT/scratch/tmp" "$TRUST_ROOT/scratch/shm"
 chown -R agentmd-runner:agentmd-runner "$TRUST_ROOT/scratch"
-openssl req -x509 -newkey rsa:2048 -nodes -days 1 \
-  -subj /CN=integration-test-ca -addext 'basicConstraints=critical,CA:TRUE' \
-  -addext 'keyUsage=critical,keyCertSign,cRLSign' \
-  -keyout "$TRUST_ROOT/ca.key" -out "$TRUST_ROOT/source/etc/trust/ca.pem" >/dev/null 2>&1
-openssl req -newkey rsa:2048 -nodes -subj /CN=localhost \
-  -keyout "$TRUST_ROOT/server.key" -out "$TRUST_ROOT/server.csr" >/dev/null 2>&1
-printf 'subjectAltName=DNS:localhost\n' > "$TRUST_ROOT/server.ext"
-openssl x509 -req -days 1 -in "$TRUST_ROOT/server.csr" \
-  -CA "$TRUST_ROOT/source/etc/trust/ca.pem" -CAkey "$TRUST_ROOT/ca.key" \
-  -CAcreateserial -extfile "$TRUST_ROOT/server.ext" \
-  -out "$TRUST_ROOT/server.pem" >/dev/null 2>&1
+. /package/tests/tls-fixture.bash
+tls_fixture_chain "$TRUST_ROOT" integration-test-ca
 openssl req -x509 -newkey rsa:2048 -nodes -days 1 \
   -subj /CN=localhost -addext 'subjectAltName=DNS:localhost' \
   -keyout "$TRUST_ROOT/untrusted.key" -out "$TRUST_ROOT/untrusted.pem" >/dev/null 2>&1

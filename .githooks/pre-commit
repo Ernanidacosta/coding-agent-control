@@ -48,6 +48,89 @@ else
   SHARED_STATE_AVAILABLE=0
 fi
 
+# --- Staged snapshot equivalence -------------------------------------------
+# The checks run in the worktree. Their results describe the commit only when
+# the worktree is a checkout of the staged snapshot, so that correspondence is
+# established first against the effective index (Git selects an alternate one
+# through GIT_INDEX_FILE) and the gate refuses explicitly when it cannot. The
+# comparison is Git's own index/worktree diff, so declared checkout
+# conversions (eol, filters) count as equivalent, exactly as in a fresh
+# checkout. The hook never stashes, stages or rewrites files.
+
+# The five working-state files are local by contract: the gate reads them from
+# the worktree on purpose and they are not check inputs, so they never diverge.
+snapshot_is_local_state() {
+  case "$1" in
+    memory/agents.md|memory/plan.md|memory/progress.md|memory/verify.md|memory/gotchas.md) return 0 ;;
+  esac
+  return 1
+}
+
+# snapshot_tracked_divergence — "<path>\t<reason>" for tracked divergence.
+snapshot_tracked_divergence() {
+  local out
+  if [ -n "$(git ls-files -u 2>/dev/null)" ]; then
+    printf '%s\t%s\n' "(index)" "unmerged entries"
+  fi
+  out=$(git diff --name-status --no-renames --no-ext-diff --ignore-submodules=none -- 2>/dev/null) \
+    || { printf '%s\t%s\n' "(worktree)" "Git cannot compare it with the index"; return 0; }
+  printf '%s\n' "$out" | awk -F '\t' 'NF >= 2 {
+    reason = ($1 == "D") ? "deleted in the worktree only" : (($1 == "T") ? "file type differs from the staged entry" : "content or mode differs from the staged entry")
+    print $2 "\t" reason
+  }' | while IFS=$'\t' read -r path reason; do
+    snapshot_is_local_state "$path" || printf '%s\t%s\n' "$path" "$reason"
+  done
+}
+
+# snapshot_untracked_divergence — relevant or policy untracked files diverge;
+# the rest is printed with a "~" prefix to be reported without refusing.
+snapshot_untracked_divergence() {
+  local file relevance_known=0
+  if [ "$SHARED_STATE_AVAILABLE" -eq 1 ] && load_effective_state_globs staged >/dev/null 2>&1; then
+    relevance_known=1
+  fi
+  while IFS= read -r file; do
+    [ -n "$file" ] || continue
+    snapshot_is_local_state "$file" && continue
+    case "$file" in
+      agent-md.toml|.project-control.toml)
+        printf '%s\t%s\n' "$file" "untracked policy or control file" ;;
+      *)
+        if [ "$relevance_known" -eq 0 ] || path_is_effectively_relevant "$file"; then
+          printf '%s\t%s\n' "$file" "untracked operationally relevant file"
+        else
+          printf '~%s\n' "$file"
+        fi ;;
+    esac
+  done < <(git ls-files --others --exclude-standard 2>/dev/null)
+}
+
+snapshot_report() {
+  printf '%s\n' "$1" | awk -F '\t' 'NF >= 2 && n < 10 { printf "  %s: %s\n", $1, $2; n++ } END { if (NR > 10) printf "  ... and %d more\n", NR - 10 }'
+}
+
+SNAPSHOT_HEAD=$(git rev-parse -q --verify HEAD 2>/dev/null || printf none)
+SNAPSHOT_TREE=$(git write-tree 2>/dev/null || true)
+SNAPSHOT_DIVERGENCE=$(snapshot_tracked_divergence)
+SNAPSHOT_UNTRACKED=$(snapshot_untracked_divergence)
+SNAPSHOT_REFUSED=$( { printf '%s\n' "$SNAPSHOT_DIVERGENCE"; printf '%s\n' "$SNAPSHOT_UNTRACKED" | grep -v '^~'; } | grep -v '^$' || true)
+if [ -z "$SNAPSHOT_TREE" ] || [ -n "$SNAPSHOT_REFUSED" ]; then
+  err "$(policy_message error PRECOMMIT_SNAPSHOT_DIVERGENT \
+    "The worktree is not a checkout of the staged snapshot, so checks run here would not describe what is being committed." \
+    "Stage the remaining changes, or set them aside yourself, then commit again; this hook does not modify files.")"
+  [ -n "$SNAPSHOT_TREE" ] || printf '  (index): the staged snapshot has no tree\n' >&2
+  snapshot_report "$SNAPSHOT_REFUSED" >&2
+  echo ""
+  err "Pre-commit BLOCKED. No check ran."
+  exit 1
+fi
+SNAPSHOT_EXTRA=$(printf '%s\n' "$SNAPSHOT_UNTRACKED" | sed -n 's/^~//p')
+if [ -n "$SNAPSHOT_EXTRA" ]; then
+  log "$(policy_message warning PRECOMMIT_SNAPSHOT_UNTRACKED \
+    "Untracked files outside the declared sources stay out of the commit; checks may still read them: $(printf '%s\n' "$SNAPSHOT_EXTRA" | head -n 5 | paste -sd ',' - | sed 's/,/, /g')." \
+    "Stage, ignore or remove them if a check depends on them.")"
+fi
+
 if [ "$SHARED_STATE_AVAILABLE" -eq 1 ]; then
   completion_evaluation_begin
   COMPLETION_CONTEXT=$(completion_evaluation_context_json staged standalone)
@@ -95,6 +178,23 @@ else
     error CONFIG_INVALID \
     "The shared state classifier is unavailable, so the state-integrity guarantee could not run." \
     "Reinstall agent-md before committing.")"
+  FAIL=1
+fi
+
+# --- The snapshot the checks saw is still the one being committed ----------
+# Two equal readings bound the observed instants only; the interval after this
+# hook returns belongs to Git, and CI on the exact SHA covers the object.
+SNAPSHOT_AFTER_HEAD=$(git rev-parse -q --verify HEAD 2>/dev/null || printf none)
+SNAPSHOT_AFTER_TREE=$(git write-tree 2>/dev/null || true)
+SNAPSHOT_AFTER_DIVERGENCE=$(snapshot_tracked_divergence)
+if [ "$SNAPSHOT_AFTER_HEAD" != "$SNAPSHOT_HEAD" ] || [ "$SNAPSHOT_AFTER_TREE" != "$SNAPSHOT_TREE" ] \
+  || [ -n "$SNAPSHOT_AFTER_DIVERGENCE" ]; then
+  err "$(policy_message error PRECOMMIT_SNAPSHOT_CHANGED \
+    "HEAD, the staged snapshot or the worktree changed while the checks ran, so their results describe a different state." \
+    "Find what changed it (often a check that writes tracked files or stages), restore the intended state, and commit again.")"
+  [ "$SNAPSHOT_AFTER_HEAD" = "$SNAPSHOT_HEAD" ] || printf '  HEAD: %s -> %s\n' "$SNAPSHOT_HEAD" "$SNAPSHOT_AFTER_HEAD" >&2
+  [ "$SNAPSHOT_AFTER_TREE" = "$SNAPSHOT_TREE" ] || printf '  (index): staged tree %s -> %s\n' "$SNAPSHOT_TREE" "${SNAPSHOT_AFTER_TREE:-none}" >&2
+  snapshot_report "$SNAPSHOT_AFTER_DIVERGENCE" >&2
   FAIL=1
 fi
 
