@@ -9,6 +9,12 @@ Risk: high
 ## Scope
 
 - tests/**
+- .claude/hooks/**
+- .codex/hooks/**
+- .githooks/**
+- AGENT.md
+- CLAUDE.md
+- README.md
 - memory/progress.md
 
 ## Next
@@ -16,7 +22,9 @@ Risk: high
 - Baseline fixture recovery: TLS fixtures declare SKI/AKI through one shared generator (tests/tls-fixture.bash, also used by the integration harness) and the suite runner drops the invoking hook's host identity. Push the campaign branch for CI and exact-SHA independent attestation; local verify is not the recovery evidence. CI on 75ea70a found the host-isolation probe defined with a leading test keyword inside a heredoc, which bats preprocesses (1125 collected, 1124 executed); the probe is now written with printf and checked under Bats 1.10 and 1.14. CI on 3991056 exposed a third pre-existing fixture defect: hook-root's lint batched files into one `sh -n`, which parses only its first argument, so the result followed find's directory order (passes on Ubuntu order, fails on Arch order); now one `sh -n` per file.
 - Baseline recovered formally: 288ad7a, CI 45912394441 (4 jobs, 1124/1124), exact-SHA independent attestation pass.
 - Blocked-task Stop lifecycle: a complete blocked checkpoint (Task, concrete Blockers item, Next item) hands off as STOP_HANDOFF_BLOCKED advisory with no verification; incomplete checkpoints keep the completion block plus STOP_HANDOFF_INCOMPLETE. Mechanism changed (_lib.sh, stop-verify.sh): enrolled local authorities need reapproval; receipts stale. Real Codex session validation pending.
-- Then destructive-command target integrity, pre-commit equivalence-or-refusal, integrated verify. No tags, releases, merge to main or consumer change until reviewed.
+- Blocked-task Stop lifecycle committed as cb224d3 (CI 45915057301).
+- Destructive-command target integrity: a recursive deletion is allowed automatically only when its target is bound before it runs and recoverable from Git; otherwise SAFETY_TARGET_INDETERMINATE, _PROTECTED or _UNVERIFIED on both hosts. Codex PreToolUse wrapper now locates the policy from its own path (a session outside the worktree failed open). Classifier and wrapper are outside the authority mechanism manifest; consumers need reinstall.
+- Then pre-commit equivalence-or-refusal, integrated verify. No tags, releases, merge to main or consumer change until reviewed.
 
 ## Blockers
 

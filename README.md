@@ -356,6 +356,9 @@ Stable codes currently emitted by controls are deliberately limited:
 |---|---|---|
 | `SAFETY_DESTRUCTIVE_COMMAND` | Safety | `fatal` |
 | `SAFETY_PATH_VIOLATION` | Safety | `fatal` |
+| `SAFETY_TARGET_INDETERMINATE` | Safety | `fatal` |
+| `SAFETY_TARGET_PROTECTED` | Safety | `fatal` |
+| `SAFETY_TARGET_UNVERIFIED` | Safety | `fatal` |
 | `CONFIG_INVALID` | Integrity | `error` |
 | `CONTROL_INVALID` | Integrity | `error` |
 | `CONTROL_BASELINE_REQUIRED` | Integrity or migration | `error` at completion; otherwise `warning` |
@@ -366,6 +369,8 @@ Stable codes currently emitted by controls are deliberately limited:
 | `STATE_TRANSITION_INVALID` | Quality | `warning` |
 | `STATE_GOTCHA_RULE_MISSING` | Integrity | `error` |
 | `STATE_GOTCHA_INVALID` | Integrity | `error` |
+| `STOP_HANDOFF_BLOCKED` | Diagnostic | `info` |
+| `STOP_HANDOFF_INCOMPLETE` | Quality | `warning` |
 | `VERIFY_REQUIRED_FAILED` | Integrity | `error` |
 | `VERIFY_OPTIONAL_FAILED` | Quality | `warning` |
 | `VERIFY_UNAVAILABLE` | Integrity or Quality | `error` when required; otherwise `warning` |
@@ -422,6 +427,34 @@ processing belong in the application or host runtime. `coding-agent-control` tel
 the coding agent to document and verify those choices when the project
 uses them; it does not pretend to enforce provider behavior from a rules
 file.
+
+### Recursive deletion targets
+
+A recursive `rm` is authorized automatically only when its target is bound
+before it runs and everything under it is recoverable from Git: tracked and
+unmodified, or absent. Both hosts share the decision in
+`.claude/hooks/block-destructive.sh`.
+
+| Target | Decision |
+|---|---|
+| Tracked and unmodified, or absent | allowed |
+| Untracked, ignored or modified data inside the worktree, the worktree itself, or `.git` | `SAFETY_TARGET_PROTECTED` |
+| Outside any Git worktree, temporary or not | `SAFETY_TARGET_UNVERIFIED` |
+| Relative to a directory an earlier step may not have entered, or depending on expansion, a subshell, a group, a heredoc, a nested shell or `xargs` | `SAFETY_TARGET_INDETERMINATE` |
+
+Relative targets resolve against the session directory the host reports
+(`cwd`), and a `cd` binds later commands only through an unbroken `&&` chain:
+`cd build && rm -rf out` is checked as `build/out`, while `cd build; rm -rf
+out` and `cd build || true; rm -rf out` are indeterminate. A trailing slash
+follows a symbolic link to the data it points to. The grammar is deliberately
+small: simple commands joined by `;`, `&&`, `||`, `|`, `&` or newlines, with
+quotes, escapes, comments and redirections. It errs toward refusal, so
+`cd x || exit; rm -rf y`, `set -e` scripts and heredocs that only mention a
+recursive `rm` are refused too, and generated directories such as
+`node_modules` are protected because they are ignored. The decision reads the
+filesystem as it is when the hook runs; it is not a sandbox and cannot follow
+what a program does once it starts. Non-recursive `rm` is out of scope. Keep
+the host's own sandbox and permission controls.
 
 ## Enforcement Matrix
 
