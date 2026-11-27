@@ -88,7 +88,13 @@ codex_hooks_listing() {
   deadline=$((SECONDS + 20))
   while :; do
     result=$(jq -c 'select(.id == 2)' "$dir/out" 2>/dev/null | head -n 1)
-    [ -z "$result" ] && kill -0 "$pid" 2>/dev/null && [ "$SECONDS" -lt "$deadline" ] || break
+    [ -z "$result" ] || break
+    # A server that answered and exited between the two reads still answered.
+    if ! kill -0 "$pid" 2>/dev/null; then
+      result=$(jq -c 'select(.id == 2)' "$dir/out" 2>/dev/null | head -n 1)
+      break
+    fi
+    [ "$SECONDS" -lt "$deadline" ] || break
     sleep 0.05
   done
   exec {writer}>&-

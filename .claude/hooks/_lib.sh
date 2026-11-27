@@ -1413,7 +1413,7 @@ stop_handoff_later_paths() {
     return 0
   fi
   while IFS= read -r file; do
-    [ -n "$file" ] && [ -e "$file" ] || continue
+    if [ -z "$file" ] || [ ! -e "$file" ]; then continue; fi
     file_mtime=$(stat_mtime "$file") || continue
     [ "$file_mtime" -gt "$progress_mtime" ] || continue
     later="${later}${later:+, }${file}"

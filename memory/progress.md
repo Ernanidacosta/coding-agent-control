@@ -2,8 +2,8 @@
 
 ## Current
 
-Status: active
-Task: CAC-CORRECTIVE-V1.0.3 — one corrective campaign: baseline fixture recovery, blocked-task Stop lifecycle, destructive-command target integrity, pre-commit equivalence-or-refusal; validated together before a single release candidate.
+Status: blocked
+Task: CAC-CORRECTIVE-V1.0.3 — one corrective campaign (baseline fixtures, CAC-001 destructive-command targets, CAC-002 pre-commit equivalence, CAC-003 blocked-task Stop lifecycle, CAC-004 host hook activation), validated together before a single release candidate.
 Risk: high
 
 ## Scope
@@ -12,6 +12,8 @@ Risk: high
 - .claude/hooks/**
 - .codex/hooks/**
 - .githooks/**
+- .agent-md/bin/**
+- install.sh
 - AGENT.md
 - CLAUDE.md
 - README.md
@@ -19,21 +21,13 @@ Risk: high
 
 ## Next
 
-- Baseline fixture recovery: TLS fixtures declare SKI/AKI through one shared generator (tests/tls-fixture.bash, also used by the integration harness) and the suite runner drops the invoking hook's host identity. Push the campaign branch for CI and exact-SHA independent attestation; local verify is not the recovery evidence. CI on 75ea70a found the host-isolation probe defined with a leading test keyword inside a heredoc, which bats preprocesses (1125 collected, 1124 executed); the probe is now written with printf and checked under Bats 1.10 and 1.14. CI on 3991056 exposed a third pre-existing fixture defect: hook-root's lint batched files into one `sh -n`, which parses only its first argument, so the result followed find's directory order (passes on Ubuntu order, fails on Arch order); now one `sh -n` per file.
-- Baseline recovered formally: 288ad7a, CI 45912394441 (4 jobs, 1124/1124), exact-SHA independent attestation pass.
-- Blocked-task Stop lifecycle: a complete blocked checkpoint (Task, concrete Blockers item, Next item) hands off as STOP_HANDOFF_BLOCKED advisory with no verification; incomplete checkpoints keep the completion block plus STOP_HANDOFF_INCOMPLETE. Mechanism changed (_lib.sh, stop-verify.sh): enrolled local authorities need reapproval; receipts stale. Real Codex session validation pending.
-- Blocked-task Stop lifecycle committed as cb224d3 (CI 45915057301).
-- Destructive-command target integrity: a recursive deletion is allowed automatically only when its target is bound before it runs and recoverable from Git; otherwise SAFETY_TARGET_INDETERMINATE, _PROTECTED or _UNVERIFIED on both hosts. Codex PreToolUse wrapper now locates the policy from its own path (a session outside the worktree failed open). Classifier and wrapper are outside the authority mechanism manifest; consumers need reinstall.
-- Destructive-command target integrity committed as ed61be4.
-- Pre-commit equivalence-or-refusal: checks run only when the worktree is a checkout of the effective staged snapshot; otherwise PRECOMMIT_SNAPSHOT_DIVERGENT with no check run; reread before the decision (PRECOMMIT_SNAPSHOT_CHANGED). Five memory working-state files exempt. pre-commit only (outside the authority manifest); consumers need reinstall; partial staging now refused (behavior change for versioning review).
-- Pre-commit equivalence committed as 3c9ce0a (CI 45918922387, 1156/1156, exact-SHA attestation pass). Integrated verify PASS (634.9 s), real install idempotent, independent reproductions GREEN, authority harness PASS=265. Real Claude session validated PreToolUse deny and Stop handoff. Real Codex session ran no project hook: Codex skips hook definitions without per-hook approval (hooks.state trusted_hash); CAC-004 candidate: doctor does not report that. No tags, releases, merge to main or consumer change until reviewed.
-
-- CAC-004 host hook activation: doctor reports, per host, discovered/pending approval/disabled/indeterminate/unverified/ready from what the host lets it read (Codex experimental app-server hooks/list, Claude documented disableAllHooks/allowManagedHooksOnly); never execution. Handoff checkpoint must be newer than later relevant work. Real Codex validation still needs owner approval of the fixture hooks.
+- Baseline recovered formally at 288ad7a; CAC-003 cb224d3, CAC-001 ed61be4, CAC-002 3c9ce0a (CI 1156/1156, exact-SHA attestation); CAC-004 da3cced plus the doctor listing race fix. Local verify on da3cced passed (601.6 s); CI on da3cced failed on shellcheck 0.9 SC2015 and a doctor listing race, both fixed and checked under Ubuntu shellcheck 0.9.0 and a 120-run stress.
+- After the owner approves the fixture's Codex hooks in /hooks: rerun doctor (expect HOST_HOOKS_READY), then real codex exec sessions for Stop execution, blocked handoff and the CAC-001 deny, all on synthetic data; then CI and exact-SHA attestation of the final HEAD.
 
 ## Blockers
 
-- Owner: approve the Codex hook definitions in a disposable fixture (or a real project) so a real Codex session can validate CAC-001/003 parity.
-- Owner: decide CAC-004 scope, versioning (v1.0.3-rc1 versus a minor) and authority reapproval for enrolled consumers.
+- The owner must trust the disposable fixture and review its four Codex hook definitions in /hooks; the agent may not approve host hooks, so real Codex validation of CAC-001/003/004 cannot proceed without it.
+- The owner decides versioning (patch versus minor) and authority reapproval for enrolled consumers.
 
 ## Recently Completed
 
