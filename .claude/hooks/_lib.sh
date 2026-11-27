@@ -1402,11 +1402,14 @@ stop_handoff_checkpoint_json() {
 }
 
 # stop_handoff_later_paths — operationally relevant worktree changes newer than
-# memory/progress.md (at most three, comma separated). A checkpoint written
+# memory/progress.md (the first three, comma separated). A checkpoint written
 # before later work does not describe the state it hands over. A policy that
 # cannot be read reports itself, so it never counts as current.
+# Ceiling: uncommitted, existing files whose mtime is later by at least one
+# second; committed work, deletions and time-preserving moves are not seen.
+# Revisit when: a stale handoff hides work a human then misses.
 stop_handoff_later_paths() {
-  local progress_mtime file file_mtime later=""
+  local progress_mtime file file_mtime later="" found=0
   progress_mtime=$(stat_mtime memory/progress.md) || return 0
   if ! load_effective_state_globs worktree >/dev/null 2>&1; then
     printf 'state policy unreadable'
@@ -1417,8 +1420,10 @@ stop_handoff_later_paths() {
     file_mtime=$(stat_mtime "$file") || continue
     [ "$file_mtime" -gt "$progress_mtime" ] || continue
     later="${later}${later:+, }${file}"
-  done < <(changed_files worktree | filter_effectively_relevant_files | head -n 50)
-  printf '%s' "$later" | cut -d, -f1-3
+    found=$((found + 1))
+    [ "$found" -lt 3 ] || break
+  done < <(changed_files worktree | filter_effectively_relevant_files)
+  printf '%s' "$later"
 }
 
 # stop_handoff_message <checkpoint-json>

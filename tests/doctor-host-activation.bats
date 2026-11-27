@@ -35,18 +35,26 @@ SH
   chmod +x "$BATS_TEST_TMPDIR/bin/codex"
 }
 
-# listing STATUS ENABLED [EVENTS] — hooks/list data for this project's CAC hooks.
+# listing STATUS ENABLED [EVENTS] — hooks/list data for this project's CAC
+# hooks, built from the package's own .codex/hooks.json so the doctor's notion
+# of those handlers cannot drift from what the installer writes.
 listing() {
   local status="$1" enabled="$2" events="${3-$CAC_EVENTS}"
-  jq -cn --arg root "$ROOT" --arg status "$status" --argjson enabled "$enabled" --arg events "$events" '
+  jq -c --arg root "$ROOT" --arg status "$status" --argjson enabled "$enabled" --arg events "$events" '
+    ($events | split(" ") | map(select(length > 0))) as $want |
     {data:[{cwd:$root, warnings:[], errors:[], hooks:(
       [{key:"/home/u/.codex/hooks.json:pre_tool_use:0:0", eventName:"preToolUse", source:"user",
-        sourcePath:"/home/u/.codex/hooks.json", command:"other", enabled:true, trustStatus:"trusted"}] +
-      [$events | split(" ")[] | select(length > 0) |
-        {key:($root + "/.codex/hooks.json:" + . + ":0:0"), eventName:., source:"project",
-         sourcePath:($root + "/.codex/hooks.json"),
-         command:("bash \"$(git rev-parse --show-toplevel)/.codex/hooks/" + (if . == "preToolUse" then "pre-tool-use.sh" elif . == "postToolUse" then "post-tool-use.sh" else "stop.sh" end) + "\""),
-         enabled:$enabled, trustStatus:$status}])}]}'
+        sourcePath:"/home/u/.codex/hooks.json", matcher:"Bash", command:"other", enabled:true, trustStatus:"trusted"}] +
+      [.hooks | to_entries[] | ((.key[0:1] | ascii_downcase) + .key[1:]) as $event |
+        select($want | index($event)) | .value[] | (.matcher // null) as $matcher | .hooks[] |
+        {key:($root + "/.codex/hooks.json:" + $event + ":0:0"), eventName:$event, source:"project",
+         sourcePath:($root + "/.codex/hooks.json"), matcher:$matcher, command:.command,
+         enabled:$enabled, trustStatus:$status}])}]}' "$BATS_TEST_DIRNAME/../.codex/hooks.json"
+}
+
+# with_hook LISTING JQ-UPDATE — LISTING with the project hooks rewritten.
+with_hook() {
+  printf '%s' "$1" | jq -c "(.data[0].hooks[] | select(.source == \"project\")) |= ($2)"
 }
 
 doctor() { run env PATH="$BATS_TEST_TMPDIR/bin:/usr/bin:/bin" bash .agent-md/bin/doctor.sh; }
@@ -142,4 +150,36 @@ doctor() { run env PATH="$BATS_TEST_TMPDIR/bin:/usr/bin:/bin" bash .agent-md/bin
   fake_codex "$(listing trusted true)"
   doctor
   [ "$status" -eq "$baseline" ]
+}
+
+@test "READY means the coding-agent-control handlers, not any trusted handler on the same event" {
+  fake_codex "$(with_hook "$(listing trusted true)" 'if .eventName == "stop" then .command = "true" else . end')"
+  doctor
+  [[ "$output" != *HOST_HOOKS_READY* ]] || { printf '%s\n' "$output" >&2; return 1; }
+  [[ "$output" == *"[WARNING HOST_HOOKS_NOT_DISCOVERED]"*stop* ]]
+}
+
+@test "a hook file that lost a coding-agent-control handler is not ready" {
+  jq 'del(.hooks.Stop)' .codex/hooks.json > hooks.tmp && mv hooks.tmp .codex/hooks.json
+  fake_codex "$(listing trusted true 'preToolUse postToolUse subagentStop')"
+  doctor
+  [[ "$output" != *HOST_HOOKS_READY* ]] || { printf '%s\n' "$output" >&2; return 1; }
+  [[ "$output" == *"[WARNING HOST_HOOKS_NOT_DISCOVERED]"*stop* ]]
+}
+
+@test "a coding-agent-control handler moved to another matcher is not ready" {
+  fake_codex "$(with_hook "$(listing trusted true)" 'if .eventName == "preToolUse" then .matcher = "Edit" else . end')"
+  doctor
+  [[ "$output" != *HOST_HOOKS_READY* ]] || { printf '%s\n' "$output" >&2; return 1; }
+  [[ "$output" == *"[WARNING HOST_HOOKS_NOT_DISCOVERED]"*preToolUse* ]]
+}
+
+@test "a project's own handler beside the coding-agent-control ones does not change their verdict" {
+  base=$(listing trusted true)
+  fake_codex "$(printf '%s' "$base" | jq -c --arg root "$ROOT" '.data[0].hooks += [{key:($root + "/.codex/hooks.json:stop:1:0"),
+    eventName:"stop", source:"project", sourcePath:($root + "/.codex/hooks.json"), matcher:null,
+    command:"./scripts/project-stop.sh", enabled:false, trustStatus:"untrusted"}]')"
+  doctor
+  [[ "$output" == *"[INFO HOST_HOOKS_READY]"* ]] || { printf '%s\n' "$output" >&2; return 1; }
+  [[ "$output" != *project-stop.sh* ]]
 }

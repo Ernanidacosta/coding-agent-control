@@ -186,3 +186,15 @@ hands_off() {
   done
   grep -qx 'risk = "high"' .project-control.toml
 }
+
+@test "later work is found however many earlier changes precede it" {
+  mkdir -p src
+  for i in $(seq -w 1 60); do echo "export const v$i = 1" > "src/a$i.ts"; done
+  touch -d '10 minutes ago' src/a*.ts
+  checkpoint
+  touch -d '2 minutes ago' memory/progress.md
+  echo 'export const later = 1' > src/zz-later.ts
+  out=$(claude_stop false)
+  blocks_with "$out" STOP_HANDOFF_INCOMPLETE || { printf '%s\n' "$out" >&2; return 1; }
+  blocks_with "$out" 'src/zz-later.ts'
+}

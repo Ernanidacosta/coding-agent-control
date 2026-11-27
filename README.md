@@ -486,8 +486,8 @@ lets it read, under "Host hook activation":
 
 | Host answer | Doctor line |
 |---|---|
-| Codex lists every coding-agent-control hook as trusted and enabled | `HOST_HOOKS_READY` (prerequisites confirmed, execution not observed) |
-| Codex does not list a hook (project not trusted, hooks not loaded) | `HOST_HOOKS_NOT_DISCOVERED` |
+| Codex lists every coding-agent-control handler as trusted and enabled | `HOST_HOOKS_READY` (prerequisites confirmed, execution not observed) |
+| Codex does not list a handler (project not trusted, hooks not loaded, handler changed or removed) | `HOST_HOOKS_NOT_DISCOVERED` |
 | Codex lists a hook as `untrusted` or `modified` | `HOST_HOOKS_PENDING_APPROVAL` |
 | Codex lists a hook as disabled, or a Claude setting turns hooks off | `HOST_HOOKS_DISABLED` |
 | The Codex listing cannot be read | `HOST_HOOKS_INDETERMINATE` |
@@ -496,7 +496,10 @@ lets it read, under "Host hook activation":
 These are diagnostics: they warn and leave the doctor's exit status alone.
 The Codex answer comes from the experimental app-server `hooks/list` method,
 queried read-only with a 20-second bound; an answer the doctor cannot parse is
-indeterminate, never ready. coding-agent-control never approves, enables or
+indeterminate, never ready. A handler counts only when its event, matcher and
+command are the ones `install.sh` writes, so a different handler on the same
+event, or an edited `.codex/hooks.json`, never reads as ready; the project's own
+handlers beside them are not judged. coding-agent-control never approves, enables or
 bypasses host hooks. Only a real session shows that a hook ran.
 
 Codex installs both `Stop` and `SubagentStop` through the same completion/state
@@ -627,9 +630,14 @@ for a reason outside its authority, it hands the task back through a blocked
 checkpoint in `memory/progress.md`: `Status: blocked`, a `Task:`, at least one
 concrete item under `## Blockers`, and at least one item under `## Next`
 naming the pending work and what resumes it. The checkpoint must also be
-current: relevant work changed after `progress.md` was last written means it
-no longer describes the state it hands over, so it is not a handoff until it
-is updated.
+current as far as file times can show: an uncommitted, operationally relevant
+file modified after `progress.md` was last written (one-second resolution)
+means it no longer describes the state it hands over, so it is not a handoff
+until it is updated. This catches forgotten updates, not every stale
+checkpoint: committed work, deleted files, moves that keep a file's time and
+changes within the same second go unnoticed, and ignored or working-state
+paths never count. A missed case only lets a task that claims nothing stop
+without verification.
 
 | Finish attempt | Stop outcome |
 |---|---|

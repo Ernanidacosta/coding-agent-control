@@ -137,17 +137,27 @@ if [ -f .claude/settings.json ]; then
 fi
 
 if [ -f .codex/hooks.json ]; then
-  CODEX_EXPECTED=$(jq -r '.hooks | keys[] | (.[0:1] | ascii_downcase) + .[1:]' .codex/hooks.json 2>/dev/null | sort -u)
+  # The handlers install.sh owns, by event, matcher and command: what the host
+  # must list for these hooks to run, whatever the installed file now says.
+  CODEX_CAC_HANDLERS=$(jq -cn '
+    def cac($script): "bash \"$(git rev-parse --show-toplevel)/.codex/hooks/" + $script + "\"";
+    [{event: "preToolUse", matcher: "Bash", command: cac("pre-tool-use.sh")},
+     {event: "postToolUse", matcher: "Bash", command: cac("post-tool-use.sh")},
+     {event: "subagentStop", matcher: null, command: cac("stop.sh")},
+     {event: "stop", matcher: null, command: cac("stop.sh")}]')
   CODEX_STATE=""
   if ! have codex; then
     info "[INFO HOST_HOOKS_UNVERIFIED] Codex: the CLI is not on PATH, so whether Codex discovered, approved and enabled these hooks is unknown. Recovery: in Codex, open /hooks for this project and review them."
   elif ! CODEX_ANSWER=$(codex_hooks_listing "$HOST_ROOT") \
     || ! CODEX_STATE=$(printf '%s' "$CODEX_ANSWER" | jq -ce \
-      --arg src "$HOST_ROOT/.codex/hooks.json" --arg expected "$CODEX_EXPECTED" '
+      --arg src "$HOST_ROOT/.codex/hooks.json" --argjson cac "$CODEX_CAC_HANDLERS" '
       (.result.data | if type == "array" then . else error("no data") end) as $data |
-      [$data[] | .hooks[]? | select(.sourcePath == $src)] as $mine |
-      ($expected | split("\n") | map(select(length > 0))) as $exp |
-      {missing: [$exp[] as $e | select(([$mine[] | select(.eventName == $e)] | length) == 0) | $e],
+      [$data[] | .hooks[]? | select(.sourcePath == $src)] as $listed |
+      [$cac[] as $h | {event: $h.event, found: [$listed[] |
+        select(.eventName == $h.event and .command == $h.command
+          and ((.matcher // "") | if . == "" then null else . end) == $h.matcher)]}] as $matched |
+      [$matched[].found[]] as $mine |
+      {missing: [$matched[] | select(.found | length == 0) | .event],
        pending: [$mine[] | select(.trustStatus == "untrusted" or .trustStatus == "modified") | "\(.eventName) (\(.trustStatus))"],
        disabled: [$mine[] | select(.enabled != true) | .eventName],
        unknown: [$mine[] | select((.trustStatus | IN("trusted", "managed", "untrusted", "modified")) | not) | .eventName],
@@ -158,7 +168,7 @@ if [ -f .codex/hooks.json ]; then
     CODEX_READY=1
     if [ -n "$(CODEX_LIST missing)" ]; then
       CODEX_READY=0
-      warn "[WARNING HOST_HOOKS_NOT_DISCOVERED] Codex does not list these coding-agent-control hooks for this project, so they never run: $(CODEX_LIST missing). Codex loads project hooks only from a trusted project. Recovery: open codex in this project, trust it, then review the hooks with /hooks."
+      warn "[WARNING HOST_HOOKS_NOT_DISCOVERED] Codex does not list these coding-agent-control hooks for this project, so they never run: $(CODEX_LIST missing). Codex loads project hooks only from a trusted project, and only the handlers .codex/hooks.json defines. Recovery: if .codex/hooks.json lost or changed these handlers, rerun install.sh; otherwise open codex in this project, trust it, then review the hooks with /hooks."
     fi
     if [ -n "$(CODEX_LIST pending)" ]; then
       CODEX_READY=0
@@ -174,7 +184,7 @@ if [ -f .codex/hooks.json ]; then
     fi
     [ -z "$(CODEX_LIST notes)" ] || info "Codex hook listing notes: $(CODEX_LIST notes)"
     if [ "$CODEX_READY" -eq 1 ]; then
-      ok "[INFO HOST_HOOKS_READY] Codex lists every coding-agent-control hook for this project as trusted and enabled (experimental app-server hooks/list). Activation prerequisites are confirmed; doctor does not observe execution."
+      ok "[INFO HOST_HOOKS_READY] Codex lists every coding-agent-control handler for this project, by event, matcher and command, as trusted and enabled (experimental app-server hooks/list). Activation prerequisites are confirmed; doctor does not observe execution."
     fi
   fi
 fi

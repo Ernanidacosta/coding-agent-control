@@ -2,7 +2,7 @@
 
 ## Current
 
-Status: blocked
+Status: active
 Task: CAC-CORRECTIVE-V1.0.3 — one corrective campaign (baseline fixtures, CAC-001 destructive-command targets, CAC-002 pre-commit equivalence, CAC-003 blocked-task Stop lifecycle, CAC-004 host hook activation), validated together before a single release candidate.
 Risk: high
 
@@ -21,13 +21,12 @@ Risk: high
 
 ## Next
 
-- Baseline recovered formally at 288ad7a; CAC-003 cb224d3, CAC-001 ed61be4, CAC-002 3c9ce0a (CI 1156/1156, exact-SHA attestation); CAC-004 da3cced plus the doctor listing race fix. Local verify on da3cced passed (601.6 s); CI on da3cced failed on shellcheck 0.9 SC2015 and a doctor listing race, both fixed and checked under Ubuntu shellcheck 0.9.0 and a 120-run stress.
-- After the owner approves the fixture's Codex hooks in /hooks: rerun doctor (expect HOST_HOOKS_READY), then real codex exec sessions for Stop execution, blocked handoff and the CAC-001 deny, all on synthetic data; then CI and exact-SHA attestation of the final HEAD.
+- Real Codex sessions on the owner-approved fixture passed at e35deec: A (Stop ran verification once), B (blocked handoff, Stop ran, 0 verifications, one turn), C (PreToolUse FATAL SAFETY_TARGET_INDETERMINATE, data intact).
+- Readiness corrections in one commit: doctor matches the CAC handlers by event, matcher and command; handoff currency scans every relevant change and the README states its ceiling. Then CI, exact-SHA attestation, verify.sh and the A/B/C rerun on the new SHA.
 
 ## Blockers
 
-- The owner must trust the disposable fixture and review its four Codex hook definitions in /hooks; the agent may not approve host hooks, so real Codex validation of CAC-001/003/004 cannot proceed without it.
-- The owner decides versioning (patch versus minor) and authority reapproval for enrolled consumers.
+None
 
 ## Recently Completed
 
