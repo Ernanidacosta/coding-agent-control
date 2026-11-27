@@ -24,7 +24,9 @@ Risk: high
 - Blocked-task Stop lifecycle: a complete blocked checkpoint (Task, concrete Blockers item, Next item) hands off as STOP_HANDOFF_BLOCKED advisory with no verification; incomplete checkpoints keep the completion block plus STOP_HANDOFF_INCOMPLETE. Mechanism changed (_lib.sh, stop-verify.sh): enrolled local authorities need reapproval; receipts stale. Real Codex session validation pending.
 - Blocked-task Stop lifecycle committed as cb224d3 (CI 45915057301).
 - Destructive-command target integrity: a recursive deletion is allowed automatically only when its target is bound before it runs and recoverable from Git; otherwise SAFETY_TARGET_INDETERMINATE, _PROTECTED or _UNVERIFIED on both hosts. Codex PreToolUse wrapper now locates the policy from its own path (a session outside the worktree failed open). Classifier and wrapper are outside the authority mechanism manifest; consumers need reinstall.
-- Then pre-commit equivalence-or-refusal, integrated verify. No tags, releases, merge to main or consumer change until reviewed.
+- Destructive-command target integrity committed as ed61be4.
+- Pre-commit equivalence-or-refusal: checks run only when the worktree is a checkout of the effective staged snapshot; otherwise PRECOMMIT_SNAPSHOT_DIVERGENT with no check run; reread before the decision (PRECOMMIT_SNAPSHOT_CHANGED). Five memory working-state files exempt. pre-commit only (outside the authority manifest); consumers need reinstall; partial staging now refused (behavior change for versioning review).
+- Next: CI for the last checkpoints, integrated full verify in series, exact-SHA attestation, trust/compatibility review, real Codex session validation. No tags, releases, merge to main or consumer change until reviewed.
 
 ## Blockers
 

@@ -1250,6 +1250,26 @@ Stop/pre-commit/`verify.sh` execute the current required contract freshly.
 coding-agent-control does not persist agent-authored `pass` lines in `progress.md`, which
 would duplicate CI and could not prove that a command actually ran.
 
+The pre-commit checks run in the worktree, so their results describe the
+commit only when the worktree is a checkout of the staged snapshot. Before any
+check, the gate compares the effective index (including an alternate
+`GIT_INDEX_FILE`, as in `git commit -o`) with the worktree using Git's own
+diff, so content, mode, additions, deletions and renames must match, and
+declared checkout conversions (eol, filters) count as equivalent. Untracked
+files that the state policy treats as relevant, and untracked `agent-md.toml`
+or `.project-control.toml`, also diverge; other untracked files are reported
+as `PRECOMMIT_SNAPSHOT_UNTRACKED`. The five working-state files in `memory/`
+are local by contract and never diverge. On divergence the gate refuses with
+`PRECOMMIT_SNAPSHOT_DIVERGENT` and runs no check; after the checks it rereads
+HEAD, the staged tree and the tracked worktree and refuses with
+`PRECOMMIT_SNAPSHOT_CHANGED` if any changed. It never stashes, stages or
+rewrites files. Partial staging that differs from the worktree is therefore
+refused rather than verified. Limits: two equal readings bound the observed
+instants only (a change reverted during the checks, or after the hook returns,
+is not seen); ignored files, dependencies and external inputs are the declared
+environment; checks still inherit Git's index selection. CI on the exact SHA
+remains the guarantee for the published object.
+
 The installer still never overwrites an existing `memory/progress.md`. On a
 fresh Git install it adds the five working files to `.git/info/exclude`, never
 to a committed ignore file and never to the index.
